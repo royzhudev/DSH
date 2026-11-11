@@ -1,0 +1,22 @@
+node_modules/
+dist/
+coverage/
+
+# Runtime data
+output/
+.work/
+.cache/
+materials/*
+!materials/.gitkeep
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+video-agent.config.json
+
+# Logs and editor files
+*.log
+.DS_Store
+.idea/
+.vscode/

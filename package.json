@@ -1,0 +1,44 @@
+{
+  "name": "video-agent",
+  "version": "0.1.0",
+  "description": "视频创作智能体 MVP：主题 → 脚本 → 素材 → 配音 → 剪辑 → 成片",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "bin": {
+    "video-agent": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "video-agent.config.example.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test --test-concurrency=1 \"test/**/*.test.ts\"",
+    "test:unit": "node --import tsx --test \"test/unit/*.test.ts\"",
+    "test:integration": "node --import tsx --test --test-concurrency=1 \"test/integration/*.test.ts\"",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "demo": "tsx scripts/demo.ts"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
+    "msedge-tts": "^2.1.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/busboy": "^1.5.4",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

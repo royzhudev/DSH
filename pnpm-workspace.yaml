@@ -1,0 +1,4 @@
+allowBuilds:
+  esbuild: true
+  ffmpeg-static: true
+  msedge-tts: true

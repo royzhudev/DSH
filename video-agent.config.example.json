@@ -1,0 +1,58 @@
+{
+  "outputDir": "./output",
+  "workDir": "./.work",
+  "libraryDir": "./materials",
+  "cacheDir": "./.cache",
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "crf": 20,
+    "preset": "veryfast",
+    "transition": "fade",
+    "transitionDurationSec": 0.2,
+    "minSegmentSec": 2.2,
+    "tailPaddingSec": 0.4
+  },
+  "script": {
+    "provider": "auto",
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "temperature": 0.7,
+    "targetDurationSec": 45,
+    "maxSegments": 6,
+    "timeoutMs": 120000,
+    "fallbackToOffline": true
+  },
+  "tts": {
+    "provider": "edge",
+    "voice": "zh-CN-XiaoxiaoNeural",
+    "rate": 1,
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "tts-1",
+    "timeoutMs": 120000,
+    "fallback": "silent",
+    "cache": true
+  },
+  "subtitles": {
+    "enabled": true,
+    "fontFamily": "Noto Sans CJK SC",
+    "fontSize": 72,
+    "maxCharsPerLine": 16,
+    "maxLines": 2,
+    "marginV": 260,
+    "primaryColor": "#FFFFFF",
+    "outlineColor": "#000000",
+    "outline": 3,
+    "shadow": 1,
+    "bold": true
+  },
+  "materials": {
+    "allowUnmatched": false
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "maxUploadBytes": 209715200
+  }
+}
