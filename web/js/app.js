@@ -387,7 +387,7 @@ async function renderCreate() {
               </label>
               <span class="hint">按配音时间轴自动对齐，同时导出 SRT</span>
               <label class="switch ${videoGenReady ? "" : "disabled"}" id="videogen-row" title="${videoGenReady ? "无匹配素材的分镜改用 AI 画面" : "未配置 AI 画面模型，可在设置中启用"}">
-                <input type="checkbox" id="videogen" ${videoGenReady ? "" : "disabled"} />
+                <input type="checkbox" id="videogen" ${videoGenReady ? "checked" : "disabled"} />
                 <span class="track"></span>
                 <span>AI 生成画面</span>
               </label>
