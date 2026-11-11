@@ -8,7 +8,7 @@ import { startServer } from "./server/server.js";
 import { AppError, toErrorMessage } from "./errors.js";
 import type { AppConfig } from "./types.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const HELP = `视频创作智能体 MVP ${VERSION}
 
@@ -16,7 +16,7 @@ const HELP = `视频创作智能体 MVP ${VERSION}
   video-agent create --topic "主题" [选项]
   video-agent materials add <文件...> [--tags 城市,夜景]
   video-agent materials list [--json]
-  video-agent serve [--port 8787] [--host 127.0.0.1]
+  video-agent serve [--port 8787] [--host 127.0.0.1]   # 启动网页控制台与 API
 
 create 选项：
   -t, --topic <主题>     视频主题（必填）
@@ -160,7 +160,8 @@ async function commandServe(values: Record<string, string | boolean | undefined>
   const config = buildConfig(values);
   const app = await startServer(config, logger);
   process.stdout.write(`video-agent 服务已启动：${app.url}\n`);
-  process.stdout.write(`接口说明：${app.url}/\n`);
+  process.stdout.write(`网页控制台：${app.url}/\n`);
+  process.stdout.write(`接口说明：${app.url}/api\n`);
   const shutdown = async () => {
     process.stdout.write("\n正在关闭服务…\n");
     await app.close();

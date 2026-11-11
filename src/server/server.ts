@@ -3,22 +3,71 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import Busboy from "busboy";
-import type { AppConfig } from "../types.js";
+import type {
+  AppConfig,
+  DouyinToken,
+  JobOptions,
+  ScriptProviderName,
+  TtsProviderName,
+} from "../types.js";
 import type { Logger } from "../logger.js";
 import { AppError, toErrorMessage } from "../errors.js";
 import { MaterialLibrary, materialType } from "../materials/library.js";
-import { isInside, sanitizeFilename } from "../util/fs.js";
+import { materialTagPool } from "../materials/match.js";
+import { isInside, sanitizeFilename, sha256 } from "../util/fs.js";
+import { createScriptProvider } from "../script/index.js";
+import { createTtsProvider } from "../tts/index.js";
 import { JobManager } from "./jobs.js";
+import { SettingsStore, effectiveRedirectUri } from "./settings.js";
+import { DouyinClient } from "../publish/douyin.js";
+import { DouyinTokenStore } from "../publish/token-store.js";
+import { PublishStore } from "../publish/store.js";
 
-const API_VERSION = "0.1.0";
+const API_VERSION = "0.2.0";
 const JSON_BODY_LIMIT = 1024 * 1024;
+const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
+const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+export interface ServerDeps {
+  fetchImpl?: typeof fetch;
+  webDir?: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}
 
 export interface VideoServer {
   server: http.Server;
   jobs: JobManager;
   library: MaterialLibrary;
+  settings: SettingsStore;
+  douyin: DouyinClient;
+  tokens: DouyinTokenStore;
+  publishes: PublishStore;
   close(): Promise<void>;
 }
 
@@ -27,10 +76,31 @@ export interface StartedServer extends VideoServer {
   url: string;
 }
 
+interface ServerContext {
+  config: AppConfig;
+  logger: Logger;
+  jobs: JobManager;
+  library: MaterialLibrary;
+  settings: SettingsStore;
+  douyin: DouyinClient;
+  tokens: DouyinTokenStore;
+  publishes: PublishStore;
+  webDir: string;
+  pendingStates: Map<string, number>;
+}
+
+function securityHeaders(): Record<string, string> {
+  return {
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  };
+}
+
 function sendJson(res: http.ServerResponse, status: number, value: unknown): void {
   if (res.headersSent) return;
   const body = `${JSON.stringify(value, null, 2)}\n`;
   res.writeHead(status, {
+    ...securityHeaders(),
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",
@@ -41,11 +111,16 @@ function sendJson(res: http.ServerResponse, status: number, value: unknown): voi
 function sendText(res: http.ServerResponse, status: number, text: string, contentType: string): void {
   if (res.headersSent) return;
   res.writeHead(status, {
+    ...securityHeaders(),
     "content-type": contentType,
     "content-length": Buffer.byteLength(text),
     "cache-control": "no-store",
   });
   res.end(text);
+}
+
+function contentTypeFor(file: string): string {
+  return CONTENT_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
 }
 
 async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -91,7 +166,7 @@ async function serveFile(
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
     if (!match) {
-      res.writeHead(416, { "content-range": `bytes */${stat.size}` });
+      res.writeHead(416, { ...securityHeaders(), "content-range": `bytes */${stat.size}` });
       res.end();
       return;
     }
@@ -108,12 +183,13 @@ async function serveFile(
       end = endRaw === "" ? stat.size - 1 : Number(endRaw);
     }
     if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= stat.size) {
-      res.writeHead(416, { "content-range": `bytes */${stat.size}` });
+      res.writeHead(416, { ...securityHeaders(), "content-range": `bytes */${stat.size}` });
       res.end();
       return;
     }
     end = Math.min(end, stat.size - 1);
     res.writeHead(206, {
+      ...securityHeaders(),
       "content-type": contentType,
       "content-length": end - start + 1,
       "content-range": `bytes ${start}-${end}/${stat.size}`,
@@ -129,6 +205,7 @@ async function serveFile(
   }
 
   res.writeHead(200, {
+    ...securityHeaders(),
     "content-type": contentType,
     "content-length": stat.size,
     "accept-ranges": "bytes",
@@ -139,6 +216,59 @@ async function serveFile(
     return;
   }
   await pipeline(fs.createReadStream(file), res).catch(() => undefined);
+}
+
+function requireTopic(value: unknown): string {
+  const topic = typeof value === "string" ? value.trim() : "";
+  if (!topic) throw new AppError("topic 不能为空", { code: "INVALID_TOPIC", status: 400 });
+  if (topic.length > 200) {
+    throw new AppError("topic 不能超过 200 个字符", { code: "INVALID_TOPIC", status: 400 });
+  }
+  return topic;
+}
+
+function optionalNumber(body: Record<string, unknown>, key: string, label: string): number | undefined {
+  const value = body[key];
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new AppError(`${label}必须是数字`, { code: "INVALID_OPTIONS", status: 400 });
+  }
+  return parsed;
+}
+
+function optionalBoolean(body: Record<string, unknown>, key: string, label: string): boolean | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") {
+    throw new AppError(`${label}必须是布尔值`, { code: "INVALID_OPTIONS", status: 400 });
+  }
+  return value;
+}
+
+function parseJobOptions(body: Record<string, unknown>): JobOptions {
+  const options: JobOptions = {};
+  const targetDurationSec = optionalNumber(body, "targetDurationSec", "目标时长");
+  if (targetDurationSec !== undefined) options.targetDurationSec = targetDurationSec;
+  const maxSegments = optionalNumber(body, "maxSegments", "分镜数量");
+  if (maxSegments !== undefined) options.maxSegments = maxSegments;
+  if (body.ttsProvider !== undefined && body.ttsProvider !== null) {
+    if (!TTS_PROVIDERS.includes(body.ttsProvider as TtsProviderName)) {
+      throw new AppError(`不支持的配音供应商：${String(body.ttsProvider)}`, {
+        code: "INVALID_OPTIONS",
+        status: 400,
+      });
+    }
+    options.ttsProvider = body.ttsProvider as TtsProviderName;
+  }
+  if (typeof body.voice === "string") options.voice = body.voice;
+  const subtitlesEnabled = optionalBoolean(body, "subtitlesEnabled", "字幕开关");
+  if (subtitlesEnabled !== undefined) options.subtitlesEnabled = subtitlesEnabled;
+  const videoGenEnabled = optionalBoolean(body, "videoGenEnabled", "AI 画面开关");
+  if (videoGenEnabled !== undefined) options.videoGenEnabled = videoGenEnabled;
+  const allowUnmatched = optionalBoolean(body, "allowUnmatched", "素材兜底开关");
+  if (allowUnmatched !== undefined) options.allowUnmatched = allowUnmatched;
+  return options;
 }
 
 async function handleUpload(
@@ -166,6 +296,7 @@ async function handleUpload(
   try {
     const busboy = Busboy({
       headers: req.headers,
+      defParamCharset: "utf8",
       limits: {
         fileSize: config.server.maxUploadBytes,
         files: 1,
@@ -231,95 +362,337 @@ async function handleUpload(
       tags,
       title: fields.title?.trim() || originalName.replace(/\.[^.]+$/, ""),
     });
-    sendJson(res, 201, { material });
+    sendJson(res, 201, { material: { ...material, url: `/api/materials/${material.id}/file` } });
   } finally {
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
+function apiIndex(config: AppConfig): Record<string, unknown> {
+  return {
+    name: "video-agent",
+    version: API_VERSION,
+    description: "视频创作智能体：主题 → 脚本 → 素材/AI 画面 → 配音 → 剪辑 → 成片",
+    web: "/",
+    endpoints: {
+      settings: "GET/PUT /api/settings",
+      testSettings: "POST /api/settings/test {kind: script|tts}",
+      createVideo: "POST /api/videos {topic, targetDurationSec?, maxSegments?, voice?, ...}",
+      listVideos: "GET /api/videos",
+      videoStatus: "GET /api/videos/:id",
+      videoFile: "GET /api/videos/:id/video",
+      videoPoster: "GET /api/videos/:id/poster",
+      subtitles: "GET /api/videos/:id/subtitles",
+      generateScript: "POST /api/scripts/generate {topic}",
+      listMaterials: "GET /api/materials",
+      uploadMaterial: "POST /api/materials (multipart: file, tags?, title?)",
+      materialFile: "GET /api/materials/:id/file",
+      deleteMaterial: "DELETE /api/materials/:id",
+      douyinStatus: "GET /api/douyin/status",
+      douyinAuthorize: "GET /api/douyin/authorize",
+      douyinCallback: "GET /api/douyin/callback",
+      publish: "POST /api/videos/:id/publish {text?, coverTsp?}",
+      publishes: "GET /api/publishes",
+    },
+    config: {
+      scriptProvider: config.script.provider,
+      ttsProvider: config.tts.provider,
+      videoGenProvider: config.videoGen.provider,
+      douyinConfigured: Boolean(config.douyin.clientKey && config.douyin.clientSecret),
+    },
+  };
+}
+
+async function handleSettingsTest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const kind = body.kind;
+  if (kind === "script") {
+    const config = structuredClone(ctx.config);
+    const provider = createScriptProvider(config, ctx.logger);
+    const materials = await ctx.library.list();
+    const script = await provider.generate(
+      {
+        topic: "连接测试：一杯手冲咖啡",
+        targetDurationSec: 10,
+        maxSegments: 2,
+        availableTags: materialTagPool(materials),
+      },
+      AbortSignal.timeout(Math.min(config.script.timeoutMs, 60_000)),
+    );
+    sendJson(res, 200, {
+      ok: true,
+      kind,
+      provider: script.provider,
+      title: script.title,
+      segments: script.segments.length,
+    });
+    return;
+  }
+  if (kind === "tts") {
+    const config = structuredClone(ctx.config);
+    const provider = createTtsProvider(config, config.cacheDir, ctx.logger);
+    const text = "你好，这是一段配音测试。";
+    const result = await provider.synthesize(
+      { text, cacheKey: `settings-test-${sha256(`${config.tts.provider}|${config.tts.voice}|${text}`).slice(0, 20)}` },
+      AbortSignal.timeout(Math.min(config.tts.timeoutMs, 60_000)),
+    );
+    sendJson(res, 200, {
+      ok: true,
+      kind,
+      provider: result.provider,
+      voice: result.voice,
+      durationSec: result.durationSec,
+      cached: result.cached,
+    });
+    return;
+  }
+  throw new AppError("kind 只能是 script 或 tts", { code: "INVALID_OPTIONS", status: 400 });
+}
+
+async function handleGenerateScript(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const topic = requireTopic(body.topic);
+  const config = structuredClone(ctx.config);
+  const targetDurationSec = optionalNumber(body, "targetDurationSec", "目标时长");
+  const maxSegments = optionalNumber(body, "maxSegments", "分镜数量");
+  if (targetDurationSec !== undefined) config.script.targetDurationSec = targetDurationSec;
+  if (maxSegments !== undefined) config.script.maxSegments = maxSegments;
+  if (body.provider !== undefined && body.provider !== null) {
+    if (!SCRIPT_PROVIDERS.includes(body.provider as ScriptProviderName)) {
+      throw new AppError(`不支持的脚本供应商：${String(body.provider)}`, {
+        code: "INVALID_OPTIONS",
+        status: 400,
+      });
+    }
+    config.script.provider = body.provider as ScriptProviderName;
+  }
+  if (config.script.provider === "openai" && !config.script.apiKey) {
+    throw new AppError("脚本供应商为 openai 但未配置 API Key", {
+      code: "CONFIG_MISSING_API_KEY",
+      status: 400,
+    });
+  }
+  if (config.script.targetDurationSec < 5 || config.script.targetDurationSec > 600) {
+    throw new AppError("目标时长必须在 5 到 600 秒之间", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  if (config.script.maxSegments < 2 || config.script.maxSegments > 20) {
+    throw new AppError("分镜数量必须在 2 到 20 之间", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  const materials = await ctx.library.list();
+  const provider = createScriptProvider(config, ctx.logger);
+  const script = await provider.generate(
+    {
+      topic,
+      targetDurationSec: config.script.targetDurationSec,
+      maxSegments: config.script.maxSegments,
+      availableTags: materialTagPool(materials),
+    },
+    AbortSignal.timeout(Math.min(config.script.timeoutMs, 120_000)),
+  );
+  sendJson(res, 200, {
+    script,
+    provider: script.provider,
+    targetDurationSec: config.script.targetDurationSec,
+    maxSegments: config.script.maxSegments,
+    availableTags: materialTagPool(materials),
+  });
+}
+
+function douyinStatus(ctx: ServerContext, token: DouyinToken | null): Record<string, unknown> {
+  return {
+    configured: ctx.douyin.configured,
+    authorized: Boolean(token),
+    redirectUri: effectiveRedirectUri(ctx.config),
+    scope: ctx.config.douyin.scope,
+    token: token
+      ? {
+          openId: token.openId,
+          nickname: token.nickname,
+          avatar: token.avatar,
+          scope: token.scope,
+          expiresAt: token.expiresAt,
+          expired: Date.parse(token.expiresAt) <= Date.now(),
+        }
+      : null,
+  };
+}
+
+async function handlePublish(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+  jobId: string,
+): Promise<void> {
+  const record = ctx.jobs.get(jobId);
+  if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+  if (record.state !== "succeeded" || !record.result) {
+    throw new AppError("成片尚未生成，无法发布", { code: "JOB_NOT_READY", status: 409 });
+  }
+  const body = await readJsonBody(req);
+  const text = typeof body.text === "string" && body.text.trim() ? body.text.trim() : record.topic;
+  const coverTsp = optionalNumber(body, "coverTsp", "封面时间戳");
+  if (coverTsp !== undefined && (coverTsp < 0 || coverTsp > record.result.durationSec * 1000)) {
+    throw new AppError("封面时间戳超出成片时长", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  let token = await ctx.tokens.read();
+  if (!token) {
+    throw new AppError("请先完成抖音授权", { code: "DOUYIN_NOT_AUTHORIZED", status: 401 });
+  }
+  token = await ctx.douyin.ensureFresh(token);
+  await ctx.tokens.write(token);
+  const result = await ctx.douyin.publish(
+    token,
+    { id: record.id, topic: record.topic, videoPath: record.result.videoPath },
+    { text, coverTsp },
+  );
+  await ctx.publishes.add(result.record);
+  sendJson(res, 201, { publish: result.record });
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  config: AppConfig,
-  logger: Logger,
-  jobs: JobManager,
-  library: MaterialLibrary,
+  ctx: ServerContext,
 ): Promise<void> {
   const method = req.method ?? "GET";
   const url = new URL(req.url ?? "/", "http://localhost");
   const pathname = decodeURIComponent(url.pathname);
-  logger.debug(`${method} ${pathname}`);
+  ctx.logger.debug(`${method} ${pathname}`);
 
   if (pathname === "/healthz" && method === "GET") {
     sendJson(res, 200, { ok: true, version: API_VERSION });
     return;
   }
 
-  if (pathname === "/" && method === "GET") {
-    sendJson(res, 200, {
-      name: "video-agent",
-      version: API_VERSION,
-      description: "视频创作智能体 MVP：主题 → 脚本 → 素材 → 配音 → 剪辑",
-      endpoints: {
-        createVideo: "POST /api/videos {topic}",
-        listVideos: "GET /api/videos",
-        videoStatus: "GET /api/videos/:id",
-        videoFile: "GET /api/videos/:id/video",
-        subtitles: "GET /api/videos/:id/subtitles",
-        listMaterials: "GET /api/materials",
-        uploadMaterial: "POST /api/materials (multipart: file, tags?, title?)",
-        deleteMaterial: "DELETE /api/materials/:id",
-      },
-    });
+  if ((pathname === "/" || pathname === "/index.html") && (method === "GET" || method === "HEAD")) {
+    const index = path.join(ctx.webDir, "index.html");
+    if (fs.existsSync(index)) {
+      await serveFile(req, res, index, CONTENT_TYPES[".html"]!);
+      return;
+    }
+  }
+
+  if (pathname === "/api" && method === "GET") {
+    sendJson(res, 200, apiIndex(ctx.config));
+    return;
+  }
+
+  if ((method === "GET" || method === "HEAD") && !pathname.startsWith("/api/")) {
+    const ext = path.extname(pathname).toLowerCase();
+    if (ext && CONTENT_TYPES[ext]) {
+      const file = path.join(ctx.webDir, pathname.replace(/^\/+/, ""));
+      if (!isInside(ctx.webDir, file)) {
+        throw new AppError("文件不存在", { code: "FILE_NOT_FOUND", status: 404 });
+      }
+      await serveFile(req, res, file, CONTENT_TYPES[ext]!);
+      return;
+    }
+  }
+
+  if (pathname === "/api/settings" && method === "GET") {
+    sendJson(res, 200, { settings: await ctx.settings.view() });
+    return;
+  }
+
+  if (pathname === "/api/settings" && method === "PUT") {
+    const body = await readJsonBody(req);
+    sendJson(res, 200, { settings: await ctx.settings.update(body) });
+    return;
+  }
+
+  if (pathname === "/api/settings/test" && method === "POST") {
+    await handleSettingsTest(req, res, ctx);
     return;
   }
 
   if (pathname === "/api/materials" && method === "GET") {
-    sendJson(res, 200, { materials: await library.list() });
+    const materials = await ctx.library.list();
+    sendJson(res, 200, {
+      materials: materials.map((material) => ({
+        ...material,
+        url: `/api/materials/${material.id}/file`,
+      })),
+    });
     return;
   }
 
   if (pathname === "/api/materials" && method === "POST") {
-    await handleUpload(req, res, config, library);
+    await handleUpload(req, res, ctx.config, ctx.library);
+    return;
+  }
+
+  const materialFile = /^\/api\/materials\/([a-zA-Z0-9]+)\/file$/.exec(pathname);
+  if (materialFile && method === "GET") {
+    const materials = await ctx.library.list();
+    const material = materials.find((item) => item.id === materialFile[1]);
+    if (!material) throw new AppError("素材不存在", { code: "MATERIAL_NOT_FOUND", status: 404 });
+    const file = path.join(ctx.library.dir, material.file);
+    if (!isInside(ctx.library.dir, file)) {
+      throw new AppError("素材不存在", { code: "MATERIAL_NOT_FOUND", status: 404 });
+    }
+    await serveFile(req, res, file, contentTypeFor(file));
     return;
   }
 
   const materialDelete = /^\/api\/materials\/([a-zA-Z0-9]+)$/.exec(pathname);
   if (materialDelete && method === "DELETE") {
-    const removed = await library.remove(materialDelete[1]!);
+    const removed = await ctx.library.remove(materialDelete[1]!);
     if (!removed) throw new AppError("素材不存在", { code: "MATERIAL_NOT_FOUND", status: 404 });
     sendJson(res, 200, { ok: true });
     return;
   }
 
+  if (pathname === "/api/scripts/generate" && method === "POST") {
+    await handleGenerateScript(req, res, ctx);
+    return;
+  }
+
   if (pathname === "/api/videos" && method === "GET") {
-    sendJson(res, 200, { jobs: jobs.list().map((job) => jobs.serialize(job)) });
+    sendJson(res, 200, { jobs: ctx.jobs.list().map((job) => ctx.jobs.serialize(job)) });
     return;
   }
 
   if (pathname === "/api/videos" && method === "POST") {
     const body = await readJsonBody(req);
-    const topic = typeof body.topic === "string" ? body.topic.trim() : "";
-    if (!topic) throw new AppError("topic 不能为空", { code: "INVALID_TOPIC", status: 400 });
-    if (topic.length > 200) throw new AppError("topic 不能超过 200 个字符", { code: "INVALID_TOPIC", status: 400 });
-    const record = jobs.create(topic);
+    const topic = requireTopic(body.topic);
+    const record = ctx.jobs.create(topic, parseJobOptions(body));
     res.writeHead(202, {
+      ...securityHeaders(),
       "content-type": "application/json; charset=utf-8",
       location: `/api/videos/${record.id}`,
       "cache-control": "no-store",
     });
-    res.end(`${JSON.stringify(jobs.serialize(record), null, 2)}\n`);
+    res.end(`${JSON.stringify(ctx.jobs.serialize(record), null, 2)}\n`);
     return;
   }
 
-  const jobMatch = /^\/api\/videos\/([a-zA-Z0-9-]+)(?:\/(video|subtitles|script|result))?$/.exec(pathname);
+  const jobPublish = /^\/api\/videos\/([a-zA-Z0-9-]+)\/publish$/.exec(pathname);
+  if (jobPublish && method === "POST") {
+    await handlePublish(req, res, ctx, jobPublish[1]!);
+    return;
+  }
+  if (jobPublish && method === "GET") {
+    const publishes = await ctx.publishes.list();
+    sendJson(res, 200, { publishes: publishes.filter((item) => item.jobId === jobPublish[1]) });
+    return;
+  }
+
+  const jobMatch = /^\/api\/videos\/([a-zA-Z0-9-]+)(?:\/(video|poster|subtitles|script|result))?$/.exec(pathname);
   if (jobMatch) {
     const [, id, resource] = jobMatch;
-    const record = jobs.get(id!);
+    const record = ctx.jobs.get(id!);
     if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
 
     if (!resource && method === "GET") {
-      sendJson(res, 200, jobs.serialize(record));
+      sendJson(res, 200, ctx.jobs.serialize(record, true));
       return;
     }
 
@@ -327,9 +700,12 @@ async function handleRequest(
       if (record.state !== "succeeded" || !record.result) {
         throw new AppError("成片尚未生成", { code: "JOB_NOT_READY", status: 409 });
       }
-      const jobDir = path.join(config.outputDir, record.id);
+      const jobDir = path.join(ctx.config.outputDir, record.id);
       const files: Record<string, { file: string; type: string }> = {
         video: { file: record.result.videoPath, type: "video/mp4" },
+        ...(record.result.posterPath
+          ? { poster: { file: record.result.posterPath, type: "image/jpeg" } }
+          : {}),
         subtitles: { file: record.result.srtPath, type: "text/plain; charset=utf-8" },
         script: { file: record.result.scriptPath, type: "application/json; charset=utf-8" },
         result: { file: record.result.resultPath, type: "application/json; charset=utf-8" },
@@ -338,7 +714,7 @@ async function handleRequest(
       if (!target || !isInside(jobDir, target.file)) {
         throw new AppError("文件不存在", { code: "FILE_NOT_FOUND", status: 404 });
       }
-      if (resource === "video") {
+      if (resource === "video" || resource === "poster") {
         await serveFile(req, res, target.file, target.type);
       } else {
         const text = await fsp.readFile(target.file, "utf8");
@@ -348,14 +724,115 @@ async function handleRequest(
     }
   }
 
+  if (pathname === "/api/publishes" && method === "GET") {
+    sendJson(res, 200, { publishes: await ctx.publishes.list() });
+    return;
+  }
+
+  if (pathname === "/api/douyin/status" && method === "GET") {
+    sendJson(res, 200, douyinStatus(ctx, await ctx.tokens.read()));
+    return;
+  }
+
+  if (pathname === "/api/douyin/authorize" && method === "GET") {
+    if (!ctx.douyin.configured) {
+      throw new AppError("请先在设置中填写抖音开放平台 client_key 与 client_secret", {
+        code: "DOUYIN_NOT_CONFIGURED",
+        status: 400,
+      });
+    }
+    const now = Date.now();
+    for (const [key, expiresAt] of ctx.pendingStates) {
+      if (expiresAt <= now) ctx.pendingStates.delete(key);
+    }
+    const state = randomBytes(16).toString("hex");
+    ctx.pendingStates.set(state, now + 10 * 60 * 1000);
+    sendJson(res, 200, { url: ctx.douyin.authorizeUrl(state), redirectUri: ctx.douyin.redirectUri });
+    return;
+  }
+
+  if (pathname === "/api/douyin/callback" && method === "GET") {
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    try {
+      const expiresAt = state ? ctx.pendingStates.get(state) : undefined;
+      if (!code || !state || !expiresAt || expiresAt <= Date.now()) {
+        throw new AppError("授权状态已失效，请重新发起授权", {
+          code: "DOUYIN_INVALID_STATE",
+          status: 400,
+        });
+      }
+      ctx.pendingStates.delete(state);
+      const token = await ctx.douyin.exchangeCode(code);
+      try {
+        const info = await ctx.douyin.fetchUserInfo(token);
+        token.nickname = info.nickname;
+        token.avatar = info.avatar;
+      } catch (error) {
+        ctx.logger.warn(`抖音用户信息获取失败：${toErrorMessage(error)}`);
+      }
+      await ctx.tokens.write(token);
+      res.writeHead(302, { ...securityHeaders(), location: "/?douyin=connected#/settings" });
+      res.end();
+    } catch (error) {
+      ctx.logger.warn(`抖音授权失败：${toErrorMessage(error)}`);
+      const message = encodeURIComponent(toErrorMessage(error));
+      res.writeHead(302, {
+        ...securityHeaders(),
+        location: `/?douyin=error&message=${message}#/settings`,
+      });
+      res.end();
+    }
+    return;
+  }
+
+  if (pathname === "/api/douyin/disconnect" && method === "POST") {
+    await ctx.tokens.clear();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (pathname === "/api/douyin/refresh" && method === "POST") {
+    const token = await ctx.tokens.read();
+    if (!token) {
+      throw new AppError("尚未授权抖音", { code: "DOUYIN_NOT_AUTHORIZED", status: 401 });
+    }
+    const refreshed = await ctx.douyin.refresh(token);
+    await ctx.tokens.write(refreshed);
+    sendJson(res, 200, douyinStatus(ctx, refreshed));
+    return;
+  }
+
   throw new AppError("接口不存在", { code: "NOT_FOUND", status: 404 });
 }
 
-export function createVideoServer(config: AppConfig, logger: Logger): VideoServer {
+export function createVideoServer(config: AppConfig, logger: Logger, deps: ServerDeps = {}): VideoServer {
+  const settings = new SettingsStore(config, {
+    settingsPath: config.settingsFile,
+    cwd: deps.cwd ?? process.cwd(),
+    env: deps.env ?? process.env,
+    logger,
+  });
   const jobs = new JobManager(config, logger);
   const library = new MaterialLibrary(config.libraryDir, logger);
+  const douyin = new DouyinClient(config, logger, deps.fetchImpl ?? fetch);
+  const tokens = new DouyinTokenStore(path.join(config.cacheDir, "douyin-token.json"), logger);
+  const publishes = new PublishStore(path.join(path.dirname(config.settingsFile), "publishes.json"), logger);
+  const webDir = deps.webDir ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web");
+  const ctx: ServerContext = {
+    config,
+    logger,
+    jobs,
+    library,
+    settings,
+    douyin,
+    tokens,
+    publishes,
+    webDir,
+    pendingStates: new Map(),
+  };
   const server = http.createServer((req, res) => {
-    void handleRequest(req, res, config, logger, jobs, library).catch((error: unknown) => {
+    void handleRequest(req, res, ctx).catch((error: unknown) => {
       const status = error instanceof AppError ? error.status : 500;
       const code = error instanceof AppError ? error.code : "INTERNAL_ERROR";
       if (!(error instanceof AppError)) logger.error("请求处理失败", error);
@@ -370,6 +847,10 @@ export function createVideoServer(config: AppConfig, logger: Logger): VideoServe
     server,
     jobs,
     library,
+    settings,
+    douyin,
+    tokens,
+    publishes,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -378,14 +859,20 @@ export function createVideoServer(config: AppConfig, logger: Logger): VideoServe
   };
 }
 
-export async function startServer(config: AppConfig, logger: Logger): Promise<StartedServer> {
-  const app = createVideoServer(config, logger);
+export async function startServer(
+  config: AppConfig,
+  logger: Logger,
+  deps: ServerDeps = {},
+): Promise<StartedServer> {
+  const app = createVideoServer(config, logger, deps);
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(config.server.port, config.server.host, () => resolve());
   });
   const address = app.server.address();
   const port = typeof address === "object" && address ? address.port : config.server.port;
+  // 端口为 0 时使用实际监听端口，保证抖音回调地址正确。
+  config.server.port = port;
   const host = config.server.host === "0.0.0.0" ? "127.0.0.1" : config.server.host;
   return {
     ...app,

@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import type {
   AppConfig,
+  GeneratedClip,
   JobProgress,
   PipelineResult,
   ProgressReporter,
@@ -9,18 +10,20 @@ import type {
   SegmentPlan,
   SegmentResult,
   TtsProvider,
+  VideoGenProvider,
 } from "./types.js";
 import { AppError, toErrorMessage } from "./errors.js";
 import type { Logger } from "./logger.js";
 import { silentLogger } from "./logger.js";
 import { createScriptProvider } from "./script/index.js";
 import { createTtsProvider } from "./tts/index.js";
+import { createVideoGenProvider } from "./videogen/index.js";
 import { MaterialLibrary } from "./materials/library.js";
 import { matchMaterial, materialTagPool } from "./materials/match.js";
 import { renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
-import { probeMedia } from "./media/ffmpeg.js";
+import { probeMedia, extractPoster } from "./media/ffmpeg.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
 export interface RunPipelineOptions {
@@ -33,6 +36,22 @@ export interface RunPipelineOptions {
   library?: MaterialLibrary;
   scriptProvider?: ScriptProvider;
   ttsProvider?: TtsProvider;
+  /** 显式传入 null 可禁用画面生成；未传时按配置创建。 */
+  videoGenProvider?: VideoGenProvider | null;
+}
+
+/** 把主题、口播和关键词拼成画面生成提示词。 */
+export function buildVideoPrompt(topic: string, segment: { narration: string; keywords: string[] }): string {
+  const keywords = segment.keywords.filter(Boolean).join("、");
+  const prompt = [
+    `主题：${topic}`,
+    `画面：${segment.narration}`,
+    keywords ? `关键词：${keywords}` : "",
+    "竖屏 9:16，真实拍摄质感，光线自然，镜头稳定，无文字水印。",
+  ]
+    .filter(Boolean)
+    .join("；");
+  return prompt.slice(0, 800);
 }
 
 export function createJobId(now = new Date()): string {
@@ -102,13 +121,12 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     await writeJsonFile(scriptPath, script);
     logger.info(`脚本已生成：${script.title}（${script.segments.length} 段）`);
     report({
-      stage: "materials",
+      stage: "script",
       percent: 15,
-      message: `脚本已生成，匹配 ${materials.length} 条素材`,
+      message: `脚本已生成，素材库共 ${materials.length} 条`,
     });
 
     const ttsProvider = options.ttsProvider ?? createTtsProvider(config, config.cacheDir, logger);
-    const usedIds = new Set<string>();
     const plans: SegmentPlan[] = [];
     let cursor = 0;
     const totalSegments = script.segments.length;
@@ -116,11 +134,6 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     for (let index = 0; index < totalSegments; index += 1) {
       throwIfAborted(signal);
       const segment = script.segments[index]!;
-      const material = matchMaterial(segment, materials, {
-        allowUnmatched: config.materials.allowUnmatched,
-        usedIds,
-      });
-      if (material) usedIds.add(material.id);
 
       const cacheKey = sha256(
         [
@@ -144,7 +157,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       plans.push({
         index,
         segment,
-        material,
+        material: null,
         tts,
         durationSec,
         cues,
@@ -159,19 +172,69 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     }
 
     throwIfAborted(signal);
+    const videoGen =
+      options.videoGenProvider === undefined
+        ? createVideoGenProvider(config, logger)
+        : options.videoGenProvider;
+    const usedIds = new Set<string>();
+    for (let index = 0; index < plans.length; index += 1) {
+      throwIfAborted(signal);
+      const plan = plans[index]!;
+      if (videoGen) {
+        report({
+          stage: "videogen",
+          percent: Math.round(50 + (index / plans.length) * 14),
+          message: `AI 生成画面 ${index + 1}/${plans.length}`,
+        });
+        try {
+          const generated: GeneratedClip = await videoGen.generate(
+            {
+              prompt: buildVideoPrompt(normalizedTopic, plan.segment),
+              durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
+            },
+            path.join(jobDir, "generated"),
+            signal,
+          );
+          plan.generated = generated;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          if (!config.videoGen.fallbackToMaterials) throw error;
+          logger.warn(
+            `分镜 ${index + 1} AI 画面生成失败，回退素材匹配：${toErrorMessage(error)}`,
+          );
+        }
+      }
+      if (!plan.generated) {
+        const material = matchMaterial(plan.segment, materials, {
+          allowUnmatched: config.materials.allowUnmatched,
+          usedIds,
+        });
+        if (material) usedIds.add(material.id);
+        plan.material = material;
+      }
+    }
+    report({
+      stage: "materials",
+      percent: 65,
+      message: videoGen ? "画面准备完成" : "素材匹配完成",
+    });
+
+    throwIfAborted(signal);
     const rendered: string[] = [];
+    const renderBase = videoGen ? 65 : 50;
     for (let index = 0; index < plans.length; index += 1) {
       throwIfAborted(signal);
       const plan = plans[index]!;
       report({
         stage: "render",
-        percent: Math.round(50 + (index / plans.length) * 35),
+        percent: Math.round(renderBase + (index / plans.length) * (88 - renderBase)),
         message: `剪辑分镜 ${index + 1}/${plans.length}`,
       });
       const result = await renderSegment({
         index: plan.index + 1,
         segment: plan.segment,
         material: plan.material,
+        materialPath: plan.generated?.file,
         tts: plan.tts,
         durationSec: plan.durationSec,
         cues: plan.cues,
@@ -193,6 +256,15 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       logger,
     });
     throwIfAborted(signal);
+
+    let posterPath: string | undefined;
+    try {
+      const candidate = path.join(jobDir, "poster.jpg");
+      await extractPoster(outputFile, candidate);
+      posterPath = candidate;
+    } catch (error) {
+      logger.warn(`生成播放器封面失败（不影响成片）：${toErrorMessage(error)}`);
+    }
 
     const srtCues = plans.flatMap((plan) =>
       plan.cues.map((cue) => ({ ...cue, startOffsetSec: plan.startSec })),
@@ -217,6 +289,10 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       durationSec: plan.durationSec,
       startSec: plan.startSec,
       subtitleCues: plan.cues.length,
+      source: plan.generated ? "generated" : plan.material ? "material" : "background",
+      generated: plan.generated
+        ? { provider: plan.generated.provider, model: plan.generated.model }
+        : undefined,
     }));
 
     const videoProbe = await probeMedia(outputFile);
@@ -227,6 +303,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       finishedAt,
       durationSec: round3(finalDuration || videoProbe.durationSec || cursor),
       videoPath: outputFile,
+      posterPath,
       srtPath,
       scriptPath,
       resultPath,

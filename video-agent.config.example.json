@@ -54,5 +54,23 @@
     "host": "127.0.0.1",
     "port": 8787,
     "maxUploadBytes": 209715200
+  },
+  "settingsFile": "./data/settings.json",
+  "videoGen": {
+    "provider": "none",
+    "baseUrl": "",
+    "model": "video-gen-1",
+    "submitPath": "/v1/videos/generations",
+    "pollPath": "/v1/videos/generations/{id}",
+    "pollIntervalMs": 3000,
+    "timeoutMs": 300000,
+    "clipDurationSec": 5,
+    "fallbackToMaterials": true
+  },
+  "douyin": {
+    "clientKey": "",
+    "redirectUri": "",
+    "scope": "user_info,video.create",
+    "apiBaseUrl": "https://open.douyin.com"
   }
 }

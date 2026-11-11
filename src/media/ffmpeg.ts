@@ -100,6 +100,27 @@ export async function runFfmpeg(args: string[], options: RunProcessOptions = {})
   return runProcess(getFfmpegPath(), args, options);
 }
 
+/** 从成片抽一帧作为网页播放器封面。 */
+export async function extractPoster(inputFile: string, outputFile: string, atSec = 0.3): Promise<void> {
+  await runFfmpeg([
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-ss",
+    String(atSec),
+    "-i",
+    inputFile,
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=720:-2",
+    "-q:v",
+    "3",
+    outputFile,
+  ]);
+}
+
 export async function runFfprobe(args: string[], options: RunProcessOptions = {}): Promise<ProcessResult> {
   return runProcess(getFfprobePath(), args, options);
 }

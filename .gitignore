@@ -10,6 +10,7 @@ materials/*
 !materials/.gitkeep
 
 # Local configuration and secrets
+data/
 .env
 .env.*
 !.env.example

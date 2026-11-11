@@ -25,6 +25,8 @@ interface MaterialIndexFile {
 export interface AddMaterialOptions {
   tags?: string[];
   title?: string;
+  /** 用于提取标签的原始文件名；上传时避免把随机后缀当成标签。 */
+  sourceName?: string;
 }
 
 export class MaterialLibrary {
@@ -125,9 +127,16 @@ export class MaterialLibrary {
       const type = materialType(filename);
       if (!type) continue;
       try {
+        // 目标文件名带有 6 位随机后缀；重新扫描时不要把它当成标签。
+        const tagSource = filename.replace(/-[0-9a-f]{6}(-\d+)?(\.[^.]+)$/i, "$2$3");
         const material = await this.describe(filename, path.join(this.dir, filename), type, {
-          tags: tagsFromFilename(filename),
-          title: filename.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim(),
+          tags: tagsFromFilename(tagSource),
+          sourceName: tagSource,
+          title: filename
+            .replace(/\.[^.]+$/, "")
+            .replace(/-[0-9a-f]{6}(-\d+)?$/i, "")
+            .replace(/[-_]+/g, " ")
+            .trim(),
         });
         added.push(material);
       } catch (error) {
@@ -156,7 +165,10 @@ export class MaterialLibrary {
       throw new AppError(`无法读取视频时长：${filename}`, { code: "MATERIAL_INVALID" });
     }
     const stat = await fs.stat(absolutePath);
-    const tags = normalizeTagList([...(options.tags ?? []), ...tagsFromFilename(filename)]);
+    const tags = normalizeTagList([
+      ...(options.tags ?? []),
+      ...tagsFromFilename(options.sourceName ?? filename),
+    ]);
     return {
       id: shortId(),
       file: filename,
@@ -202,6 +214,7 @@ export class MaterialLibrary {
       const material = await this.describe(targetName, target, type, {
         tags: options.tags,
         title: options.title ?? stem,
+        sourceName: path.basename(source),
       });
       const materials = await this.loadIndex();
       await this.persist([...materials.filter((item) => item.file !== targetName), material]);

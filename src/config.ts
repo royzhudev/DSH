@@ -8,6 +8,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   workDir: "./.work",
   libraryDir: "./materials",
   cacheDir: "./.cache",
+  settingsFile: "./data/settings.json",
   video: {
     width: 1080,
     height: 1920,
@@ -55,6 +56,23 @@ export const DEFAULT_CONFIG: AppConfig = {
   materials: {
     allowUnmatched: false,
   },
+  videoGen: {
+    provider: "none",
+    baseUrl: "",
+    model: "video-gen-1",
+    submitPath: "/v1/videos/generations",
+    pollPath: "/v1/videos/generations/{id}",
+    pollIntervalMs: 3000,
+    timeoutMs: 300_000,
+    clipDurationSec: 5,
+    fallbackToMaterials: true,
+  },
+  douyin: {
+    clientKey: "",
+    redirectUri: "",
+    scope: "user_info,video.create",
+    apiBaseUrl: "https://open.douyin.com",
+  },
   server: {
     host: "127.0.0.1",
     port: 8787,
@@ -69,12 +87,15 @@ export type DeepPartial<T> = {
 export interface LoadConfigOptions {
   cwd?: string;
   configPath?: string;
+  /** 网页设置保存的覆盖文件，默认 <cwd>/data/settings.json。 */
+  settingsPath?: string;
   env?: NodeJS.ProcessEnv;
   overrides?: DeepPartial<AppConfig>;
 }
 
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
 const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
+const VIDEO_GEN_PROVIDERS = ["none", "http"] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -186,6 +207,33 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     envBoolean(env, "MATERIALS_ALLOW_UNMATCHED"),
   );
 
+  const videoGenProvider = envString(env, "VIDEOGEN_PROVIDER") as "none" | "http" | undefined;
+  if (videoGenProvider) config.videoGen.provider = videoGenProvider;
+  config.videoGen.baseUrl = set(config.videoGen.baseUrl, envString(env, "VIDEOGEN_BASE_URL"));
+  config.videoGen.apiKey = set(config.videoGen.apiKey, envString(env, "VIDEOGEN_API_KEY"));
+  config.videoGen.model = set(config.videoGen.model, envString(env, "VIDEOGEN_MODEL"));
+  config.videoGen.submitPath = set(config.videoGen.submitPath, envString(env, "VIDEOGEN_SUBMIT_PATH"));
+  config.videoGen.pollPath = set(config.videoGen.pollPath, envString(env, "VIDEOGEN_POLL_PATH"));
+  config.videoGen.pollIntervalMs = set(
+    config.videoGen.pollIntervalMs,
+    envNumber(env, "VIDEOGEN_POLL_INTERVAL_MS"),
+  );
+  config.videoGen.timeoutMs = set(config.videoGen.timeoutMs, envNumber(env, "VIDEOGEN_TIMEOUT_MS"));
+  config.videoGen.clipDurationSec = set(
+    config.videoGen.clipDurationSec,
+    envNumber(env, "VIDEOGEN_CLIP_DURATION"),
+  );
+  config.videoGen.fallbackToMaterials = set(
+    config.videoGen.fallbackToMaterials,
+    envBoolean(env, "VIDEOGEN_FALLBACK_MATERIALS"),
+  );
+
+  config.douyin.clientKey = set(config.douyin.clientKey, envString(env, "DOUYIN_CLIENT_KEY"));
+  config.douyin.clientSecret = set(config.douyin.clientSecret, envString(env, "DOUYIN_CLIENT_SECRET"));
+  config.douyin.redirectUri = set(config.douyin.redirectUri, envString(env, "DOUYIN_REDIRECT_URI"));
+  config.douyin.scope = set(config.douyin.scope, envString(env, "DOUYIN_SCOPE"));
+  config.douyin.apiBaseUrl = set(config.douyin.apiBaseUrl, envString(env, "DOUYIN_API_BASE_URL"));
+
   config.server.host = set(
     config.server.host,
     envString(env, "VIDEO_AGENT_HOST") ?? envString(env, "HOST"),
@@ -250,6 +298,33 @@ function validateConfig(config: AppConfig): void {
       { code: "CONFIG_MISSING_API_KEY" },
     );
   }
+  if (!VIDEO_GEN_PROVIDERS.includes(config.videoGen.provider)) {
+    throw new AppError(`不支持的画面生成供应商：${config.videoGen.provider}`, {
+      code: "CONFIG_INVALID",
+    });
+  }
+  requireRange("videoGen.pollIntervalMs", config.videoGen.pollIntervalMs, 200, 60_000);
+  requireRange("videoGen.timeoutMs", config.videoGen.timeoutMs, 5_000, 1_800_000);
+  requireRange("videoGen.clipDurationSec", config.videoGen.clipDurationSec, 2, 60);
+  if (config.videoGen.provider === "http") {
+    if (!config.videoGen.baseUrl) {
+      throw new AppError("启用 AI 画面生成时，必须配置服务地址 VIDEOGEN_BASE_URL", {
+        code: "CONFIG_INVALID",
+      });
+    }
+    if (!config.videoGen.model) {
+      throw new AppError("启用 AI 画面生成时，必须配置模型名称", { code: "CONFIG_INVALID" });
+    }
+    if (!config.videoGen.submitPath.startsWith("/") || !config.videoGen.pollPath.startsWith("/")) {
+      throw new AppError("AI 画面生成的请求路径必须以 / 开头", { code: "CONFIG_INVALID" });
+    }
+    if (!config.videoGen.pollPath.includes("{id}")) {
+      throw new AppError("AI 画面生成的查询路径必须包含 {id} 占位符", { code: "CONFIG_INVALID" });
+    }
+  }
+  if (!config.douyin.scope.trim()) {
+    throw new AppError("抖音授权 scope 不能为空", { code: "CONFIG_INVALID" });
+  }
 
   config.video.width = Math.round(config.video.width / 2) * 2;
   config.video.height = Math.round(config.video.height / 2) * 2;
@@ -289,17 +364,56 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 
   let config = mergeKnown(structuredClone(DEFAULT_CONFIG), fileConfig);
   applyEnv(config, env);
+
+  // 网页保存的设置优先级高于配置文件与环境变量，低于调用方显式覆盖。
+  const settingsPath = resolveSettingsPath({
+    cwd,
+    env,
+    settingsPath: options.settingsPath,
+    fallback: config.settingsFile,
+  });
+  if (fs.existsSync(settingsPath)) {
+    let settingsConfig: unknown;
+    try {
+      settingsConfig = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    } catch (error) {
+      throw new AppError(`无法解析网页设置文件 ${settingsPath}`, {
+        code: "CONFIG_INVALID",
+        cause: error,
+      });
+    }
+    config = mergeKnown(config, settingsConfig);
+  }
+
   config = mergeKnown(config, options.overrides ?? {});
 
   config.outputDir = path.resolve(cwd, config.outputDir);
   config.workDir = path.resolve(cwd, config.workDir);
   config.libraryDir = path.resolve(cwd, config.libraryDir);
   config.cacheDir = path.resolve(cwd, config.cacheDir);
+  config.settingsFile = settingsPath;
   config.script.baseUrl = config.script.baseUrl.replace(/\/+$/, "");
   config.tts.baseUrl = config.tts.baseUrl.replace(/\/+$/, "");
+  config.videoGen.baseUrl = config.videoGen.baseUrl.replace(/\/+$/, "");
+  config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.replace(/\/+$/, "");
 
   validateConfig(config);
   return config;
+}
+
+export function resolveSettingsPath(options: {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  settingsPath?: string;
+  fallback?: string;
+} = {}): string {
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const env = options.env ?? process.env;
+  if (options.settingsPath) return path.resolve(cwd, options.settingsPath);
+  const fromEnv = envString(env, "VIDEO_AGENT_SETTINGS_FILE");
+  if (fromEnv) return path.resolve(cwd, fromEnv);
+  const fallback = options.fallback?.trim();
+  return fallback ? path.resolve(cwd, fallback) : path.join(cwd, "data", "settings.json");
 }
 
 /** auto 模式：有密钥走大模型，没有密钥走离线模板，保证开箱可跑通。 */

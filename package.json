@@ -1,7 +1,7 @@
 {
   "name": "video-agent",
-  "version": "0.1.0",
-  "description": "视频创作智能体 MVP：主题 → 脚本 → 素材 → 配音 → 剪辑 → 成片",
+  "version": "0.2.0",
+  "description": "视频创作智能体：网页控制台 + CLI + API，覆盖脚本、素材/AI 画面、配音、剪辑与抖音发布",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -15,6 +15,7 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "web",
     "README.md",
     "video-agent.config.example.json"
   ],

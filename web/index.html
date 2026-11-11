@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#121425" />
+    <title>视频创作智能体 · AI 视频工作台</title>
+    <meta
+      name="description"
+      content="输入主题，自动生成脚本、匹配素材或 AI 画面、合成配音与字幕，并剪辑为竖屏成片。"
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#/create" aria-label="视频创作智能体首页">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+              <path d="M8 5.5v13l10-6.5-10-6.5Z" fill="currentColor" />
+            </svg>
+          </span>
+          <span class="brand-text">
+            <strong>视频创作智能体</strong>
+            <small>AI VIDEO STUDIO</small>
+          </span>
+        </a>
+
+        <nav class="nav" id="nav" aria-label="主导航">
+          <a href="#/create" data-nav="create">
+            <span class="nav-icon" data-icon="spark"></span>
+            <span>创作</span>
+          </a>
+          <a href="#/jobs" data-nav="jobs">
+            <span class="nav-icon" data-icon="layers"></span>
+            <span>任务</span>
+            <span class="nav-badge" id="nav-job-badge" hidden></span>
+          </a>
+          <a href="#/materials" data-nav="materials">
+            <span class="nav-icon" data-icon="image"></span>
+            <span>素材库</span>
+          </a>
+          <a href="#/publish" data-nav="publish">
+            <span class="nav-icon" data-icon="send"></span>
+            <span>发布</span>
+          </a>
+          <a href="#/settings" data-nav="settings">
+            <span class="nav-icon" data-icon="sliders"></span>
+            <span>设置</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="service-status" id="service-status">
+            <span class="dot"></span>
+            <span>正在连接服务…</span>
+          </div>
+          <a class="api-link" href="/api" target="_blank" rel="noreferrer">
+            <span data-icon="code"></span>
+            <span>API 文档</span>
+          </a>
+        </div>
+      </aside>
+
+      <div class="main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <span class="crumb" id="crumb">创作</span>
+            <h1 id="page-title">开始创作</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="pill pill-soft" id="model-pill" title="当前模型配置">离线模式</span>
+            <a class="btn btn-primary btn-sm" href="#/create">＋ 新建视频</a>
+          </div>
+        </header>
+
+        <main class="view" id="view" aria-live="polite"></main>
+      </div>
+    </div>
+
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

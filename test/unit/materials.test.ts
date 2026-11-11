@@ -68,4 +68,10 @@ test("素材索引在重新扫描后保持稳定", async () => {
   assert.equal(second.length, 1);
   assert.equal(second[0]!.id, first.id);
   assert.equal(second[0]!.file, first.file);
+
+  await fs.rm(path.join(config.libraryDir, ".materials.json"), { force: true });
+  const rescanned = await library.list();
+  assert.equal(rescanned.length, 1);
+  assert.equal(rescanned[0]!.tags.includes("nature"), true);
+  assert.equal(rescanned[0]!.tags.some((tag) => /^[0-9a-f]{6}$/i.test(tag)), false);
 });

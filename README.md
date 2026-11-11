@@ -1,17 +1,20 @@
 # video-agent
 
-视频创作智能体 MVP：输入一个主题，自动完成 **脚本生成 → 素材匹配 → 语音合成 → 规则化剪辑 → 竖屏成片**。
+视频创作智能体：输入一个主题，自动完成 **脚本生成 → 素材匹配 / AI 画面 → 语音合成 → 规则化剪辑 → 竖屏成片**，并提供网页控制台、CLI 与本地 HTTP API。
 
-当前版本聚焦第一版最小闭环，提供 CLI 与本地 HTTP API。抖音号发布、多视频生成模型路由不在本步骤范围内。
+当前版本包含完整的本地创作闭环：网页端可以生成脚本、管理素材、创建与查看任务、配置模型、授权抖音号并发布成片。
 
 ## 能力
 
-- **主题 → 脚本**：默认 `auto` 模式。配置了 `SCRIPT_API_KEY` 时调用 OpenAI 兼容的 Chat Completions 接口；没有密钥时使用内置离线模板，保证开箱即可跑通。
+- **网页控制台**：创作、任务、素材库、发布、设置五个页面，移动端自适应；无需前端构建步骤，`pnpm dev serve` 即可使用。
+- **主题 → 脚本**：默认 `auto` 模式。配置了脚本 API Key 时调用 OpenAI 兼容的 Chat Completions 接口；没有密钥时使用内置离线模板，保证开箱即可跑通。
 - **本地素材库 + 上传**：支持 mp4/mov/webm/mkv 与 jpg/png/webp；自动探测时长、尺寸；按文件名和自定义标签匹配分镜关键词。没有命中时生成渐变背景，不会把无关素材硬塞进片子。
 - **可替换 TTS**：默认使用 Edge TTS（免费、无需密钥，中文音色 `zh-CN-XiaoxiaoNeural`）；也可切换 OpenAI 兼容 `/audio/speech` 或静音占位。Edge 返回句级时间戳，用于字幕对齐。
+- **AI 画面生成（可选）**：通过通用 HTTP 文生视频接口为分镜生成画面，失败时自动回退素材库或渐变背景。
 - **规则化自动剪辑**：每个分镜时长由配音时长决定，素材自动铺满 9:16 画幅，字幕烧录，分镜间统一淡入淡出转场，最后拼接为成片。
+- **抖音授权发布**：OAuth 授权、令牌自动刷新、上传成片并创建抖音作品；发布历史保存在本地。
+- **模型配置**：网页设置页可修改脚本、配音、AI 画面、视频/字幕、素材与抖音参数，保存到 `data/settings.json`，新任务生效。
 - **产物完整**：成片 `video.mp4`、字幕 `subtitles.srt`、脚本 `script.json`、执行结果 `result.json`。
-- **两种入口**：CLI 适合本地批量生成；HTTP API 适合后续接前端或工作流。
 
 ## 快速开始
 
@@ -24,6 +27,19 @@
 
 ```bash
 pnpm install
+pnpm dev serve
+```
+
+打开 `http://127.0.0.1:8787/`：
+
+1. 在「设置」里填入脚本模型 API Key（不填也能用离线模板）。
+2. 在「素材库」上传几段竖屏素材；也可以不传，直接用渐变背景。
+3. 回到「创作」输入主题，预览脚本，创建任务。
+4. 在「任务」里查看进度、播放成片、下载字幕；配置好抖音后可一键发布。
+
+也可以直接用 CLI 生成一条演示成片：
+
+```bash
 pnpm demo
 ```
 
@@ -43,29 +59,29 @@ pnpm build
 node dist/cli.js create --topic "城市夜景"
 ```
 
-## CLI
+## 网页控制台
 
-```text
-video-agent create --topic "主题" [选项]
-video-agent materials add <文件...> [--tags 城市,夜景]
-video-agent materials list [--json]
-video-agent serve [--port 8787] [--host 127.0.0.1]
-```
-
-常用选项：
-
-| 选项 | 说明 |
+| 页面 | 能力 |
 | --- | --- |
-| `-t, --topic <主题>` | 视频主题（必填） |
-| `-c, --config <路径>` | 配置文件，默认 `./video-agent.config.json` |
-| `--out <目录>` | 成片输出目录 |
-| `--offline` | 强制使用离线脚本模板 |
-| `--silent` | 使用静音占位配音（仅演示/测试） |
-| `--voice <音色>` | 覆盖 TTS 音色 |
-| `--width/--height` | 覆盖输出尺寸，默认 1080×1920 |
-| `--json` | 以 JSON 输出结果 |
+| 创作 `#/create` | 输入主题、时长、分镜数、配音音色；预览脚本；创建任务 |
+| 任务 `#/jobs` | 任务列表、进度轮询、成片播放、字幕/脚本/结果下载、抖音发布 |
+| 素材库 `#/materials` | 拖拽/选择上传，编辑标题与标签，预览、下载、删除 |
+| 发布 `#/publish` | 抖音授权状态、授权/重新授权/断开、发布历史 |
+| 设置 `#/settings` | 脚本模型、配音、AI 画面、视频与字幕、素材策略、抖音应用配置 |
+
+设置页不会回显已保存的密钥，只显示“已配置”和末四位提示；留空表示保持不变，勾选“清除”后保存才会删除。
 
 ## 配置
+
+配置优先级从低到高：
+
+1. 内置默认值
+2. `video-agent.config.json`
+3. 环境变量
+4. 网页设置 `data/settings.json`
+5. 命令行参数
+
+网页设置保存在 `data/settings.json`（权限 `0600`，已被 `.gitignore` 忽略），保存后会原地更新运行中的配置；新任务生效，已排队/运行中的任务使用创建时的快照。
 
 复制示例配置后按需修改：
 
@@ -73,7 +89,7 @@ video-agent serve [--port 8787] [--host 127.0.0.1]
 cp video-agent.config.example.json video-agent.config.json
 ```
 
-`video-agent.config.json` 已被 `.gitignore` 忽略，适合放本地配置。密钥建议通过环境变量注入，不要写进仓库。完整变量见 [.env.example](.env.example)。
+密钥建议通过环境变量注入，不要写进仓库。完整变量见 [.env.example](.env.example)。
 
 ### 脚本供应商
 
@@ -99,6 +115,48 @@ cp video-agent.config.example.json video-agent.config.json
 
 > Edge TTS 使用的是微软 Edge 的朗读接口，不是带 SLA 的正式 Azure 服务；生产环境建议切换为已购买的 TTS 供应商。
 
+### AI 画面生成
+
+`videoGen.provider` 默认为 `none`。设为 `http` 后，任务创建时打开“AI 画面”开关，没有素材命中的分镜会调用文生视频接口。
+
+接口约定（`baseUrl` + `submitPath`）：
+
+```http
+POST {baseUrl}{submitPath}
+Content-Type: application/json
+
+{"model":"video-gen-1","prompt":"...","duration_sec":5,"aspect_ratio":"9:16"}
+```
+
+返回 `{"video_url":"https://..."}` 表示同步完成；返回 `{"id":"task-1"}` 或 `{"task_id":"task-1"}` 表示异步任务。随后轮询：
+
+```http
+GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
+```
+
+状态为 `queued` / `running` / `succeeded` / `failed`；成功后返回 `video_url`。响应字段兼容 `{"data": {...}}` 包裹。下载后会用 ffprobe 校验，失败时按 `videoGen.fallbackToMaterials` 回退素材库或渐变背景。
+
+相关变量：`VIDEOGEN_PROVIDER`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`。
+
+> 这里只实现通用 HTTP 契约，不绑定具体厂商。使用 Runway、可灵、即梦等模型时，请通过自建网关把厂商 API 适配成上述格式。
+
+### 抖音开放平台
+
+1. 在[抖音开放平台](https://developer.open-douyin.com/)创建应用，获取 `client_key` 与 `client_secret`。
+2. 为应用申请 `user_info` 与 `video.create` 权限，并配置回调地址，例如 `http://127.0.0.1:8787/api/douyin/callback`。
+3. 在网页「设置 → 抖音开放平台」填入应用信息，保存后点击「授权抖音」。
+4. 授权成功后，在任务详情或「发布」页填写文案并发布。
+
+说明：
+
+- 未填写 `redirectUri` 时，默认使用 `http://<server.host>:<server.port>/api/douyin/callback`；设置页会显示当前生效地址。
+- 授权令牌保存在 `.cache/douyin-token.json`（`0600`），发布历史保存在 `data/publishes.json`。
+- 发布文案限制 55 个字符；发布前会确保令牌有效，过期前 60 秒自动刷新。
+- 开放平台的应用审核、权限与沙箱限制由抖音控制；未通过审核的应用可能无法真正发布。
+- 发布失败会返回抖音接口的错误码与描述，便于排查。
+
+相关变量：`DOUYIN_CLIENT_KEY`、`DOUYIN_CLIENT_SECRET`、`DOUYIN_REDIRECT_URI`、`DOUYIN_SCOPE`、`DOUYIN_API_BASE_URL`。
+
 ### 视频与字幕
 
 - 默认 1080×1920、30fps、H.264 + AAC。
@@ -106,6 +164,88 @@ cp video-agent.config.example.json video-agent.config.json
 - 字幕优先使用 TTS 返回的句级时间戳；没有时间戳时按字符占比估算。字幕按 `subtitles.maxCharsPerLine × maxLines` 拆屏，手动换行避免溢出。
 - 分镜之间统一使用 `fade` 淡入淡出（`video.transitionDurationSec`，默认 0.2s）。
 - 字幕字体默认 `Noto Sans CJK SC`，可通过 `subtitles.fontFamily` 或 `SUBTITLE_FONT` 修改。
+
+## CLI
+
+```text
+video-agent create --topic "主题" [选项]
+video-agent materials add <文件...> [--tags 城市,夜景]
+video-agent materials list [--json]
+video-agent serve [--port 8787] [--host 127.0.0.1]
+```
+
+常用选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `-t, --topic <主题>` | 视频主题（必填） |
+| `-c, --config <路径>` | 配置文件，默认 `./video-agent.config.json` |
+| `--out <目录>` | 成片输出目录 |
+| `--offline` | 强制使用离线脚本模板 |
+| `--silent` | 使用静音占位配音（仅演示/测试） |
+| `--voice <音色>` | 覆盖 TTS 音色 |
+| `--width/--height` | 覆盖输出尺寸，默认 1080×1920 |
+| `--json` | 以 JSON 输出结果 |
+
+`serve` 会同时启动网页控制台与 API，默认只监听 `127.0.0.1:8787`。
+
+## HTTP API
+
+```bash
+pnpm dev serve --port 8787
+```
+
+启动后访问 `http://127.0.0.1:8787/` 打开网页控制台，`/api` 返回接口清单。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api` | 接口清单 |
+| `GET/PUT` | `/api/settings` | 读取/保存设置（密钥只返回是否已配置） |
+| `POST` | `/api/settings/test` | 测试脚本或配音配置，`{"kind":"script"\|"tts"}` |
+| `GET/POST` | `/api/materials` | 素材列表 / 上传（multipart：`file`、`title`、`tags`） |
+| `GET/DELETE` | `/api/materials/:id` | 素材详情 / 删除 |
+| `GET` | `/api/materials/:id/file` | 素材文件（支持 Range） |
+| `POST` | `/api/scripts/generate` | 预览脚本，`{topic,targetDurationSec,maxSegments}` |
+| `GET/POST` | `/api/videos` | 任务列表 / 创建任务 |
+| `GET` | `/api/videos/:id` | 任务详情（脚本、分镜、成片信息） |
+| `GET` | `/api/videos/:id/video` | 成片（支持 Range） |
+| `GET` | `/api/videos/:id/poster` | 播放器封面（JPEG） |
+| `GET` | `/api/videos/:id/subtitles` | SRT 字幕 |
+| `GET` | `/api/videos/:id/script` | 脚本 JSON |
+| `GET` | `/api/videos/:id/result` | 执行结果 JSON |
+| `POST` | `/api/videos/:id/publish` | 发布到抖音，`{text,coverTsp?}` |
+| `GET` | `/api/videos/:id/publish` | 该任务的发布记录 |
+| `GET` | `/api/publishes` | 全部发布记录 |
+| `GET` | `/api/douyin/status` | 抖音配置/授权状态 |
+| `GET` | `/api/douyin/authorize` | 获取授权 URL |
+| `GET` | `/api/douyin/callback` | OAuth 回调 |
+| `POST` | `/api/douyin/refresh` | 手动刷新令牌 |
+| `POST` | `/api/douyin/disconnect` | 断开授权 |
+
+创建任务示例：
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/videos \
+  -H 'content-type: application/json' \
+  -d '{"topic":"城市夜景","targetDurationSec":30,"maxSegments":4,"ttsProvider":"edge","subtitlesEnabled":true,"videoGenEnabled":false}'
+```
+
+任务状态为 `queued` / `running` / `succeeded` / `failed`。任务在进程内串行执行；重启后内存中的任务列表会丢失，但已生成的 `output/` 目录仍在。
+
+## 输出结构
+
+```text
+output/<jobId>/
+├── video.mp4        # 成片
+├── poster.jpg       # 播放器封面
+├── subtitles.srt    # 全片字幕
+├── script.json      # 脚本与分镜关键词
+├── result.json      # 每个分镜的素材/生成画面、配音、时长、字幕数量
+├── segments/        # 分镜中间文件（含 ASS 字幕、背景图）
+└── error.json       # 失败时记录错误
+```
+
+`result.json` 中的每个分镜带有 `source`：`material`（素材库）、`generated`（AI 生成）或 `background`（渐变背景）。
 
 ## 素材库
 
@@ -119,58 +259,13 @@ pnpm dev materials add ./clips/city-night.mp4 --tags 城市,夜景
 pnpm dev materials list
 ```
 
-素材标签来源：文件名分词（`city-night_01.mp4` → `city`、`night`、`01`）+ `--tags` 自定义标签。匹配时：
+素材标签来源：文件名分词（`city-night_01.mp4` → `city`、`night`、`01`）+ 自定义标签。匹配时：
 
 1. 分镜关键词命中标签得分最高；
 2. 其次匹配标题/文件名；
 3. 未命中时默认生成渐变背景（`materials.allowUnmatched=true` 可改为使用任意未使用素材）。
 
 脚本生成时会把素材库标签一起传给大模型，引导它优先选择能匹配到素材的关键词。
-
-## HTTP API
-
-```bash
-pnpm dev serve --port 8787
-```
-
-启动后可访问 `http://127.0.0.1:8787/` 查看接口清单。
-
-```bash
-# 创建任务
-curl -s -X POST http://127.0.0.1:8787/api/videos \
-  -H 'content-type: application/json' \
-  -d '{"topic":"城市夜景"}'
-
-# 查询状态（state: queued/running/succeeded/failed）
-curl -s http://127.0.0.1:8787/api/videos/<id>
-
-# 下载成片 / 字幕
-curl -o video.mp4 http://127.0.0.1:8787/api/videos/<id>/video
-curl -s http://127.0.0.1:8787/api/videos/<id>/subtitles
-
-# 上传素材
-curl -s -X POST http://127.0.0.1:8787/api/materials \
-  -F file=@./clips/city-night.mp4 \
-  -F tags=城市,夜景
-
-# 素材列表 / 删除
-curl -s http://127.0.0.1:8787/api/materials
-curl -s -X DELETE http://127.0.0.1:8787/api/materials/<materialId>
-```
-
-服务默认只监听 `127.0.0.1`。任务在进程内串行执行；重启后内存中的任务列表会丢失，但已生成的 `output/` 目录仍在。
-
-## 输出结构
-
-```text
-output/<jobId>/
-├── video.mp4        # 成片
-├── subtitles.srt    # 全片字幕
-├── script.json      # 脚本与分镜关键词
-├── result.json      # 每个分镜的素材、配音、时长、字幕数量
-├── segments/        # 分镜中间文件（含 ASS 字幕、背景图）
-└── error.json       # 失败时记录错误
-```
 
 ## 测试
 
@@ -181,19 +276,22 @@ pnpm test
 
 测试包含：
 
-- 单元测试：脚本 JSON 解析/归一化、配置合并、字幕拆屏与时间码、Edge 元数据解析、素材标签与匹配。
-- 集成测试：用离线脚本 + 静音配音跑完整链路，并用 ffprobe 校验成片；启动真实 HTTP 服务，覆盖上传素材、创建任务、轮询、Range 播放、删除素材。
+- 单元测试：脚本 JSON 解析/归一化、配置合并与设置持久化、字幕拆屏与时间码、Edge 元数据解析、素材标签与匹配、抖音 OAuth/上传/发布（本地 mock）、HTTP 文生视频提交/轮询/下载。
+- 集成测试：用离线脚本 + 静音配音跑完整链路，并用 ffprobe 校验成片；启动真实 HTTP 服务，覆盖静态页面、设置读写与密钥屏蔽、素材上传/Range 播放、脚本预览、任务轮询、抖音授权回调与发布、断开授权。
+- 流水线测试覆盖 AI 生成画面与失败回退。
 
 集成测试需要 ffmpeg 与 CJK 字体；CI 会自动安装 `fonts-noto-cjk`。
 
 ## 已知限制与下一步
 
-- 本版本不包含抖音号发布；发布链路计划在下一步接入。
+- 抖音发布依赖开放平台应用权限与审核；自动化测试使用本地 mock，未在真实账号上验证发布结果。
+- AI 画面生成只实现通用 HTTP 契约，没有内置厂商适配器；需要自建网关转换请求/响应。
 - 素材匹配是关键词规则，不是向量语义检索；素材少时观感主要依赖渐变背景。
 - 单进程串行任务，未做任务持久化/断点续跑；适合单机 MVP。
 - 转场是固定的淡入淡出，暂未提供多种转场模板。
 - 未配置大模型密钥时脚本来自离线模板，内容质量有限；配置 `SCRIPT_API_KEY` 后走真实模型。
 - Edge TTS 依赖第三方接口，稳定性和音色受微软服务影响；可切换到 `openai` 兼容供应商。
+- 网页控制台与 API 默认只监听本机，没有多用户与鉴权，请勿直接暴露到公网。
 
 ## 目录结构
 
@@ -205,11 +303,14 @@ src/
 ├── script/                # 脚本供应商（openai / offline）与 JSON 归一化
 ├── tts/                   # 配音供应商（edge / openai / silent）与时间戳估算
 ├── materials/             # 素材库、索引、匹配规则
+├── videogen/              # 通用 HTTP 文生视频供应商
+├── publish/               # 抖音 OAuth、令牌与发布记录
 ├── media/                 # ffmpeg/ffprobe 封装、渐变背景生成
 ├── subtitles/             # ASS/SRT 字幕生成
 ├── render/                # 分镜渲染与成片拼接
-├── server/                # HTTP API、任务队列
+├── server/                # HTTP API、任务队列、设置存储
 └── util/                  # 文件、文本、时间码工具
+web/                       # 无构建步骤的网页控制台（原生 ES Modules）
 ```
 
 ## License
