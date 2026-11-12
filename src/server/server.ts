@@ -955,6 +955,7 @@ async function handleSettingsTest(
         model: config.videoGen.model,
         prompt,
         durationSec,
+        lastStatus: error.lastStatus || null,
         message: error.message,
       });
       return;

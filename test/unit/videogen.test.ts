@@ -500,3 +500,40 @@ test("HTTP 文生视频：兼容聚合平台把成片地址放在数组/嵌套�
     });
   }
 });
+
+test("HTTP 视频：平台报错时给出可执行的提示", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        timeoutMs: 5_000,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({ code: "InvalidParameter", message: "duration is invalid", request_id: "r1" }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    });
+    await assert.rejects(
+      provider.generate({ prompt: "城市夜景", durationSec: 3 }, path.join(dir, "gen")),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.match(error.message, /HTTP 400/);
+        assert.match(error.message, /InvalidParameter/);
+        assert.match(error.message, /duration is invalid/);
+        assert.match(error.message, /5 秒/);
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

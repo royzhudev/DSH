@@ -76,6 +76,20 @@ const STATUS_CLASS = {
 
 /** 上一次未出片的 AI 画面测试任务；再次点击时复用它，避免重复扣费。 */
 let pendingVideoTest = null;
+// 测试视频超时后自动继续查询，避免用户反复点、反复提交（会重复扣费）。
+let videoTestAuto = { timer: 0, startedAt: 0, taskId: "" };
+
+function stopVideoTestAuto() {
+  if (videoTestAuto.timer) {
+    clearTimeout(videoTestAuto.timer);
+    videoTestAuto.timer = 0;
+  }
+}
+
+function formatWaited(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
 
 const state = {
   user: null,
@@ -2634,6 +2648,18 @@ async function saveSettings() {
   }
 }
 
+/** 测试任务还没出片时自动继续查询：不重新提交，也不重复扣费。 */
+function scheduleVideoTestResume(button) {
+  stopVideoTestAuto();
+  const elapsed = (Date.now() - videoTestAuto.startedAt) / 1000;
+  if (elapsed > 15 * 60) return;
+  videoTestAuto.timer = setTimeout(() => {
+    videoTestAuto.timer = 0;
+    if (!document.contains(button)) return;
+    void testProvider("videogen", button, { resumeTaskId: videoTestAuto.taskId, auto: true });
+  }, 5000);
+}
+
 async function testProvider(kind, button, options = {}) {
   const result = document.getElementById(`test-${kind}-result`);
   const preview = kind === "videogen" ? document.getElementById("test-videogen-preview") : null;
@@ -2642,7 +2668,8 @@ async function testProvider(kind, button, options = {}) {
     result.textContent = "测试中…";
     result.className = "test-result";
   }
-  if (preview) preview.innerHTML = "";
+  if (preview && !options.auto) preview.innerHTML = "";
+  if (kind === "videogen" && !options.auto) stopVideoTestAuto();
   try {
     const body = { kind };
     if (kind === "videogen" && options.resumeTaskId) {
@@ -2654,6 +2681,7 @@ async function testProvider(kind, button, options = {}) {
       const durationSec = Number(document.getElementById("videogen-test-duration")?.value ?? 5);
       body.prompt = prompt;
       body.durationSec = durationSec;
+      videoTestAuto.startedAt = Date.now();
       const reusable =
         pendingVideoTest &&
         pendingVideoTest.taskId &&
@@ -2686,17 +2714,25 @@ async function testProvider(kind, button, options = {}) {
             : null;
           const taskInput = document.getElementById("videogen-test-task");
           if (taskInput && data.taskId) taskInput.value = data.taskId;
-          if (options.resumeTaskId) {
-            button.textContent = "取回视频";
+          button.textContent = data.taskId ? "继续等待这个任务" : "重新生成测试视频";
+          if (data.taskId) {
+            videoTestAuto.taskId = data.taskId;
+            if (!videoTestAuto.startedAt) videoTestAuto.startedAt = Date.now();
+            const waited = (Date.now() - videoTestAuto.startedAt) / 1000;
+            const statusText = data.lastStatus ? `，平台状态 ${String(data.lastStatus).toUpperCase()}` : "";
+            result.textContent = data.submitted
+              ? `已提交，正在自动继续查询（已等待 ${formatWaited(waited)}${statusText}），不会重复提交或扣费。`
+              : data.message;
+            scheduleVideoTestResume(button);
           } else {
-            button.textContent = data.taskId ? "继续等待这个任务" : "重新生成测试视频";
+            videoTestAuto.startedAt = 0;
+            result.textContent = data.message;
           }
-          result.textContent = data.submitted
-            ? `${data.message} 再次点击“继续等待这个任务”会接着查询，不会重复扣费。`
-            : data.message;
         } else {
           pendingVideoTest = null;
-          button.textContent = options.resumeTaskId ? "取回视频" : "生成测试视频";
+          stopVideoTestAuto();
+          videoTestAuto.startedAt = 0;
+          button.textContent = "生成测试视频";
           result.textContent = data.reused
             ? `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒（复用之前已提交的任务，未重复扣费）`
             : `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒`;
@@ -2714,6 +2750,7 @@ async function testProvider(kind, button, options = {}) {
       result.className = "test-result ok";
     }
   } catch (error) {
+    stopVideoTestAuto();
     if (result) {
       result.textContent = `测试失败：${error.message}`;
       result.className = "test-result fail";

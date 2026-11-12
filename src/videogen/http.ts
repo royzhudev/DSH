@@ -161,6 +161,39 @@ function describeJson(json: unknown): string {
   }
 }
 
+/**
+ * 把平台返回的 HTTP 错误整理成可执行的提示：优先取 {code, message}，
+ * 再按常见原因（密钥、限流、时长/尺寸/模型参数）补一句该怎么改。
+ */
+function httpFailureMessage(status: number, text: string): string {
+  let detail = "";
+  let code = "";
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      const record = isRecord(parsed) ? parsed : undefined;
+      const message = record?.message ?? record?.msg ?? record?.error;
+      if (typeof message === "string" && message.trim()) detail = message.trim();
+      if (typeof record?.code === "string") code = record.code;
+      else if (typeof record?.error_code === "string") code = record.error_code;
+    } catch {
+      detail = text.slice(0, 300);
+    }
+  }
+  const head = `画面生成服务返回 HTTP ${status}${code ? `（${code}）` : ""}${detail ? `：${detail}` : ""}`;
+  const lower = `${code} ${detail}`.toLowerCase();
+  const hints: string[] = [];
+  if (status === 401 || status === 403) hints.push("API Key 无效、过期或没有该模型的权限");
+  if (status === 429 || /throttl|rate.?limit|quota|limit.*exceed|并发/.test(lower)) {
+    hints.push("平台限流或并发已满，稍等再试；已提交的任务可在设置页继续查询，不要重复提交");
+  }
+  if (/duration|时长|seconds|秒/.test(lower)) hints.push("该模型可能不支持所填时长（百炼 Wan 常见为 5 秒，可先改用 5 秒）");
+  if (/size|resolution|分辨率|像素|aspect/.test(lower)) hints.push("画面尺寸不被接受，可填 720*1280 或 1280*720");
+  if (/model/.test(lower)) hints.push("模型名称不被平台接受，核对模型名是否与服务商一致");
+  if (/prompt|描述/.test(lower)) hints.push("描述可能触发了内容审核，换个说法再试");
+  return hints.length > 0 ? `${head}。提示：${hints.join("；")}` : head;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -346,10 +379,11 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     }
     const text = await response.text();
     if (!response.ok) {
-      throw new AppError(
-        `画面生成服务返回 HTTP ${response.status}${text ? `：${text.slice(0, 300)}` : ""}`,
-        { code: "VIDEOGEN_REQUEST_FAILED", status: 502 },
-      );
+      throw new AppError(httpFailureMessage(response.status, text), {
+        code: "VIDEOGEN_REQUEST_FAILED",
+        // 4xx 是平台明确拒绝（参数、密钥、限流），原样透出，不能被当成“提交后没等到结果”。
+        status: response.status >= 500 ? 502 : response.status,
+      });
     }
     try {
       return text ? (JSON.parse(text) as unknown) : {};
