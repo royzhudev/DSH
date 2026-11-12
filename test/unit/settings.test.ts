@@ -84,7 +84,7 @@ test("SettingsStore 拒绝非法配置并保留原设置", async () => {
     (error: unknown) => error instanceof AppError && error.status === 400,
   );
   await assert.rejects(
-    store.update({ videoGen: { provider: "http" } }),
+    store.update({ videoGen: { provider: "http", pollPath: "/api/v1/tasks" } }),
     (error: unknown) => error instanceof AppError && error.status === 400,
   );
   assert.equal(config.tts.provider, "silent");

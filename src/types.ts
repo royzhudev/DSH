@@ -233,6 +233,11 @@ export interface MaterialSettings {
 export interface VideoGenSettings {
   provider: VideoGenProviderName;
   baseUrl: string;
+  /**
+   * 接口协议：auto 按服务地址判断（DashScope 用 dashscope，其他用 generic）。
+   * dashscope = 阿里百炼异步视频接口（提交带 X-DashScope-Async，任务在 output.task_id）。
+   */
+  protocol: "auto" | "dashscope" | "generic";
   apiKey?: string;
   model: string;
   /** 提交任务路径，默认 /v1/videos/generations。 */

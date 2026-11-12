@@ -150,7 +150,7 @@ test("HTTP 文生视频：提交、轮询、下载与 ffprobe 校验", async () 
     assert.equal(resumed.durationSec > 0.5, true);
     delete process.env.VIDEOGEN_SLOW_DONE;
 
-    const disabled = makeTestConfig(dir);
+    const disabled = makeTestConfig(dir, { videoGen: { provider: "none" } });
     assert.equal(createVideoGenProvider(disabled, silentLogger), null);
   } finally {
     delete process.env.VIDEOGEN_TEST_CLIP;
@@ -350,6 +350,80 @@ test("HTTP 视频：任务完成却没解析到地址时，提示可配置视频
     // 响应结构摘要要出现，便于用户回报真实字段名。
     assert.match(error.message, /completed/);
     assert.match(error.message, /somewhere/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("HTTP 视频：阿里百炼 DashScope 协议提交与轮询", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const bytes = await fs.readFile(clip);
+  try {
+    const config = makeTestConfig(dir);
+    config.videoGen = {
+      ...config.videoGen,
+      provider: "http",
+      protocol: "auto",
+      baseUrl: "https://dashscope.aliyuncs.com",
+      model: "wan3.0-video",
+      apiKey: "sk-bailian",
+      submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+      pollPath: "/api/v1/tasks/{id}",
+      pollIntervalMs: 40,
+      timeoutMs: 5_000,
+      clipDurationSec: 5,
+      resultPath: "",
+      fallbackToMaterials: true,
+    };
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+    const seen: Array<{ url: string; method: string; headers: Record<string, string>; body: string }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      seen.push({
+        url,
+        method: init?.method ?? "GET",
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: String(init?.body ?? ""),
+      });
+      if (init?.method === "POST") {
+        return json({ output: { task_id: "task-dashscope", task_status: "PENDING" }, request_id: "req-1" });
+      }
+      if (url.includes("/api/v1/tasks/task-dashscope")) {
+        return json({
+          output: {
+            task_id: "task-dashscope",
+            task_status: "SUCCEEDED",
+            video_url: "https://dashscope.aliyuncs.com/files/clip.mp4",
+          },
+          request_id: "req-1",
+        });
+      }
+      if (url.endsWith("/files/clip.mp4")) return new Response(bytes, { status: 200 });
+      return new Response("{}", { status: 404 });
+    };
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+    const generated = await provider.generate({ prompt: "一只橘猫在窗台上看雨", durationSec: 5 }, path.join(dir, "gen"));
+    assert.equal(generated.durationSec > 0.5, true);
+
+    // 提交协议：DashScope 异步头 + {model, input, parameters} 结构
+    const submit = seen.find((item) => item.method === "POST");
+    assert.ok(submit);
+    assert.equal(submit.headers["X-DashScope-Async"], "enable");
+    assert.equal(submit.headers.authorization, "Bearer sk-bailian");
+    const body = JSON.parse(submit.body) as {
+      model: string;
+      input: { prompt: string };
+      parameters: { duration: number; size: string };
+    };
+    assert.equal(body.model, "wan3.0-video");
+    assert.equal(body.input.prompt, "一只橘猫在窗台上看雨");
+    assert.equal(body.parameters.duration, 5);
+    assert.equal(body.parameters.size, "720*1280");
+    // 轮询只发一次，任务 ID 取自 output.task_id，状态取自 output.task_status
+    assert.equal(seen.filter((item) => item.url.includes("/api/v1/tasks/")).length, 1);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

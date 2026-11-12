@@ -127,6 +127,11 @@ export async function preflightVideoJob(input: PreflightInput): Promise<void> {
   const videoGenEnabled = input.options?.videoGenEnabled !== false;
   if (videoGenEnabled && config.videoGen.provider === "http") {
     pushIf(issues, !isHttpUrl(config.videoGen.baseUrl), "AI 画面生成的服务地址无效");
+    pushIf(
+      issues,
+      !config.videoGen.apiKey,
+      "AI 画面生成还没有填写 API Key（默认接阿里百炼 Wan，可在设置页填写；不需要 AI 画面可把供应商改为「不使用」）",
+    );
     pushIf(issues, !config.videoGen.model.trim(), "AI 画面生成的模型名称不能为空");
     pushIf(
       issues,

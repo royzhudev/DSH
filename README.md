@@ -142,7 +142,26 @@ cp video-agent.config.example.json video-agent.config.json
 
 ### AI 画面生成
 
-`videoGen.provider` 默认为 `none`。设为 `http` 后，任务创建时打开“AI 画面”开关，没有素材命中的分镜会调用视频接口；分镜出场角色/道具带参考图时自动走图生视频。
+`videoGen.provider` 默认为 `http`，并预置阿里百炼（DashScope）的 Wan 视频模型：服务地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。**API Key 需要自己填写**（设置页「AI 画面生成」的 API Key，或 `VIDEOGEN_API_KEY`）；没有 Key 时任务会在本地预检阶段直接报错，不会发起付费请求。不需要 AI 画面时把供应商改为「不使用」。
+
+`protocol` 决定请求格式：`auto`（默认）按服务地址判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope` 或 `generic`。
+
+阿里百炼模式（`protocol=dashscope`）的请求与轮询：
+
+```http
+POST https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis
+Authorization: Bearer <API_KEY>
+X-DashScope-Async: enable
+
+{"model": "wan3.0-video", "input": {"prompt": "...", "img_url": "data:image/png;base64,..."}, "parameters": {"duration": 5, "size": "720*1280"}}
+
+GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
+→ {"output": {"task_id": "...", "task_status": "SUCCEEDED", "video_url": "https://..."}}
+```
+
+轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态；图生视频时首帧放在 `input.img_url`（DashScope 的参考图只取首帧，角色库里的多张参考图请改用通用 HTTP 网关）。
+
+通用 HTTP 契约（`protocol=generic`，任务创建时打开“AI 画面”开关）：
 
 接口约定（`baseUrl` + `submitPath`）：
 
@@ -174,9 +193,9 @@ GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
 
 状态与地址字段的兼容：除了 `status` / `state` 与 `video_url`，也识别嵌套结构（`data.status`、`data.task.status`、`data.output.video_url`、`output.url`、`videos[0].file_url` 等）与数组；封面、缩略图字段会被跳过。任务已完成但没解析到地址时，错误信息会带上响应结构摘要，提示用「视频地址字段」补一条点号路径（如 `data.output.video_url`），配置后没取到会自动回退识别。
 
-相关变量：`VIDEOGEN_PROVIDER`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`。
+相关变量：`VIDEOGEN_PROVIDER`、`VIDEOGEN_PROTOCOL`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`。
 
-> 这里只实现通用 HTTP 契约，不绑定具体厂商。使用 Runway、可灵、即梦等模型时，请通过自建网关把厂商 API 适配成上述格式。
+> 默认内置阿里百炼（DashScope）异步视频协议；通用 HTTP 契约适合自建网关。使用 Runway、可灵、即梦等其它模型时，请通过网关把厂商 API 适配成通用格式。
 
 ### 抖音开放平台
 
@@ -361,7 +380,7 @@ pnpm test
 ## 已知限制与下一步
 
 - 抖音发布依赖开放平台应用权限与审核；自动化测试使用本地 mock，未在真实账号上验证发布结果。
-- AI 画面生成只实现通用 HTTP 契约，没有内置厂商适配器；需要自建网关转换请求/响应。图生视频的 `image` / `reference_images` 是通用约定，具体厂商是否支持、支持几张参考图取决于网关。
+- AI 画面生成内置阿里百炼（DashScope）异步协议与通用 HTTP 契约；其它厂商需通过网关适配。DashScope 模式的图生视频只发首帧 `img_url`，多张角色参考图请用通用 HTTP 契约。
 - 角色一致性依赖参考图与提示词，不是人脸/物体特征锁定；参考图角度差异过大时仍可能出现外观漂移。
 - 素材匹配是关键词规则，不是向量语义检索；素材少时观感主要依赖渐变背景。
 - 单进程串行任务，未做任务持久化/断点续跑；适合单机 MVP。

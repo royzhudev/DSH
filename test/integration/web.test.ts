@@ -230,7 +230,7 @@ test(
     assert.equal(settingsText.includes('"apiKeySet": true'), true);
 
     const invalid = await jsonRequest(request, `${app.url}/api/settings`, {
-      videoGen: { provider: "http" },
+      videoGen: { provider: "http", pollPath: "/api/v1/tasks" },
     }, "PUT");
     assert.equal(invalid.status, 400);
 

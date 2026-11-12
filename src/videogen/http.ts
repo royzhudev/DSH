@@ -195,10 +195,15 @@ function readPath(json: unknown, path: string): unknown {
 function pickTaskId(json: unknown): string | undefined {
   if (!isRecord(json)) return undefined;
   const flat = unwrap(json);
-  const direct = pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId", "request_id"]);
+  // 阿里百炼（DashScope）把任务 ID 放在 output.task_id，且响应里还有 request_id（请求 ID，不是任务 ID）。
+  if (isRecord(flat.output)) {
+    const nested = pickString(flat.output, ["task_id", "taskId", "id"]);
+    if (nested) return nested;
+  }
+  const direct = pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId"]);
   if (direct) return direct;
   if (isRecord(flat.task)) return pickString(flat.task, ["id", "task_id", "taskId"]);
-  return undefined;
+  return pickString(flat, ["request_id"]);
 }
 
 function pickError(json: unknown): string | undefined {
@@ -324,13 +329,55 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     this.baseUrl = settings.baseUrl.replace(/\/+$/, "");
   }
 
+  /** 接口协议：显式配置优先，auto 时按服务地址判断（DashScope 用异步任务接口）。 */
+  private protocol(): "dashscope" | "generic" {
+    const configured = this.settings.protocol;
+    if (configured === "dashscope" || configured === "generic") return configured;
+    return /(^|\.)dashscope\.aliyuncs\.com$/i.test(this.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+      ? "dashscope"
+      : "generic";
+  }
+
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
     };
     if (this.settings.apiKey) headers.authorization = `Bearer ${this.settings.apiKey}`;
+    if (this.protocol() === "dashscope") headers["X-DashScope-Async"] = "enable";
     return headers;
+  }
+
+  /**
+   * 按协议组装提交体。DashScope（阿里百炼）用 {model, input, parameters}，
+   * 图生视频的首帧放 input.img_url；通用 HTTP 约定保持扁平字段。
+   */
+  private submitBody(
+    request: VideoGenRequest,
+    image: string | undefined,
+    referenceImages: Array<{ role: string; name: string; image: string }>,
+  ): Record<string, unknown> {
+    if (this.protocol() === "dashscope") {
+      return {
+        model: this.settings.model,
+        input: {
+          prompt: request.prompt,
+          ...(image ? { img_url: image } : {}),
+        },
+        parameters: {
+          duration: Math.max(1, Math.round(request.durationSec)),
+          size: "720*1280",
+        },
+      };
+    }
+    return {
+      model: this.settings.model,
+      prompt: request.prompt,
+      duration_sec: request.durationSec,
+      aspect_ratio: "9:16",
+      ...(image ? { image } : {}),
+      ...(referenceImages.length > 0 ? { reference_images: referenceImages } : {}),
+    };
   }
 
   private withTimeout(signal?: AbortSignal): AbortSignal {
@@ -543,14 +590,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         {
           method: "POST",
           headers: this.headers(),
-          body: JSON.stringify({
-            model: this.settings.model,
-            prompt: request.prompt,
-            duration_sec: request.durationSec,
-            aspect_ratio: "9:16",
-            ...(image ? { image } : {}),
-            ...(referenceImages.length > 0 ? { reference_images: referenceImages } : {}),
-          }),
+          body: JSON.stringify(this.submitBody(request, image, referenceImages)),
         },
         composed,
       );

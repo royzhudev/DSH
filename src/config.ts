@@ -58,11 +58,13 @@ export const DEFAULT_CONFIG: AppConfig = {
     allowUnmatched: false,
   },
   videoGen: {
-    provider: "none",
-    baseUrl: "",
-    model: "video-gen-1",
-    submitPath: "/v1/videos/generations",
-    pollPath: "/v1/videos/generations/{id}",
+    // 默认接阿里百炼（DashScope）的 Wan 视频模型，API Key 由用户在设置页填写。
+    provider: "http",
+    protocol: "auto",
+    baseUrl: "https://dashscope.aliyuncs.com",
+    model: "wan3.0-video",
+    submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+    pollPath: "/api/v1/tasks/{id}",
     pollIntervalMs: 3000,
     timeoutMs: 300_000,
     clipDurationSec: 5,
@@ -98,6 +100,12 @@ export interface LoadConfigOptions {
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
 const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
 const VIDEO_GEN_PROVIDERS = ["none", "http"] as const;
+
+/** AI 画面是否真的可用：启用了 HTTP 供应商并且填写了 API Key，否则走素材库。 */
+export function isAiVideoEnabled(videoGen: AppConfig["videoGen"]): boolean {
+  return videoGen.provider === "http" && Boolean(videoGen.apiKey);
+}
+const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic"] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -212,6 +220,10 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
 
   const videoGenProvider = envString(env, "VIDEOGEN_PROVIDER") as "none" | "http" | undefined;
   if (videoGenProvider) config.videoGen.provider = videoGenProvider;
+  config.videoGen.protocol = set(
+    config.videoGen.protocol,
+    envString(env, "VIDEOGEN_PROTOCOL") as "auto" | "dashscope" | "generic" | undefined,
+  );
   config.videoGen.baseUrl = set(config.videoGen.baseUrl, envString(env, "VIDEOGEN_BASE_URL"));
   config.videoGen.apiKey = set(config.videoGen.apiKey, envString(env, "VIDEOGEN_API_KEY"));
   config.videoGen.model = set(config.videoGen.model, envString(env, "VIDEOGEN_MODEL"));
@@ -301,6 +313,9 @@ function validateConfig(config: AppConfig): void {
       "配音供应商为 openai 但未配置 TTS_API_KEY（或 OPENAI_API_KEY）。也可以改用 edge 或 silent。",
       { code: "CONFIG_MISSING_API_KEY" },
     );
+  }
+  if (!VIDEO_GEN_PROTOCOLS.includes(config.videoGen.protocol)) {
+    throw new AppError("AI 画面生成的协议只能是 auto、dashscope 或 generic", { code: "CONFIG_INVALID" });
   }
   if (!VIDEO_GEN_PROVIDERS.includes(config.videoGen.provider)) {
     throw new AppError(`不支持的画面生成供应商：${config.videoGen.provider}`, {
