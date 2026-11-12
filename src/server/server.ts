@@ -18,7 +18,7 @@ import type { Logger } from "../logger.js";
 import { AppError, toErrorMessage } from "../errors.js";
 import { MaterialLibrary, materialType } from "../materials/library.js";
 import { materialTagPool } from "../materials/match.js";
-import { isInside, sanitizeFilename, sha256 } from "../util/fs.js";
+import { ensureDir, isInside, sanitizeFilename, sha256 } from "../util/fs.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
 import { HttpVideoGenProvider } from "../videogen/http.js";
@@ -624,6 +624,30 @@ async function handleDeleteUser(
   sendJson(res, 200, { ok: true });
 }
 
+const SETTINGS_TEST_VIDEO_KEEP = 20;
+const DEFAULT_VIDEOGEN_TEST_PROMPT = "一只橘猫在窗台上看雨，电影感，近景";
+
+/** 测试视频只保留最近若干条，避免长期占用缓存目录。 */
+async function pruneSettingsTestVideos(dir: string): Promise<void> {
+  try {
+    const names = (await fsp.readdir(dir)).filter((name) => name.endsWith(".mp4"));
+    const files = await Promise.all(
+      names.map(async (name) => ({
+        name,
+        mtimeMs: (await fsp.stat(path.join(dir, name))).mtimeMs,
+      })),
+    );
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    await Promise.all(
+      files
+        .slice(SETTINGS_TEST_VIDEO_KEEP)
+        .map((file) => fsp.rm(path.join(dir, file.name), { force: true })),
+    );
+  } catch {
+    // 清理失败不影响本次测试
+  }
+}
+
 async function handleSettingsTest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -679,9 +703,32 @@ async function handleSettingsTest(
         status: 400,
       });
     }
+    const prompt = (optionalString(body.prompt) ?? "").trim() || DEFAULT_VIDEOGEN_TEST_PROMPT;
+    if (prompt.length > 500) {
+      throw new AppError("测试描述最多 500 个字符", { code: "INVALID_OPTIONS", status: 400 });
+    }
+    const durationSec = optionalNumber(body, "durationSec", "测试时长") ?? 5;
+    if (durationSec !== 3 && durationSec !== 5) {
+      throw new AppError("测试时长只能是 3 秒或 5 秒", { code: "INVALID_OPTIONS", status: 400 });
+    }
+    const outputDir = path.join(config.cacheDir, "settings-test");
+    await ensureDir(outputDir);
     const provider = new HttpVideoGenProvider(config.videoGen, ctx.logger);
-    const result = await provider.check();
-    sendJson(res, 200, { ok: true, kind, ...result });
+    const generated = await provider.generate(
+      { prompt, durationSec },
+      outputDir,
+      AbortSignal.timeout(Math.min(config.videoGen.timeoutMs, 180_000)),
+    );
+    await pruneSettingsTestVideos(outputDir);
+    sendJson(res, 200, {
+      ok: true,
+      kind,
+      provider: generated.provider,
+      model: generated.model,
+      prompt,
+      durationSec: generated.durationSec,
+      videoUrl: `/api/settings/test/video/${encodeURIComponent(path.basename(generated.file))}`,
+    });
     return;
   }
   if (kind === "douyin") {
@@ -916,6 +963,17 @@ async function handleRequest(
 
   if (pathname === "/api/settings/test" && method === "POST") {
     await handleSettingsTest(req, res, ctx);
+    return;
+  }
+
+  const settingsTestVideo = /^\/api\/settings\/test\/video\/([a-zA-Z0-9_-]+\.mp4)$/.exec(pathname);
+  if (settingsTestVideo && method === "GET") {
+    const dir = path.join(ctx.config.cacheDir, "settings-test");
+    const file = path.join(dir, settingsTestVideo[1]!);
+    if (!isInside(dir, file) || !fs.existsSync(file)) {
+      throw new AppError("测试视频不存在或已过期", { code: "TEST_VIDEO_NOT_FOUND", status: 404 });
+    }
+    await serveFile(req, res, file, "video/mp4");
     return;
   }
 

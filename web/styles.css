@@ -1675,6 +1675,29 @@ svg {
   color: var(--danger);
 }
 
+.test-generator {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+
+.test-generator .field-grid-2 {
+  margin-bottom: 10px;
+}
+
+.test-generator .textarea {
+  min-height: 64px;
+}
+
+.test-video {
+  display: block;
+  width: 100%;
+  max-width: 300px;
+  margin-top: 12px;
+  border-radius: 12px;
+  background: #000;
+}
+
 /* ---------- Toasts / loading ---------- */
 .toasts {
   position: fixed;

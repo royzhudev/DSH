@@ -1878,9 +1878,25 @@ async function renderSettings() {
             ${numberField("videogen-clip-duration", "单段时长（秒）", s.videoGen.clipDurationSec, { min: 2, max: 60 })}
           </div>
           ${switchField("videogen-fallback", "生成失败时回退素材库", s.videoGen.fallbackToMaterials)}
-          <div class="test-row">
-            <button class="btn btn-ghost btn-sm" type="button" data-test="videogen">测试画面生成</button>
-            <span class="test-result" id="test-videogen-result">测试会按配置的单段时长提交一次生成请求</span>
+          <div class="test-generator">
+            <div class="field-grid-2">
+              <div class="field">
+                <label for="videogen-test-prompt">测试描述 <span class="optional">留空使用默认</span></label>
+                <textarea class="textarea" id="videogen-test-prompt" rows="2" maxlength="500" placeholder="例如：一只橘猫在窗台上看雨，电影感，近景"></textarea>
+              </div>
+              <div class="field">
+                <label for="videogen-test-duration">测试时长</label>
+                <select class="select" id="videogen-test-duration">
+                  <option value="3">3 秒</option>
+                  <option value="5" selected>5 秒</option>
+                </select>
+              </div>
+            </div>
+            <div class="test-row">
+              <button class="btn btn-ghost btn-sm" type="button" data-test="videogen">生成测试视频</button>
+              <span class="test-result" id="test-videogen-result">测试使用已保存的配置，会真实生成视频并可能消耗额度</span>
+            </div>
+            <div id="test-videogen-preview"></div>
           </div>
         </div>
       </section>
@@ -1967,6 +1983,7 @@ async function renderSettings() {
 
   const markDirty = (event) => {
     if (event?.target?.closest?.("#user-dialog")) return;
+    if (event?.target?.closest?.(".test-generator")) return;
     const stateEl = document.getElementById("save-state");
     if (stateEl) stateEl.textContent = "有未保存的修改";
   };
@@ -2099,22 +2116,31 @@ async function saveSettings() {
 
 async function testProvider(kind, button) {
   const result = document.getElementById(`test-${kind}-result`);
+  const preview = kind === "videogen" ? document.getElementById("test-videogen-preview") : null;
   button.disabled = true;
   if (result) {
     result.textContent = "测试中…";
     result.className = "test-result";
   }
+  if (preview) preview.innerHTML = "";
   try {
-    const data = await api("/api/settings/test", { method: "POST", body: { kind } });
+    const body = { kind };
+    if (kind === "videogen") {
+      body.prompt = document.getElementById("videogen-test-prompt")?.value ?? "";
+      body.durationSec = Number(document.getElementById("videogen-test-duration")?.value ?? 5);
+      if (result) result.textContent = "生成中…（可能需要 1–2 分钟）";
+    }
+    const data = await api("/api/settings/test", { method: "POST", body });
     if (result) {
       if (kind === "script") {
         result.textContent = `连接成功：${data.provider}，生成 ${data.segments} 个分镜`;
       } else if (kind === "tts") {
         result.textContent = `连接成功：${data.provider} / ${data.voice}，${Number(data.durationSec).toFixed(1)} 秒`;
       } else if (kind === "videogen") {
-        result.textContent = data.videoUrlReturned
-          ? `连接成功：${data.model}，接口已返回视频地址`
-          : `连接成功：${data.model}，任务 ${data.taskId} 已受理（${data.status}）`;
+        result.textContent = `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒`;
+        if (preview && data.videoUrl) {
+          preview.innerHTML = `<video class="test-video" controls playsinline preload="metadata" src="${attr(data.videoUrl)}"></video>`;
+        }
       } else if (kind === "douyin") {
         result.textContent = `连接成功：应用凭证有效，client_token 有效期 ${Number(data.expiresInSec) || 0} 秒`;
       } else {
