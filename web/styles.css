@@ -709,6 +709,15 @@ svg {
   box-shadow: 0 0 0 4px rgba(91, 91, 214, 0.2);
 }
 
+.switch input:disabled + .track,
+.switch input:disabled ~ span {
+  opacity: 0.5;
+}
+
+.switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+
 .switch-row {
   display: flex;
   align-items: flex-start;
