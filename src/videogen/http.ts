@@ -183,7 +183,10 @@ function httpFailureMessage(status: number, text: string): string {
   const head = `画面生成服务返回 HTTP ${status}${code ? `（${code}）` : ""}${detail ? `：${detail}` : ""}`;
   const lower = `${code} ${detail}`.toLowerCase();
   const hints: string[] = [];
-  if (status === 401 || status === 403) hints.push("API Key 无效、过期或没有该模型的权限");
+  const syncCallIssue = /synchronous|同步/.test(lower);
+  if ((status === 401 || status === 403) && !syncCallIssue) {
+    hints.push("API Key 无效、过期或没有该模型的权限");
+  }
   if (status === 429 || /throttl|rate.?limit|quota|limit.*exceed|并发/.test(lower)) {
     hints.push("平台限流或并发已满，稍等再试；已提交的任务可在设置页继续查询，不要重复提交");
   }
@@ -191,7 +194,27 @@ function httpFailureMessage(status: number, text: string): string {
   if (/size|resolution|分辨率|像素|aspect/.test(lower)) hints.push("画面尺寸不被接受，可填 720*1280 或 1280*720");
   if (/model/.test(lower)) hints.push("模型名称不被平台接受，核对模型名是否与服务商一致");
   if (/prompt|描述/.test(lower)) hints.push("描述可能触发了内容审核，换个说法再试");
+  if (syncCallIssue) {
+    hints.push(
+      "该接口只支持异步调用，需要请求头 X-DashScope-Async: enable；把接口协议设为「自动」或「阿里百炼 DashScope」即可（百炼地址会自动加上）",
+    );
+  }
   return hints.length > 0 ? `${head}。提示：${hints.join("；")}` : head;
+}
+
+/**
+ * 判断请求是不是发往阿里百炼（DashScope）的视频接口。
+ * 百炼的 video-synthesis 只支持异步调用，缺了 X-DashScope-Async 会报
+ * “current user api does not support synchronous calls”。除了按域名判断，
+ * 也识别百炼的提交路径，避免自定义域名/反向代理下漏加异步头。
+ */
+function isDashScopeEndpoint(baseUrl: string, submitPath: string): boolean {
+  const host = baseUrl
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/.*$/, "")
+    .toLowerCase();
+  if (/(^|\.)dashscope(-intl)?\.aliyuncs\.com$/.test(host)) return true;
+  return /\/services\/aigc\/video-generation\//.test(submitPath);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -282,6 +305,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   readonly name = "http";
   readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private warnedDashScopeProtocol = false;
   private readonly baseUrl: string;
 
   constructor(
@@ -297,9 +321,17 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   /** 接口协议：显式配置优先，auto 时按服务地址判断（DashScope 用异步任务接口）。 */
   private protocol(): "dashscope" | "generic" {
     const configured = this.settings.protocol;
-    if (configured === "dashscope" || configured === "generic") return configured;
-    const host = this.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-    return /(^|\.)dashscope(-intl)?\.aliyuncs\.com$/i.test(host) ? "dashscope" : "generic";
+    if (configured === "dashscope") return "dashscope";
+    // 地址或提交路径已经是百炼视频接口时，必须走异步协议：
+    // 百炼的 video-synthesis 不支持同步调用，协议选错会直接 AccessDenied。
+    if (isDashScopeEndpoint(this.baseUrl, this.settings.submitPath)) {
+      if (configured === "generic" && !this.warnedDashScopeProtocol) {
+        this.warnedDashScopeProtocol = true;
+        this.logger.warn("检测到阿里百炼视频接口，已自动按 DashScope 异步协议发送（忽略“通用 HTTP 契约”设置）");
+      }
+      return "dashscope";
+    }
+    return "generic";
   }
 
   private headers(): Record<string, string> {

@@ -163,6 +163,10 @@ GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
 
 轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态；图生视频时首帧放在 `input.img_url`（DashScope 的参考图只取首帧，角色库里的多张参考图请改用通用 HTTP 网关）。
 
+> **报错 `AccessDenied: current user api does not support synchronous calls`** 说明请求没带异步头。百炼的 `video-synthesis` 只支持异步调用，必须带 `X-DashScope-Async: enable`。现在的实现会对百炼地址（`*.aliyuncs.com`）和百炼提交路径（`/api/v1/services/aigc/video-generation/...`）自动按异步协议发送，即使「接口协议」误选成「通用 HTTP 契约」也不会漏头；日志里会提示一次。推荐设置：接口协议「自动」或「阿里百炼 DashScope」、接口地址 `https://dashscope.aliyuncs.com`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`、模型 `wan3.0-video`，API Key 填百炼的 Key。
+
+> 反向代理/自建网关如果改写了域名和路径，请把「接口协议」显式设为「阿里百炼 DashScope」，否则无法识别为百炼接口。
+
 通用 HTTP 契约（`protocol=generic`，任务创建时打开“AI 画面”开关）：
 
 接口约定（`baseUrl` + `submitPath`）：

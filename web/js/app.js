@@ -2342,7 +2342,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? "已启用" : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼</strong>的 Wan 视频模型（<code>wan3.0-video</code>），API Key 需要自己填写；没有 Key 时任务会在本地预检阶段报错，不会产生费用。百炼模式使用异步任务接口：提交带 <code>X-DashScope-Async</code>，返回 <code>output.task_id</code>，查询 <code>/api/v1/tasks/{id}</code> 得到 <code>output.video_url</code>。通用 HTTP 契约则提交 <code>{model, prompt, duration_sec, aspect_ratio}</code> 并返回 video_url 或任务 id，图生视频额外携带 <code>image</code> 与 <code>reference_images</code>；返回字段兼容嵌套与数组形式。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼</strong>的 Wan 视频模型（<code>wan3.0-video</code>），API Key 需要自己填写；没有 Key 时任务会在本地预检阶段报错，不会产生费用。百炼的 video-synthesis <strong>只支持异步调用</strong>：提交必须带请求头 <code>X-DashScope-Async: enable</code>（缺少时会报 <code>current user api does not support synchronous calls</code>）；接口地址或提交路径是百炼时会自动按异步协议发送，返回 <code>output.task_id</code>，再查询 <code>/api/v1/tasks/{id}</code> 得到 <code>output.video_url</code>。通用 HTTP 契约则提交 <code>{model, prompt, duration_sec, aspect_ratio}</code> 并返回 video_url 或任务 id，图生视频额外携带 <code>image</code> 与 <code>reference_images</code>；返回字段兼容嵌套与数组形式。</span></div>
           <div class="field-grid-3">
             <div class="field">
               <label for="videogen-provider">供应商</label>
