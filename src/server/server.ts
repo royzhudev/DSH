@@ -792,6 +792,11 @@ interface PendingVideoTest {
  * 再次点击测试时复用这些任务继续查询，避免对同一段测试视频重复付费。
  */
 const pendingVideoTests = new Map<string, PendingVideoTest>();
+/**
+ * 正在跑的视频测试。同一个“地址+模型+时长+描述”的重复请求（连点、自动续查、
+ * 多标签页）共享同一次提交，避免向平台重复提交、重复扣费。
+ */
+const inflightVideoTests = new Map<string, Promise<Record<string, unknown>>>();
 
 function settingsTestKey(
   config: { videoGen: { baseUrl: string; model: string } },
@@ -910,56 +915,67 @@ async function handleSettingsTest(
     const explicitTaskId = (optionalString(body.resumeTaskId) ?? "").trim();
     const pending = explicitTaskId ? undefined : takePendingVideoTest(key);
     const resumeTaskId = explicitTaskId || pending?.taskId;
-    try {
-      const generated = resumeTaskId
-        ? await provider.resume(resumeTaskId, outputDir, AbortSignal.timeout(budgetMs))
-        : await provider.generate({ prompt, durationSec }, outputDir, AbortSignal.timeout(budgetMs));
-      pendingVideoTests.delete(key);
-      await pruneSettingsTestVideos(outputDir);
-      sendJson(res, 200, {
-        ok: true,
-        kind,
-        provider: generated.provider,
-        model: generated.model,
-        prompt,
-        durationSec: generated.durationSec,
-        reused: Boolean(resumeTaskId),
-        videoUrl: `/api/settings/test/video/${encodeURIComponent(path.basename(generated.file))}`,
-      });
-      return;
-    } catch (error) {
-      if (!(error instanceof VideoGenPendingError)) {
+    const runTest = async (): Promise<Record<string, unknown>> => {
+      try {
+        const generated = resumeTaskId
+          ? await provider.resume(resumeTaskId, outputDir, AbortSignal.timeout(budgetMs))
+          : await provider.generate({ prompt, durationSec }, outputDir, AbortSignal.timeout(budgetMs));
         pendingVideoTests.delete(key);
-        throw error;
-      }
-      // 已提交但还没出片：不算失败，如实告诉用户并记住任务，避免重复扣费。
-      if (error.taskId) {
-        pendingVideoTests.set(key, {
-          taskId: error.taskId,
+        await pruneSettingsTestVideos(outputDir);
+        return {
+          ok: true,
+          kind,
+          provider: generated.provider,
+          model: generated.model,
+          prompt,
+          durationSec: generated.durationSec,
+          reused: Boolean(resumeTaskId),
+          videoUrl: `/api/settings/test/video/${encodeURIComponent(path.basename(generated.file))}`,
+        };
+      } catch (error) {
+        if (!(error instanceof VideoGenPendingError)) {
+          pendingVideoTests.delete(key);
+          throw error;
+        }
+        // 已提交但还没出片：不算失败，如实告诉用户并记住任务，避免重复扣费。
+        if (error.taskId) {
+          pendingVideoTests.set(key, {
+            taskId: error.taskId,
+            prompt,
+            durationSec,
+            model: config.videoGen.model,
+            at: Date.now(),
+          });
+        } else {
+          pendingVideoTests.delete(key);
+        }
+        return {
+          ok: true,
+          kind,
+          pending: true,
+          submitted: error.submitted,
+          reused: Boolean(resumeTaskId),
+          taskId: error.taskId ?? null,
+          provider: provider.name,
+          model: config.videoGen.model,
           prompt,
           durationSec,
-          model: config.videoGen.model,
-          at: Date.now(),
-        });
-      } else {
-        pendingVideoTests.delete(key);
+          lastStatus: error.lastStatus || null,
+          message: error.message,
+        };
       }
-      sendJson(res, 200, {
-        ok: true,
-        kind,
-        pending: true,
-        submitted: error.submitted,
-        reused: Boolean(resumeTaskId),
-        taskId: error.taskId ?? null,
-        provider: provider.name,
-        model: config.videoGen.model,
-        prompt,
-        durationSec,
-        lastStatus: error.lastStatus || null,
-        message: error.message,
-      });
-      return;
+    };
+
+    // 同一任务（同 key + 同续查任务号）的并发请求复用同一个 Promise，只提交一次。
+    const flightKey = `${key}|${resumeTaskId ?? ""}`;
+    let work = inflightVideoTests.get(flightKey);
+    if (!work) {
+      work = runTest();
+      inflightVideoTests.set(flightKey, work);
+      void work.finally(() => inflightVideoTests.delete(flightKey)).catch(() => {});
     }
+    sendJson(res, 200, await work);
+    return;
   }
   if (kind === "douyin") {
     const result = await ctx.douyin.verifyCredentials(AbortSignal.timeout(20_000));

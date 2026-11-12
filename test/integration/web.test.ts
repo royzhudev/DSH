@@ -587,3 +587,51 @@ test(
     assert.equal(mock.state.submits, 1);
   },
 );
+
+test(
+  "网页与 API：同一测试并发请求只提交一次，避免平台重复扣费",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const clip = path.join(dir, "source", "slow-source.mp4");
+    await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+    const mock = await startSlowVideoGenMock(clip);
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      videoGen: {
+        provider: "http",
+        baseUrl: mock.url,
+        model: "slow-model",
+        apiKey: "slow-key",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5_000,
+        clipDurationSec: 3,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      await mock.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+    const payload = { kind: "videogen", prompt: "同一个提示词", durationSec: 3 };
+
+    // 连点两下 / 两个标签页同时点：两次请求共享同一次提交。
+    const [a, b] = await Promise.all([
+      jsonRequest(request, `${app.url}/api/settings/test`, payload),
+      jsonRequest(request, `${app.url}/api/settings/test`, payload),
+    ]);
+    assert.equal(a.status, 200, await a.clone().text());
+    assert.equal(b.status, 200, await b.clone().text());
+    const first = (await a.json()) as { pending: boolean; taskId: string };
+    const second = (await b.json()) as { pending: boolean; taskId: string };
+    assert.equal(first.taskId, "task-slow");
+    assert.equal(second.taskId, "task-slow");
+    assert.equal(mock.state.submits, 1, "并发测试请求不应重复提交到平台");
+  },
+);

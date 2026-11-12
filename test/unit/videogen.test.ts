@@ -879,3 +879,48 @@ test("HTTP 视频：异步调用被拒时提示改回同步协议", async () => 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("HTTP 视频：提交成功但查询被拒时，保留任务 ID 交给调用方续查", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        protocol: "dashscope",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5_000,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, {
+      fetchImpl: async (input, init) => {
+        if ((init?.method ?? "GET") === "POST") {
+          return new Response(
+            JSON.stringify({ output: { task_id: "task-poll-denied", task_status: "PENDING" } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({ code: "AccessDenied", message: "current user api does not support asynchronous calls" }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await assert.rejects(
+      provider.generate({ prompt: "城市夜景", durationSec: 5 }, path.join(dir, "gen")),
+      (error: unknown) => {
+        assert.ok(error instanceof VideoGenPendingError, `应保留任务，实际：${String(error)}`);
+        assert.equal(error.taskId, "task-poll-denied");
+        assert.equal(error.submitted, true);
+        assert.match(error.message, /task-poll-denied/);
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
