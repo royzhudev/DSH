@@ -185,13 +185,14 @@ function httpFailureMessage(status: number, text: string, requestUrl = ""): stri
   const head = `画面生成服务返回 HTTP ${status}${code ? `（${code}）` : ""}${detail ? `：${detail}` : ""}${where}`;
   const lower = `${code} ${detail}`.toLowerCase();
   const hints: string[] = [];
-  const syncCallIssue = /does not support synchronous calls|不支持同步调用/i.test(`${code} ${detail}`);
+  // "asynchronous" 里包含 "synchronous"，必须先判异步，否则两种提示会同时命中。
   const asyncCallIssue = /does not support asynchronous calls|不支持异步调用/i.test(`${code} ${detail}`);
+  const syncCallIssue = !asyncCallIssue && /does not support synchronous calls|不支持同步调用/i.test(`${code} ${detail}`);
   const syncHint =
-    "该接口只支持异步调用，需要请求头 X-DashScope-Async: enable；把接口协议设为「自动」或「阿里百炼 DashScope」即可（百炼地址会自动加上）";
+    "该接口只支持异步调用，提交需要请求头 X-DashScope-Async: enable；把接口协议设为「自动」或「阿里百炼 DashScope」即可（百炼域名会自动加上）";
   const asyncHint =
-    "该接口只支持同步调用，请求里不能带 X-DashScope-Async；程序已自动去掉请求头重试一次，若仍失败请核对模型名与提交路径是否属于同一个接口";
-  if ((status === 401 || status === 403) && !syncCallIssue) {
+    "该接口只支持同步调用，请求里不能带 X-DashScope-Async；提交已自动改为同步重试一次，任务查询始终不带该头；若仍失败请核对模型名与提交路径是否属于同一个接口";
+  if ((status === 401 || status === 403) && !syncCallIssue && !asyncCallIssue) {
     hints.push("API Key 无效、过期或没有该模型的权限");
   }
   if (status === 429 || /throttl|rate.?limit|quota|limit.*exceed|并发/.test(lower)) {
@@ -325,6 +326,9 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   private asyncHeader: "enable" | null = null;
   private readonly asyncModeKey: string;
   private readonly baseUrl: string;
+  /** 竖屏短剧默认 720P；万相 3.0 用 resolution+ratio，不再传 size。 */
+  private readonly DASHSCOPE_RESOLUTION = "720P";
+  private readonly DASHSCOPE_RATIO = "9:16";
 
   constructor(
     private readonly settings: VideoGenSettings,
@@ -359,13 +363,14 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     return "generic";
   }
 
-  private headers(): Record<string, string> {
+  /** withAsync 只给提交请求用：百炼的任务查询接口是同步的，带异步头会报 AccessDenied。 */
+  private headers(withAsync = false): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
     };
     if (this.settings.apiKey) headers.authorization = `Bearer ${this.settings.apiKey}`;
-    if (this.asyncHeader) headers["X-DashScope-Async"] = this.asyncHeader;
+    if (withAsync && this.asyncHeader) headers["X-DashScope-Async"] = this.asyncHeader;
     return headers;
   }
 
@@ -379,16 +384,18 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     referenceImages: Array<{ role: string; name: string; image: string }>,
   ): Record<string, unknown> {
     if (this.protocol() === "dashscope") {
+      const duration = Math.max(1, Math.round(request.durationSec));
+      const wan3 = /^wan3[.\-]/i.test(this.settings.model.trim());
       return {
         model: this.settings.model,
         input: {
           prompt: request.prompt,
-          ...(image ? { img_url: image } : {}),
+          // 万相 3.0 的图生视频用 media[type=first_frame]；早期模型用 img_url。
+          ...(image ? (wan3 ? { media: [{ type: "first_frame", url: image }] } : { img_url: image }) : {}),
         },
-        parameters: {
-          duration: Math.max(1, Math.round(request.durationSec)),
-          size: "720*1280",
-        },
+        parameters: wan3
+          ? { resolution: this.DASHSCOPE_RESOLUTION, ratio: this.DASHSCOPE_RATIO, duration }
+          : { duration, size: "720*1280" },
       };
     }
     return {
@@ -628,12 +635,15 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       }`,
     );
     const submitUrl = `${this.baseUrl}${this.settings.submitPath}`;
+    this.logger.info(
+      `提交画面生成任务：POST ${submitUrl}（${this.protocol() === "dashscope" ? "DashScope 异步协议" : "通用 HTTP 契约"}，模型 ${this.settings.model}）`,
+    );
     let taskId: string | undefined;
     let submitted = false;
     try {
       const body = JSON.stringify(this.submitBody(request, image, referenceImages));
       const submit = () =>
-        this.requestJson(submitUrl, { method: "POST", headers: this.headers(), body }, composed);
+        this.requestJson(submitUrl, { method: "POST", headers: this.headers(true), body }, composed);
       let json: unknown;
       try {
         json = await submit();

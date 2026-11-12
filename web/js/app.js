@@ -2342,7 +2342,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? "已启用" : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼</strong>的 Wan 视频模型（<code>wan3.0-video</code>），API Key 需要自己填写；没有 Key 时任务会在本地预检阶段报错，不会产生费用。百炼各接口对异步的要求不一样：video-synthesis <strong>必须带异步请求头</strong> <code>X-DashScope-Async: enable</code>（缺少时报 <code>does not support synchronous calls</code>），也有只支持同步的接口（带着该头会报 <code>does not support asynchronous calls</code>）。程序会按平台返回<strong>自动切换异步/同步并重试一次</strong>，地址或提交路径是百炼时默认先按异步发送，返回 <code>output.task_id</code> 时再查询 <code>/api/v1/tasks/{id}</code> 得到 <code>output.video_url</code>。通用 HTTP 契约则提交 <code>{model, prompt, duration_sec, aspect_ratio}</code> 并返回 video_url 或任务 id，图生视频额外携带 <code>image</code> 与 <code>reference_images</code>；返回字段兼容嵌套与数组形式。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼</strong>的 Wan 视频模型（<code>wan3.0-video</code>），API Key 需要自己填写；没有 Key 时任务会在本地预检阶段报错，不会产生费用。百炼各接口对异步的要求不一样：video-synthesis <strong>必须带异步请求头</strong> <code>X-DashScope-Async: enable</code>（缺少时报 <code>does not support synchronous calls</code>），任务查询接口是同步的，<strong>不能</strong>带这个头（带上会报 <code>does not support asynchronous calls</code>），程序只在提交时添加；平台在两个方向都用 403 表态时还会自动切换一次并重试。返回 <code>output.task_id</code> 后查询 <code>/api/v1/tasks/{id}</code> 得到 <code>output.video_url</code>；万相 3.0 用 <code>parameters.resolution/ratio/duration</code>，图生视频首帧放 <code>input.media[type=first_frame]</code>。通用 HTTP 契约则提交 <code>{model, prompt, duration_sec, aspect_ratio}</code> 并返回 video_url 或任务 id，图生视频额外携带 <code>image</code> 与 <code>reference_images</code>；返回字段兼容嵌套与数组形式。</span></div>
           <div class="field-grid-3">
             <div class="field">
               <label for="videogen-provider">供应商</label>
@@ -2380,6 +2380,10 @@ async function renderSettings() {
               </select>
               <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送（带 X-DashScope-Async: enable）；平台说只支持同步时会自动去掉该头重试一次，不用自己处理</div>
             </div>
+          </div>
+          <div class="test-row">
+            <button class="btn btn-ghost btn-sm" type="button" id="videogen-preset">一键填入百炼 Wan 3.0 默认值</button>
+            <span class="hint" id="videogen-preset-hint">会把协议、地址、模型、路径恢复成阿里百炼的异步视频接口；填入后点「保存设置」再测试</span>
           </div>
           <div class="field-grid-3">
             ${numberField("videogen-poll-interval", "轮询间隔（毫秒）", s.videoGen.pollIntervalMs, { min: 200, max: 60000, step: 100 })}
@@ -2510,6 +2514,25 @@ async function renderSettings() {
 
   document.getElementById("save-settings").addEventListener("click", () => {
     void saveSettings();
+  });
+
+  // 百炼接错地址/协议时最容易反复踩坑，给一个一键恢复默认值的入口。
+  document.getElementById("videogen-preset")?.addEventListener("click", () => {
+    const set = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value;
+    };
+    set("videogen-provider", "http");
+    set("videogen-protocol", "dashscope");
+    set("videogen-base-url", "https://dashscope.aliyuncs.com");
+    set("videogen-model", "wan3.0-video");
+    set("videogen-submit-path", "/api/v1/services/aigc/video-generation/video-synthesis");
+    set("videogen-poll-path", "/api/v1/tasks/{id}");
+    set("videogen-poll-interval", "3000");
+    set("videogen-timeout", "600000");
+    set("videogen-result-path", "");
+    const hint = document.getElementById("videogen-preset-hint");
+    if (hint) hint.textContent = "已填入百炼 Wan 3.0 默认值，点「保存设置」后即可测试";
   });
 
   for (const button of view.querySelectorAll("[data-test]")) {

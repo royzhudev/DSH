@@ -412,14 +412,20 @@ test("HTTP 视频：阿里百炼 DashScope 协议提交与轮询", async () => {
     const body = JSON.parse(submit.body) as {
       model: string;
       input: { prompt: string };
-      parameters: { duration: number; size: string };
+      parameters: { duration: number; resolution?: string; ratio?: string; size?: string };
     };
     assert.equal(body.model, "wan3.0-video");
     assert.equal(body.input.prompt, "一只橘猫在窗台上看雨");
     assert.equal(body.parameters.duration, 5);
-    assert.equal(body.parameters.size, "720*1280");
+    // 万相 3.0 用 resolution + ratio，不再传 size
+    assert.equal(body.parameters.resolution, "720P");
+    assert.equal(body.parameters.ratio, "9:16");
+    assert.equal(body.parameters.size, undefined);
     // 轮询只发一次，任务 ID 取自 output.task_id，状态取自 output.task_status
-    assert.equal(seen.filter((item) => item.url.includes("/api/v1/tasks/")).length, 1);
+    const polls = seen.filter((item) => item.url.includes("/api/v1/tasks/"));
+    assert.equal(polls.length, 1);
+    // 任务查询是同步接口，不能带异步头
+    assert.equal(polls[0]!.headers["X-DashScope-Async"], undefined);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -783,3 +789,93 @@ test("HTTP 文生视频：平台要求异步时自动补上 X-DashScope-Async �
   }
 });
 
+
+test("HTTP 视频：万相 3.0 的图生视频首帧走 media[type=first_frame]", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const bytes = await fs.readFile(clip);
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        protocol: "dashscope",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+      },
+    });
+    const hero = path.join(dir, "cast", "hero.png");
+    await fs.mkdir(path.dirname(hero), { recursive: true });
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x884466:s=64x64", "-frames:v", "1", hero]);
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if ((init?.method ?? "GET") === "POST") {
+        body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ output: { task_id: "task-wan3", task_status: "PENDING" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(input).endsWith("/files/clip.mp4")) return new Response(bytes, { status: 200 });
+      return new Response(
+        JSON.stringify({
+          output: { task_status: "SUCCEEDED", video_url: "https://dashscope.aliyuncs.com/files/clip.mp4" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+    await provider.generate({ prompt: "雨夜街道", durationSec: 5, image: hero }, path.join(dir, "gen"));
+
+    const input = body?.input as { media?: Array<{ type: string; url: string }>; img_url?: string };
+    const parameters = body?.parameters as { resolution?: string; ratio?: string; duration?: number };
+    assert.equal(parameters.resolution, "720P");
+    assert.equal(parameters.ratio, "9:16");
+    assert.equal(parameters.duration, 5);
+    assert.equal(input.media?.[0]?.type, "first_frame");
+    assert.match(String(input.media?.[0]?.url), /^data:image\/png;base64,/);
+    assert.equal(input.img_url, undefined);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("HTTP 视频：异步调用被拒时提示改回同步协议", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        timeoutMs: 5_000,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({ code: "AccessDenied", message: "current user api does not support asynchronous calls" }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        ),
+    });
+    await assert.rejects(
+      provider.generate({ prompt: "城市夜景", durationSec: 5 }, path.join(dir, "gen")),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.match(error.message, /同步/);
+        assert.doesNotMatch(error.message, /需要请求头 X-DashScope-Async: enable/);
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
