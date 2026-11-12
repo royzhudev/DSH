@@ -220,3 +220,126 @@ test("HTTP 图生视频：提交首帧与角色参考图 data URL", async () => 
     await mock.close();
   }
 });
+
+test("HTTP 视频：识别聚合平台常见的嵌套与数组返回结构", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const bytes = await fs.readFile(clip);
+  try {
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+    const run = async (pollPayload: unknown, resultPath = "") => {
+      const config = makeTestConfig(dir);
+      config.videoGen = {
+        ...config.videoGen,
+        provider: "http",
+        baseUrl: "http://videogen.test",
+        model: "happyhorse-1.1-t2v",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 40,
+        timeoutMs: 5_000,
+        clipDurationSec: 3,
+        resultPath,
+        fallbackToMaterials: true,
+      };
+      let submits = 0;
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          submits += 1;
+          return json({ code: 0, data: { task_id: "task_nested" } });
+        }
+        if (url.includes("/v1/videos/generations/task_nested")) return json(pollPayload);
+        if (url.endsWith("/files/clip.mp4")) return new Response(bytes, { status: 200 });
+        return new Response("{}", { status: 404 });
+      };
+      const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+      const generated = await provider.generate({ prompt: "城市夜景", durationSec: 3 }, path.join(dir, "gen"));
+      return { generated, submits };
+    };
+
+    // tokease 风格：{code:0, data:{status:"completed", output:{video_url}}}
+    const nested = await run({
+      code: 0,
+      message: "ok",
+      data: { task_id: "task_nested", status: "completed", output: { video_url: "/files/clip.mp4" } },
+    });
+    assert.equal(nested.generated.durationSec > 0.5, true);
+    assert.equal(nested.submits, 1);
+
+    // 更深的嵌套与数组：data.task.result.videos[0].file_url
+    const deep = await run({
+      data: { task: { status: "succeeded", result: { videos: [{ file_url: "/files/clip.mp4" }] } } },
+    });
+    assert.equal(deep.generated.durationSec > 0.5, true);
+
+    // 状态与地址都嵌在 data.result 下
+    const inResult = await run({
+      data: { result: { status: "SUCCESS", url: "/files/clip.mp4" } },
+    });
+    assert.equal(inResult.generated.durationSec > 0.5, true);
+
+    // 封面/缩略图不会被误当成成片
+    const withThumb = await run({
+      data: {
+        status: "completed",
+        cover: { url: "/files/cover.jpg" },
+        output: { video_url: "/files/clip.mp4" },
+      },
+    });
+    assert.equal(withThumb.generated.durationSec > 0.5, true);
+
+    // 结构完全自定义时，用「视频地址字段」点号路径兜底
+    const custom = await run({ data: { weird: { addr: "/files/clip.mp4" } } }, "data.weird.addr");
+    assert.equal(custom.generated.durationSec > 0.5, true);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("HTTP 视频：任务完成却没解析到地址时，提示可配置视频地址字段", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = makeTestConfig(dir);
+    config.videoGen = {
+      ...config.videoGen,
+      provider: "http",
+      baseUrl: "http://videogen.test",
+      model: "video-model",
+      submitPath: "/v1/videos/generations",
+      pollPath: "/v1/videos/generations/{id}",
+      pollIntervalMs: 40,
+      timeoutMs: 5_000,
+      resultPath: "data.addr",
+      fallbackToMaterials: true,
+    };
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (init?.method === "POST") return json({ task_id: "task-nourl" });
+      if (url.includes("/v1/videos/generations/task-nourl")) {
+        return json({ data: { status: "completed", weird: { somewhere: "/files/clip.mp4" } } });
+      }
+      return new Response("{}", { status: 404 });
+    };
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+    const error = await provider
+      .generate({ prompt: "城市夜景", durationSec: 3 }, path.join(dir, "gen"))
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    assert.ok(error instanceof AppError);
+    assert.equal(error.code, "VIDEOGEN_INVALID_RESPONSE");
+    assert.match(error.message, /没有可识别的视频地址/);
+    assert.match(error.message, /视频地址字段/);
+    // 响应结构摘要要出现，便于用户回报真实字段名。
+    assert.match(error.message, /completed/);
+    assert.match(error.message, /somewhere/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

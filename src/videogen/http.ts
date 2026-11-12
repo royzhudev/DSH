@@ -38,49 +38,174 @@ function isUrlLike(value: string): boolean {
   return /^https?:\/\//i.test(value) || value.startsWith("/") || value.startsWith("./") || value.startsWith("../");
 }
 
-function pickVideoUrl(json: unknown): string | undefined {
-  if (!isRecord(json)) return undefined;
-  const direct = pickString(json, ["video_url", "videoUrl", "url", "output", "video"]);
-  if (direct && isUrlLike(direct)) return direct;
-  const data = json.data;
-  if (isRecord(data)) {
-    const nested = pickString(data, ["video_url", "videoUrl", "url", "output"]);
-    if (nested && isUrlLike(nested)) return nested;
-    if (isRecord(data.video)) {
-      const inVideo = pickString(data.video, ["url", "video_url", "download_url"]);
-      if (inVideo && isUrlLike(inVideo)) return inVideo;
+/** 明确表示“这是成片地址”的字段。 */
+const VIDEO_URL_KEYS = new Set([
+  "video_url",
+  "videourl",
+  "download_url",
+  "downloadurl",
+  "file_url",
+  "fileurl",
+  "result_url",
+  "resulturl",
+  "output_url",
+  "outputurl",
+  "play_url",
+  "playurl",
+  "video_uri",
+  "media_url",
+]);
+/** 结构特殊时也能兜底的通用地址字段。 */
+const GENERIC_URL_KEYS = new Set(["url", "uri", "href", "src", "link"]);
+/** 容器字段，继续往下找。 */
+const CONTAINER_KEYS = new Set([
+  "data",
+  "result",
+  "results",
+  "output",
+  "outputs",
+  "task",
+  "tasks",
+  "job",
+  "payload",
+  "response",
+  "content",
+  "items",
+  "list",
+  "video",
+  "videos",
+  "file",
+  "files",
+  "asset",
+  "assets",
+  "artifacts",
+  "generations",
+]);
+/** 封面、缩略图之类不是成片。 */
+const NON_VIDEO_KEY = /(cover|thumb|thumbnail|poster|image|img|avatar|icon|logo|sprite|qr_?code|preview_image|watermark)/i;
+const MAX_WALK_DEPTH = 6;
+
+/**
+ * 视频地址字段的兼容解析。
+ *
+ * 聚合平台的返回结构差异很大：有的直接给 video_url，有的包成
+ * {code:0,data:{status:"completed",output:{video_url:"..."}}}，
+ * 还有的给 data[0].url 或 result.videos[0].file_url。这里按字段语义递归查找，
+ * 优先选“明确是成片”的字段，其次才是通用 url，并跳过封面/缩略图。
+ */
+function findVideoUrl(json: unknown): string | undefined {
+  let best: { url: string; score: number } | undefined;
+  const consider = (key: string, raw: string): void => {
+    const url = raw.trim();
+    if (!isUrlLike(url)) return;
+    const lower = key.toLowerCase();
+    let score = 0;
+    if (VIDEO_URL_KEYS.has(lower)) score = 3;
+    else if (GENERIC_URL_KEYS.has(lower) || CONTAINER_KEYS.has(lower)) score = 2;
+    else return;
+    if (!best || score > best.score) best = { url, score };
+  };
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > MAX_WALK_DEPTH || value === null || value === undefined) return;
+    if (typeof value === "string" || typeof value === "number") return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth + 1);
+      return;
     }
-    if (isRecord(data.result)) {
-      const inResult = pickString(data.result, ["video_url", "url", "output"]);
-      if (inResult && isUrlLike(inResult)) return inResult;
+    if (!isRecord(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      if (NON_VIDEO_KEY.test(key)) continue;
+      if (typeof child === "string") {
+        consider(key, child);
+        continue;
+      }
+      walk(child, depth + 1);
     }
+  };
+  walk(json, 0);
+  return best?.url;
+}
+
+const STATUS_KEYS = new Set(["status", "state", "task_status", "taskstate", "job_status", "progress_status"]);
+const STATUS_CONTAINER_KEYS = new Set(["data", "result", "task", "job", "payload", "response", "output"]);
+
+/** 状态字段同样兼容嵌套：data.status、data.task.status 等。 */
+function pickStatus(json: unknown): string {
+  let best: { status: string; score: number } | undefined;
+  const walk = (value: unknown, depth: number, containerKey: string): void => {
+    if (depth > 4 || value === null || value === undefined || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth + 1, containerKey);
+      return;
+    }
+    if (!isRecord(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const lower = key.toLowerCase();
+      if (typeof child === "string" && STATUS_KEYS.has(lower)) {
+        const score = (STATUS_KEYS.has(lower) ? 2 : 1) + (STATUS_CONTAINER_KEYS.has(containerKey) ? 1 : 0);
+        if (!best || score > best.score) best = { status: child.trim().toLowerCase(), score };
+        continue;
+      }
+      walk(child, depth + 1, lower);
+    }
+  };
+  walk(json, 0, "");
+  return best?.status ?? "";
+}
+
+function readPath(json: unknown, path: string): unknown {
+  let current: unknown = json;
+  for (const raw of path.split(".")) {
+    const key = raw.trim();
+    if (!key) continue;
+    const index = /^\[(\d+)\]$/.exec(key);
+    if (index) {
+      if (!Array.isArray(current)) return undefined;
+      current = current[Number(index[1])];
+      continue;
+    }
+    if (Array.isArray(current)) {
+      const numeric = Number(key);
+      if (!Number.isInteger(numeric) || numeric < 0) return undefined;
+      current = current[numeric];
+      continue;
+    }
+    if (!isRecord(current)) return undefined;
+    current = current[key];
   }
-  return undefined;
+  return current;
 }
 
 function pickTaskId(json: unknown): string | undefined {
   if (!isRecord(json)) return undefined;
   const flat = unwrap(json);
-  return pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId", "request_id"]);
-}
-
-function pickStatus(json: unknown): string {
-  if (!isRecord(json)) return "";
-  const flat = unwrap(json);
-  const value = flat.status ?? flat.state ?? flat.task_status;
-  return typeof value === "string" ? value.toLowerCase() : "";
+  const direct = pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId", "request_id"]);
+  if (direct) return direct;
+  if (isRecord(flat.task)) return pickString(flat.task, ["id", "task_id", "taskId"]);
+  return undefined;
 }
 
 function pickError(json: unknown): string | undefined {
   if (!isRecord(json)) return undefined;
   const flat = unwrap(json);
-  const message = flat.error ?? flat.message ?? flat.error_message ?? flat.fail_reason;
+  const message = flat.error ?? flat.message ?? flat.msg ?? flat.error_message ?? flat.fail_reason;
   if (typeof message === "string" && message.trim()) return message.trim();
   if (isRecord(message)) {
     const nested = pickString(message, ["message", "detail", "reason"]);
     if (nested) return nested;
   }
   return undefined;
+}
+
+/** 返回结构摘要，截断长字符串，避免日志与错误信息过长。 */
+function describeJson(json: unknown): string {
+  try {
+    return JSON.stringify(json, (_key, value) =>
+      typeof value === "string" && value.length > 120 ? `${value.slice(0, 60)}…${value.slice(-20)}` : value,
+    ).slice(0, 400);
+  } catch {
+    return String(json);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -230,6 +355,17 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     }
   }
 
+  /** 优先使用配置的点号路径，其次按常见字段语义自动识别。 */
+  private videoUrlOf(json: unknown): string | undefined {
+    const configured = this.settings.resultPath?.trim();
+    if (configured) {
+      const value = readPath(json, configured);
+      if (typeof value === "string" && isUrlLike(value.trim())) return value.trim();
+      this.logger.warn(`配置的视频地址字段 ${configured} 没有取到地址，回退到自动识别`);
+    }
+    return findVideoUrl(json);
+  }
+
   private async waitForVideoUrl(taskId: string, signal: AbortSignal): Promise<string> {
     const pollUrl = `${this.baseUrl}${this.settings.pollPath.replace("{id}", encodeURIComponent(taskId))}`;
     const deadline = Date.now() + this.settings.timeoutMs;
@@ -237,7 +373,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     while (Date.now() < deadline) {
       if (signal.aborted) throw abortReason(signal);
       const json = await this.requestJson(pollUrl, { method: "GET", headers: this.headers() }, signal);
-      const videoUrl = pickVideoUrl(json);
+      const videoUrl = this.videoUrlOf(json);
       if (videoUrl) return videoUrl;
       const status = pickStatus(json);
       if (status) lastStatus = status;
@@ -248,10 +384,13 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         });
       }
       if (SUCCESS_STATES.has(status)) {
-        throw new AppError("画面生成任务已完成，但响应中没有视频地址", {
-          code: "VIDEOGEN_INVALID_RESPONSE",
-          status: 502,
-        });
+        // 平台说完成了却没有可识别的地址：把返回结构记下来，便于针对性补字段。
+        this.logger.warn(`画面生成任务 ${taskId} 已完成但未解析到视频地址：${describeJson(json)}`);
+        throw new AppError(
+          `画面生成任务已完成，但返回里没有可识别的视频地址：${describeJson(json)}。` +
+            "可在设置页填入「视频地址字段」（如 output.video_url）后继续等待该任务，不会重新扣费。",
+          { code: "VIDEOGEN_INVALID_RESPONSE", status: 502 },
+        );
       }
       await sleep(this.settings.pollIntervalMs);
     }
@@ -325,6 +464,9 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     if (error instanceof AppError && error.status < 500) return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_TASK_FAILED") return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
+    // 已完成但解析不到地址、响应格式不对：是确定的解析问题，不是“还在生成”，
+    // 保留原始提示（含响应结构摘要与字段配置建议），否则用户只会看到“继续等待”。
+    if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE") return error;
     if (!options.submitted) {
       return new VideoGenPendingError({
         message:
@@ -397,7 +539,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         composed,
       );
       submitted = true;
-      const directUrl = pickVideoUrl(json);
+      const directUrl = this.videoUrlOf(json);
       if (directUrl) return await this.collect(directUrl, outputDir, composed);
       taskId = pickTaskId(json);
       if (!taskId) {

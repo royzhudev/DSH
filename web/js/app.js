@@ -2328,7 +2328,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? "已启用" : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>接口约定：POST {baseUrl}{submitPath} 提交 <code>{model, prompt, duration_sec, aspect_ratio}</code>，返回 video_url 或任务 id；GET {baseUrl}{pollPath}（{id} 替换为任务 ID）查询状态与 video_url。图生视频时额外携带 <code>image</code>（首帧参考图）与 <code>reference_images</code>（角色/道具参考图），都是 data URL。返回字段兼容 <code>{data: {...}}</code> 包裹。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span>接口约定：POST {baseUrl}{submitPath} 提交 <code>{model, prompt, duration_sec, aspect_ratio}</code>，返回 video_url 或任务 id；GET {baseUrl}{pollPath}（{id} 替换为任务 ID）查询状态与 video_url。图生视频时额外携带 <code>image</code>（首帧参考图）与 <code>reference_images</code>（角色/道具参考图），都是 data URL。返回字段兼容 <code>{data: {...}}</code> 包裹与嵌套/数组形式（如 <code>data.output.video_url</code>、<code>output.videos[0].file_url</code>）。</span></div>
           <div class="field-grid-3">
             <div class="field">
               <label for="videogen-provider">供应商</label>
@@ -2360,6 +2360,11 @@ async function renderSettings() {
             ${numberField("videogen-poll-interval", "轮询间隔（毫秒）", s.videoGen.pollIntervalMs, { min: 200, max: 60000, step: 100 })}
             ${numberField("videogen-timeout", "超时（毫秒）", s.videoGen.timeoutMs, { min: 5000, max: 1800000, step: 1000 })}
             ${numberField("videogen-clip-duration", "单段时长（秒）", s.videoGen.clipDurationSec, { min: 2, max: 60 })}
+          </div>
+          <div class="field">
+            <label for="videogen-result-path">视频地址字段 <span class="optional">可选，留空自动识别</span></label>
+            <input class="input" id="videogen-result-path" value="${attr(s.videoGen.resultPath ?? "")}" placeholder="例如 data.output.video_url" />
+            <span class="hint">自动兼容 video_url / url / output / data.* 等常见字段；聚合平台结构特殊时再填点号路径，取不到会自动回退</span>
           </div>
           ${switchField("videogen-fallback", "生成失败时回退素材库", s.videoGen.fallbackToMaterials)}
           <div class="test-generator">
@@ -2541,6 +2546,7 @@ function collectSettings() {
     pollIntervalMs: number("videogen-poll-interval"),
     timeoutMs: number("videogen-timeout"),
     clipDurationSec: number("videogen-clip-duration"),
+    resultPath: value("videogen-result-path").trim(),
     fallbackToMaterials: checked("videogen-fallback"),
   };
   const videoGenKey = secret("videogen-api-key");

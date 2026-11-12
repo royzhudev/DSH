@@ -172,7 +172,9 @@ GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
 
 状态为 `queued` / `running` / `succeeded` / `failed`；成功后返回 `video_url`。响应字段兼容 `{"data": {...}}` 包裹。下载后会用 ffprobe 校验，失败时按 `videoGen.fallbackToMaterials` 回退素材库或渐变背景。
 
-相关变量：`VIDEOGEN_PROVIDER`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`。
+状态与地址字段的兼容：除了 `status` / `state` 与 `video_url`，也识别嵌套结构（`data.status`、`data.task.status`、`data.output.video_url`、`output.url`、`videos[0].file_url` 等）与数组；封面、缩略图字段会被跳过。任务已完成但没解析到地址时，错误信息会带上响应结构摘要，提示用「视频地址字段」补一条点号路径（如 `data.output.video_url`），配置后没取到会自动回退识别。
+
+相关变量：`VIDEOGEN_PROVIDER`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`。
 
 > 这里只实现通用 HTTP 契约，不绑定具体厂商。使用 Runway、可灵、即梦等模型时，请通过自建网关把厂商 API 适配成上述格式。
 

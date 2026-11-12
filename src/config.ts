@@ -66,6 +66,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     pollIntervalMs: 3000,
     timeoutMs: 300_000,
     clipDurationSec: 5,
+    resultPath: "",
     fallbackToMaterials: true,
   },
   douyin: {
@@ -225,6 +226,7 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     config.videoGen.clipDurationSec,
     envNumber(env, "VIDEOGEN_CLIP_DURATION"),
   );
+  config.videoGen.resultPath = set(config.videoGen.resultPath, envString(env, "VIDEOGEN_RESULT_PATH"));
   config.videoGen.fallbackToMaterials = set(
     config.videoGen.fallbackToMaterials,
     envBoolean(env, "VIDEOGEN_FALLBACK_MATERIALS"),
@@ -322,6 +324,16 @@ function validateConfig(config: AppConfig): void {
     }
     if (!config.videoGen.pollPath.includes("{id}")) {
       throw new AppError("AI 画面生成的查询路径必须包含 {id} 占位符", { code: "CONFIG_INVALID" });
+    }
+    const resultPath = config.videoGen.resultPath.trim();
+    if (resultPath.length > 200) {
+      throw new AppError("AI 画面生成的视频地址字段不能超过 200 个字符", { code: "CONFIG_INVALID" });
+    }
+    if (resultPath && !/^[A-Za-z0-9_.[\]-]+$/.test(resultPath)) {
+      throw new AppError(
+        "AI 画面生成的视频地址字段只能是点号路径，例如 data.output.video_url",
+        { code: "CONFIG_INVALID" },
+      );
     }
   }
   if (!config.douyin.scope.trim()) {
