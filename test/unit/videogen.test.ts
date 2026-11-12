@@ -642,3 +642,144 @@ test("HTTP 视频：同步调用被拒时提示需要异步头", async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("HTTP 文生视频：平台只支持同步时自动去掉异步头重试", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const posts: Array<{ async: string | undefined; body: string }> = [];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (req.method === "POST") {
+      posts.push({
+        async: req.headers["x-dashscope-async"] as string | undefined,
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      if (req.headers["x-dashscope-async"]) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            code: "AccessDenied",
+            message: "current user api does not support asynchronous calls",
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { video_url: "/files/clip.mp4" } }));
+      return;
+    }
+    if (url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clip);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: `http://127.0.0.1:${port}`,
+        model: "wan-sync-only",
+        apiKey: "sk-test",
+        // 路径是百炼视频接口 → 默认带异步头，但平台说只支持同步。
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 5,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    const generated = await provider.generate({ prompt: "同步出片", durationSec: 5 }, path.join(dir, "gen"));
+    assert.equal(generated.durationSec > 0.5, true);
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0]!.async, "enable");
+    assert.equal(posts[1]!.async, undefined);
+    // 两次都按百炼的 {model, input, parameters} 组装，只是请求头不同。
+    const body = JSON.parse(posts[1]!.body) as { model: string; input: { prompt: string } };
+    assert.equal(body.model, "wan-sync-only");
+    assert.equal(body.input.prompt, "同步出片");
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});
+
+test("HTTP 文生视频：平台要求异步时自动补上 X-DashScope-Async 重试", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const posts: Array<string | undefined> = [];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (req.method === "POST") {
+      posts.push(req.headers["x-dashscope-async"] as string | undefined);
+      if (!req.headers["x-dashscope-async"]) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            code: "AccessDenied",
+            message: "current user api does not support synchronous calls",
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ video_url: "/files/clip.mp4" }));
+      return;
+    }
+    if (url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clip);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: `http://127.0.0.1:${port}`,
+        // 通用协议本来不带异步头，平台却要求异步。
+        protocol: "generic",
+        model: "generic-model",
+        apiKey: "sk-test",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 5,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    const generated = await provider.generate({ prompt: "异步出片", durationSec: 5 }, path.join(dir, "gen"));
+    assert.equal(generated.durationSec > 0.5, true);
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0], undefined);
+    assert.equal(posts[1], "enable");
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});
+
