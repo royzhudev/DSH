@@ -32,6 +32,16 @@ const STAGES = [
   { key: "done", label: "完成" },
 ];
 
+const MENU_META = [
+  { key: "create", label: "创作", desc: "生成脚本、创建视频" },
+  { key: "jobs", label: "任务", desc: "查看进度、播放与下载成片" },
+  { key: "materials", label: "素材库", desc: "上传、预览与删除素材" },
+  { key: "publish", label: "发布", desc: "抖音授权与发布记录" },
+  { key: "settings", label: "设置", desc: "模型、抖音与系统配置" },
+];
+
+const MENU_KEYS = MENU_META.map((item) => item.key);
+
 const STAGE_INDEX = {
   queued: 0,
   script: 1,
@@ -58,6 +68,10 @@ const STATUS_CLASS = {
 };
 
 const state = {
+  user: null,
+  permissions: [],
+  users: [],
+  booted: false,
   settings: null,
   jobs: [],
   job: null,
@@ -191,8 +205,19 @@ async function render() {
   clearPoll();
   view.oninput = null;
   view.onchange = null;
+  if (!state.user) return;
   const route = parseRoute();
   state.route = route;
+  const menu = route.name === "job" ? "jobs" : route.name;
+  if (!state.permissions.includes(menu)) {
+    const first = MENU_KEYS.find((key) => state.permissions.includes(key));
+    if (first) {
+      if (location.hash !== `#/${first}`) location.hash = `#/${first}`;
+      return;
+    }
+    showNoAccess();
+    return;
+  }
   const navName = route.name === "job" ? "jobs" : route.name;
   setActiveNav(navName);
   try {
@@ -203,10 +228,202 @@ async function render() {
     else if (route.name === "publish") await renderPublish();
     else if (route.name === "settings") await renderSettings();
   } catch (error) {
+    if (handleAuthError(error)) return;
     console.error(error);
     view.innerHTML = errorView(error);
     document.getElementById("retry-btn")?.addEventListener("click", () => render());
   }
+}
+
+/* ---------------- auth ---------------- */
+
+function initialOf(name) {
+  const text = String(name ?? "").trim();
+  if (!text) return "?";
+  return text.slice(0, 1).toUpperCase();
+}
+
+function renderAuth(mode, message = "") {
+  const setup = mode === "setup";
+  const screen = document.getElementById("auth-screen");
+  screen.hidden = false;
+  screen.innerHTML = `<div class="auth-card">
+    <div class="auth-brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+          <path d="M8 5.5v13l10-6.5-10-6.5Z" fill="currentColor" />
+        </svg>
+      </span>
+      <span class="brand-text"><strong>视频创作智能体</strong><small>AI VIDEO STUDIO</small></span>
+    </div>
+    <div class="auth-head">
+      <p class="eyebrow">${setup ? "First run" : "Welcome back"}</p>
+      <h1>${setup ? "创建管理员账号" : "登录工作台"}</h1>
+      <p>${setup ? "首次使用需要初始化管理员。之后可在「设置 → 用户与权限」添加成员并分配菜单。" : "登录后按账号权限显示可用菜单。账号由管理员在设置中添加。"}</p>
+    </div>
+    <form class="auth-form" id="auth-form" data-mode="${mode}" novalidate>
+      ${
+        setup
+          ? `<div class="field">
+              <label for="auth-display">显示名称</label>
+              <input class="input" id="auth-display" name="displayName" autocomplete="name" placeholder="例如 管理员" maxlength="40" />
+            </div>`
+          : ""
+      }
+      <div class="field">
+        <label for="auth-username">用户名</label>
+        <input class="input" id="auth-username" name="username" autocomplete="username" placeholder="输入用户名" required autofocus />
+      </div>
+      <div class="field">
+        <label for="auth-password">密码</label>
+        <input class="input" type="password" id="auth-password" name="password" autocomplete="${setup ? "new-password" : "current-password"}" placeholder="${setup ? "至少 8 位" : "输入密码"}" required />
+      </div>
+      ${
+        setup
+          ? `<div class="field">
+              <label for="auth-confirm">确认密码</label>
+              <input class="input" type="password" id="auth-confirm" name="confirm" autocomplete="new-password" placeholder="再次输入密码" required />
+            </div>`
+          : ""
+      }
+      <div class="auth-error" id="auth-error" ${message ? "" : "hidden"}>${esc(message)}</div>
+      <button class="btn btn-primary btn-block" type="submit">${setup ? "创建并进入" : "登录"}</button>
+    </form>
+    <p class="auth-foot">${setup ? "账号保存在本机 data/users.json，密码仅保存加盐哈希。" : "忘记密码时，请联系管理员在设置中重置。"}</p>
+  </div>`;
+  hydrateIcons();
+}
+
+function bindAuthForm() {
+  const form = document.getElementById("auth-form");
+  if (!form) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitAuth(form);
+  });
+  form.addEventListener("input", () => {
+    const error = document.getElementById("auth-error");
+    if (error) error.hidden = true;
+  });
+}
+
+async function submitAuth(form) {
+  const mode = form.dataset.mode === "setup" ? "setup" : "login";
+  const username = form.querySelector("#auth-username")?.value.trim() ?? "";
+  const password = form.querySelector("#auth-password")?.value ?? "";
+  const displayName = form.querySelector("#auth-display")?.value.trim() ?? "";
+  const confirm = form.querySelector("#auth-confirm")?.value ?? password;
+  const errorEl = document.getElementById("auth-error");
+  const button = form.querySelector('button[type="submit"]');
+  const fail = (text) => {
+    if (errorEl) {
+      errorEl.hidden = false;
+      errorEl.textContent = text;
+    }
+    if (button) {
+      button.disabled = false;
+      button.textContent = mode === "setup" ? "创建并进入" : "登录";
+    }
+  };
+  if (!username) return fail("请填写用户名");
+  if (password.length < 8) return fail("密码至少需要 8 位");
+  if (mode === "setup" && password !== confirm) return fail("两次输入的密码不一致");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> ${mode === "setup" ? "正在创建…" : "登录中…"}`;
+  }
+  try {
+    const body = mode === "setup" ? { username, displayName, password } : { username, password };
+    const data = await api(`/api/auth/${mode}`, { method: "POST", body });
+    state.user = data.user;
+    state.permissions = data.menus ?? [];
+    await startApp();
+  } catch (error) {
+    fail(error.message);
+  }
+}
+
+function applySession() {
+  const user = state.user;
+  if (!user) return;
+  for (const link of document.querySelectorAll("#nav a[data-nav]")) {
+    link.hidden = !state.permissions.includes(link.dataset.nav);
+  }
+  const newVideo = document.getElementById("new-video-btn");
+  if (newVideo) newVideo.hidden = !state.permissions.includes("create");
+  const menu = document.getElementById("user-menu");
+  if (menu) menu.hidden = false;
+  const avatar = document.getElementById("user-avatar");
+  if (avatar) avatar.textContent = initialOf(user.displayName || user.username);
+  const name = document.getElementById("user-name");
+  if (name) name.textContent = user.displayName || user.username;
+  const role = document.getElementById("user-role");
+  if (role) role.textContent = user.role === "admin" ? "管理员" : "成员";
+}
+
+function showAuth(mode, message = "") {
+  state.user = null;
+  state.permissions = [];
+  state.users = [];
+  state.settings = null;
+  state.booted = false;
+  clearPoll();
+  view.innerHTML = "";
+  document.body.classList.add("auth-locked");
+  const menu = document.getElementById("user-menu");
+  if (menu) menu.hidden = true;
+  renderAuth(mode, message);
+  bindAuthForm();
+}
+
+function handleAuthError(error) {
+  if (error && error.status === 401) {
+    if (state.user) showAuth("login", "登录已过期，请重新登录");
+    return true;
+  }
+  return false;
+}
+
+function showNoAccess() {
+  setPage("提示", "没有可用模块");
+  view.innerHTML = emptyState(
+    "shield",
+    "没有可用模块",
+    "当前账号还没有被分配任何菜单权限，请联系管理员。",
+    `<button class="btn btn-primary" type="button" id="no-access-logout">退出登录</button>`,
+  );
+  document.getElementById("no-access-logout")?.addEventListener("click", () => {
+    void logout();
+  });
+}
+
+async function logout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {
+    /* 会话可能已经过期，直接回到登录页 */
+  }
+  showAuth("login");
+}
+
+async function startApp() {
+  view.innerHTML = loadingView("正在加载…");
+  applySession();
+  document.body.classList.remove("auth-locked");
+  const screen = document.getElementById("auth-screen");
+  if (screen) screen.hidden = true;
+  if (!state.booted) {
+    state.booted = true;
+    await checkService();
+    try {
+      await ensureSettings();
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      toast(error.message, "error");
+    }
+    void refreshJobBadge();
+  }
+  await render();
 }
 
 /* ---------------- service / settings ---------------- */
@@ -264,6 +481,7 @@ function updateJobBadge(jobs) {
 }
 
 async function refreshJobBadge() {
+  if (!state.permissions.includes("jobs")) return;
   try {
     const data = await api("/api/videos");
     updateJobBadge(data.jobs ?? []);
@@ -1234,17 +1452,285 @@ function switchField(id, label, checked, hint = "") {
   ${hint ? `<span class="hint">${esc(hint)}</span>` : ""}`;
 }
 
+/* ---------------- users (settings, admin only) ---------------- */
+
+function permissionChips(user) {
+  if (user.role === "admin") return `<span class="tag tag-brand">全部模块</span>`;
+  const labels = MENU_META.filter((item) => user.permissions.includes(item.key)).map((item) => item.label);
+  if (!labels.length) return `<span class="muted small">无菜单权限</span>`;
+  return labels.map((label) => `<span class="tag">${esc(label)}</span>`).join("");
+}
+
+function userRowHtml(user) {
+  const isSelf = state.user?.id === user.id;
+  return `<div class="user-row" data-user="${attr(user.id)}">
+    <span class="user-avatar">${esc(initialOf(user.displayName || user.username))}</span>
+    <div class="user-main">
+      <div class="user-name-line">
+        <strong>${esc(user.displayName)}</strong>
+        ${isSelf ? `<span class="pill pill-soft">我</span>` : ""}
+        ${user.disabled ? `<span class="pill pill-danger">已禁用</span>` : ""}
+      </div>
+      <div class="user-meta">@${esc(user.username)} · ${user.role === "admin" ? "管理员" : "成员"} · 创建于 ${formatDate(user.createdAt)}${user.lastLoginAt ? ` · 最近登录 ${formatDate(user.lastLoginAt)}` : ""}</div>
+      <div class="user-perms">${permissionChips(user)}</div>
+    </div>
+    <div class="user-actions">
+      <button class="btn btn-ghost btn-sm" type="button" data-edit-user="${attr(user.id)}">编辑</button>
+      <button class="btn btn-danger btn-sm" type="button" data-delete-user="${attr(user.id)}" ${isSelf ? "disabled" : ""}>删除</button>
+    </div>
+  </div>`;
+}
+
+function userDialogHtml() {
+  return `<dialog class="user-dialog" id="user-dialog">
+    <form id="user-form" novalidate>
+      <div class="dialog-head">
+        <div>
+          <div class="card-title" id="user-dialog-title">添加用户</div>
+          <div class="card-sub" id="user-dialog-sub">创建账号并分配可见菜单</div>
+        </div>
+        <button class="icon-btn" type="button" id="close-user-dialog" aria-label="关闭">${icon("x", 16)}</button>
+      </div>
+      <div class="dialog-body">
+        <div class="field-grid-2">
+          <div class="field">
+            <label for="user-username">用户名</label>
+            <input class="input" id="user-username" autocomplete="off" placeholder="3-32 位字母、数字或 _.-" />
+            <span class="hint">登录使用，创建后不可修改</span>
+          </div>
+          <div class="field">
+            <label for="user-display">显示名称</label>
+            <input class="input" id="user-display" autocomplete="off" maxlength="40" placeholder="例如 剪辑师小王" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="user-password">密码 <span class="optional" id="user-password-hint">至少 8 位</span></label>
+          <input class="input" type="password" id="user-password" autocomplete="new-password" />
+        </div>
+        <div class="field">
+          <label for="user-role-select">角色</label>
+          <select class="select" id="user-role-select">
+            <option value="member">成员（按勾选菜单访问）</option>
+            <option value="admin">管理员（全部菜单与用户管理）</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="field-label">可见菜单</span>
+          <div class="permission-grid" id="permission-grid">
+            ${MENU_META.map(
+              (item) => `<label class="permission-item">
+                <input type="checkbox" value="${attr(item.key)}" />
+                <span><strong>${esc(item.label)}</strong><small>${esc(item.desc)}</small></span>
+              </label>`,
+            ).join("")}
+          </div>
+          <span class="hint">勾选「创作」会自动包含「任务」，否则创建后无法查看进度。</span>
+        </div>
+        <div class="form-error" id="user-form-error" hidden></div>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" id="cancel-user-dialog">取消</button>
+        <button class="btn btn-primary" type="submit" id="save-user">保存</button>
+      </div>
+    </form>
+  </dialog>`;
+}
+
+function usersCardHtml() {
+  return `<section class="card settings-card users-card">
+    <div class="card-head">
+      <div><div class="card-title">用户与权限</div><div class="card-sub">不同成员登录后只看到被勾选的菜单；服务端 API 同样按权限校验</div></div>
+      <button class="btn btn-primary btn-sm" id="add-user" type="button">${icon("plus", 15)} 添加用户</button>
+    </div>
+    <div class="card-body">
+      <div class="user-list" id="user-list">${state.users.map(userRowHtml).join("")}</div>
+      <div class="settings-note">${icon("shield", 16)}<span>管理员默认拥有全部菜单和用户管理权限。成员权限保存后立即生效；删除或禁用账号会立刻注销其登录会话。</span></div>
+    </div>
+  </section>
+  ${userDialogHtml()}`;
+}
+
+function syncUserPermissionControls() {
+  const grid = document.getElementById("permission-grid");
+  const role = document.getElementById("user-role-select")?.value;
+  if (!grid) return;
+  const admin = role === "admin";
+  for (const checkbox of grid.querySelectorAll('input[type="checkbox"]')) {
+    checkbox.disabled = admin;
+    if (admin) checkbox.checked = true;
+  }
+  if (admin) return;
+  const create = grid.querySelector('input[value="create"]');
+  const jobs = grid.querySelector('input[value="jobs"]');
+  if (create?.checked && jobs) jobs.checked = true;
+  if (jobs && !jobs.checked && create) create.checked = false;
+}
+
+function openUserDialog(id) {
+  const dialog = document.getElementById("user-dialog");
+  const form = document.getElementById("user-form");
+  if (!dialog || !form) return;
+  const user = id ? state.users.find((item) => item.id === id) : null;
+  form.reset();
+  document.getElementById("user-id")?.remove();
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.id = "user-id";
+  hidden.value = user?.id ?? "";
+  form.prepend(hidden);
+  document.getElementById("user-dialog-title").textContent = user ? "编辑用户" : "添加用户";
+  document.getElementById("user-dialog-sub").textContent = user ? `@${user.username}` : "创建账号并分配可见菜单";
+  const username = document.getElementById("user-username");
+  username.value = user?.username ?? "";
+  username.disabled = Boolean(user);
+  document.getElementById("user-display").value = user?.displayName ?? "";
+  const password = document.getElementById("user-password");
+  password.value = "";
+  password.required = !user;
+  password.placeholder = user ? "留空则不修改密码" : "至少 8 位";
+  document.getElementById("user-password-hint").textContent = user ? "留空则不修改" : "至少 8 位";
+  document.getElementById("user-role-select").value = user?.role ?? "member";
+  const roleSelect = document.getElementById("user-role-select");
+  roleSelect.disabled = Boolean(user && state.user?.id === user.id);
+  roleSelect.title = roleSelect.disabled ? "不能修改自己的角色" : "";
+  const selected = new Set(
+    user ? (user.role === "admin" ? MENU_KEYS : user.permissions) : ["create", "jobs"],
+  );
+  for (const checkbox of document.querySelectorAll('#permission-grid input[type="checkbox"]')) {
+    checkbox.checked = selected.has(checkbox.value);
+  }
+  const error = document.getElementById("user-form-error");
+  if (error) error.hidden = true;
+  syncUserPermissionControls();
+  dialog.showModal();
+  (user ? document.getElementById("user-display") : username).focus();
+}
+
+function bindUserRowActions() {
+  for (const button of view.querySelectorAll("[data-edit-user]")) {
+    button.addEventListener("click", () => openUserDialog(button.dataset.editUser));
+  }
+  for (const button of view.querySelectorAll("[data-delete-user]")) {
+    button.addEventListener("click", () => {
+      void deleteUser(button.dataset.deleteUser);
+    });
+  }
+}
+
+function bindUserManagement() {
+  document.getElementById("add-user")?.addEventListener("click", () => openUserDialog());
+  document.getElementById("user-role-select")?.addEventListener("change", syncUserPermissionControls);
+  document.getElementById("permission-grid")?.addEventListener("change", syncUserPermissionControls);
+  document.getElementById("close-user-dialog")?.addEventListener("click", () => {
+    document.getElementById("user-dialog")?.close();
+  });
+  document.getElementById("cancel-user-dialog")?.addEventListener("click", () => {
+    document.getElementById("user-dialog")?.close();
+  });
+  document.getElementById("user-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveUser();
+  });
+  const dialog = document.getElementById("user-dialog");
+  dialog?.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  bindUserRowActions();
+}
+
+async function refreshUsers() {
+  const data = await api("/api/users");
+  state.users = data.users ?? [];
+  const list = document.getElementById("user-list");
+  if (list) {
+    list.innerHTML = state.users.map(userRowHtml).join("");
+    bindUserRowActions();
+  }
+}
+
+async function saveUser() {
+  const id = document.getElementById("user-id")?.value ?? "";
+  const username = document.getElementById("user-username")?.value.trim() ?? "";
+  const displayName = document.getElementById("user-display")?.value.trim() ?? "";
+  const password = document.getElementById("user-password")?.value ?? "";
+  const role = document.getElementById("user-role-select")?.value ?? "member";
+  const permissions =
+    role === "admin"
+      ? MENU_KEYS
+      : [...document.querySelectorAll('#permission-grid input[type="checkbox"]:checked')].map(
+          (checkbox) => checkbox.value,
+        );
+  const errorEl = document.getElementById("user-form-error");
+  const button = document.getElementById("save-user");
+  const fail = (message) => {
+    if (errorEl) {
+      errorEl.hidden = false;
+      errorEl.textContent = message;
+    }
+  };
+  if (errorEl) errorEl.hidden = true;
+  if (!id && !/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) {
+    return fail("用户名需为 3-32 位字母、数字、下划线、点或短横线");
+  }
+  if (!id && password.length < 8) return fail("新用户密码至少需要 8 位");
+  if (id && password && password.length < 8) return fail("新密码至少需要 8 位");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> 保存中…`;
+  }
+  try {
+    const body = { displayName, role, permissions };
+    if (password) body.password = password;
+    let data;
+    if (id) {
+      data = await api(`/api/users/${id}`, { method: "PATCH", body });
+    } else {
+      data = await api("/api/users", { method: "POST", body: { ...body, username } });
+    }
+    if (id && state.user?.id === id && data.user) {
+      state.user.displayName = data.user.displayName;
+      applySession();
+    }
+    document.getElementById("user-dialog")?.close();
+    toast(id ? "用户已更新" : "用户已添加", "success");
+    await refreshUsers();
+  } catch (error) {
+    fail(error.message);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "保存";
+    }
+  }
+}
+
+async function deleteUser(id) {
+  const user = state.users.find((item) => item.id === id);
+  if (!user) return;
+  if (!window.confirm(`确定删除用户「${user.displayName}」？该账号将立即失去访问权限。`)) return;
+  try {
+    await api(`/api/users/${id}`, { method: "DELETE" });
+    toast("用户已删除", "success");
+    await refreshUsers();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 async function renderSettings() {
   setPage("设置", "设置");
   view.innerHTML = loadingView("正在读取设置…");
-  const [settingsData, douyin] = await Promise.all([
+  const isAdmin = state.user?.role === "admin";
+  const [settingsData, douyin, usersData] = await Promise.all([
     api("/api/settings"),
     api("/api/douyin/status").catch(() => null),
+    isAdmin ? api("/api/users") : Promise.resolve({ users: [] }),
   ]);
   if (state.route.name !== "settings") return;
   const s = settingsData.settings;
   state.settings = s;
   state.douyin = douyin;
+  state.users = usersData.users ?? [];
   updateModelPill();
   const redirectUri = s.douyin.effectiveRedirectUri;
 
@@ -1252,7 +1738,7 @@ async function renderSettings() {
     <section class="page-head">
       <p class="eyebrow">Settings</p>
       <h2>设置</h2>
-      <p>配置脚本模型、配音、AI 画面与抖音开放平台。保存后对新任务生效，正在运行的任务使用创建时的配置。</p>
+      <p>配置脚本模型、配音、AI 画面与抖音开放平台。保存后对新任务生效，正在运行的任务使用创建时的配置。${isAdmin ? "管理员可在下方添加用户并分配菜单权限。" : ""}</p>
     </section>
 
     <div class="settings-layout">
@@ -1452,13 +1938,16 @@ async function renderSettings() {
         </div>
       </section>
 
+      ${isAdmin ? usersCardHtml() : ""}
+
       <div class="save-bar">
         <span class="save-state" id="save-state">修改后点击保存；新任务生效</span>
         <button class="btn btn-primary" id="save-settings" type="button">保存设置</button>
       </div>
     </div>`;
 
-  const markDirty = () => {
+  const markDirty = (event) => {
+    if (event?.target?.closest?.("#user-dialog")) return;
     const stateEl = document.getElementById("save-state");
     if (stateEl) stateEl.textContent = "有未保存的修改";
   };
@@ -1485,6 +1974,7 @@ async function renderSettings() {
       void copyText(button.dataset.copy);
     });
   }
+  if (isAdmin) bindUserManagement();
 }
 
 function collectSettings() {
@@ -1631,17 +2121,29 @@ function handleDouyinQuery() {
 async function init() {
   hydrateIcons();
   window.addEventListener("hashchange", () => {
-    void render();
+    if (state.user) void render();
+  });
+  window.addEventListener("va:unauthorized", () => {
+    if (state.user) showAuth("login", "登录已过期，请重新登录");
+  });
+  document.getElementById("logout-btn")?.addEventListener("click", () => {
+    void logout();
   });
   handleDouyinQuery();
-  await checkService();
+  let session;
   try {
-    await ensureSettings();
+    session = await api("/api/auth/session");
   } catch (error) {
-    toast(error.message, "error");
+    showAuth("login", `无法读取登录状态：${error.message}`);
+    return;
   }
-  void refreshJobBadge();
-  await render();
+  if (!session.authenticated) {
+    showAuth(session.needsSetup ? "setup" : "login");
+    return;
+  }
+  state.user = session.user;
+  state.permissions = session.menus ?? [];
+  await startApp();
 }
 
 if (document.readyState === "loading") {

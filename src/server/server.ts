@@ -23,6 +23,26 @@ import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
 import { JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
+import {
+  LoginThrottle,
+  SESSION_COOKIE,
+  SessionStore,
+  assertSameOrigin,
+  clearSessionCookie,
+  parseCookies,
+  sessionCookie,
+} from "./auth.js";
+import {
+  MENU_PERMISSIONS,
+  UserStore,
+  effectivePermissions,
+  toUserView,
+  type CreateUserInput,
+  type MenuPermission,
+  type UpdateUserInput,
+  type UserRecord,
+  type UserRole,
+} from "./users.js";
 import { DouyinClient } from "../publish/douyin.js";
 import { DouyinTokenStore } from "../publish/token-store.js";
 import { PublishStore } from "../publish/store.js";
@@ -65,6 +85,8 @@ export interface VideoServer {
   jobs: JobManager;
   library: MaterialLibrary;
   settings: SettingsStore;
+  users: UserStore;
+  sessions: SessionStore;
   douyin: DouyinClient;
   tokens: DouyinTokenStore;
   publishes: PublishStore;
@@ -82,6 +104,9 @@ interface ServerContext {
   jobs: JobManager;
   library: MaterialLibrary;
   settings: SettingsStore;
+  users: UserStore;
+  sessions: SessionStore;
+  loginThrottle: LoginThrottle;
   douyin: DouyinClient;
   tokens: DouyinTokenStore;
   publishes: PublishStore;
@@ -96,7 +121,12 @@ function securityHeaders(): Record<string, string> {
   };
 }
 
-function sendJson(res: http.ServerResponse, status: number, value: unknown): void {
+function sendJson(
+  res: http.ServerResponse,
+  status: number,
+  value: unknown,
+  extraHeaders: Record<string, string> = {},
+): void {
   if (res.headersSent) return;
   const body = `${JSON.stringify(value, null, 2)}\n`;
   res.writeHead(status, {
@@ -104,6 +134,7 @@ function sendJson(res: http.ServerResponse, status: number, value: unknown): voi
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",
+    ...extraHeaders,
   });
   res.end(body);
 }
@@ -374,9 +405,17 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
     version: API_VERSION,
     description: "视频创作智能体：主题 → 脚本 → 素材/AI 画面 → 配音 → 剪辑 → 成片",
     web: "/",
+    authentication: "HttpOnly 会话 Cookie；除 /api、/api/auth/* 与抖音回调外均需登录",
     endpoints: {
+      session: "GET /api/auth/session",
+      setup: "POST /api/auth/setup {username, displayName?, password}",
+      login: "POST /api/auth/login {username, password}",
+      logout: "POST /api/auth/logout",
       settings: "GET/PUT /api/settings",
       testSettings: "POST /api/settings/test {kind: script|tts}",
+      users: "GET/POST /api/users（管理员）",
+      updateUser: "PATCH /api/users/:id（管理员）",
+      deleteUser: "DELETE /api/users/:id（管理员）",
       createVideo: "POST /api/videos {topic, targetDurationSec?, maxSegments?, voice?, ...}",
       listVideos: "GET /api/videos",
       videoStatus: "GET /api/videos/:id",
@@ -401,6 +440,187 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       douyinConfigured: Boolean(config.douyin.clientKey && config.douyin.clientSecret),
     },
   };
+}
+
+function readSessionToken(req: http.IncomingMessage): string | undefined {
+  return parseCookies(req.headers.cookie)[SESSION_COOKIE];
+}
+
+async function resolveSessionUser(
+  ctx: ServerContext,
+  req: http.IncomingMessage,
+): Promise<UserRecord | null> {
+  const token = readSessionToken(req);
+  const session = ctx.sessions.get(token);
+  if (!session) return null;
+  const user = await ctx.users.findById(session.userId);
+  if (!user || user.disabled) {
+    ctx.sessions.destroy(token);
+    return null;
+  }
+  return user;
+}
+
+async function authPayload(
+  ctx: ServerContext,
+  user: UserRecord | null,
+): Promise<Record<string, unknown>> {
+  return {
+    authenticated: Boolean(user),
+    needsSetup: !(await ctx.users.hasUsers()),
+    user: user ? toUserView(user) : null,
+    menus: user ? effectivePermissions(user) : [],
+  };
+}
+
+function hasMenuPermission(user: UserRecord, permission: MenuPermission): boolean {
+  return user.role === "admin" || user.permissions.includes(permission);
+}
+
+/** API 路径所需的菜单权限；admin 表示仅管理员可访问。 */
+function requiredPermission(method: string, pathname: string): MenuPermission | "admin" | null {
+  if (pathname === "/api/users" || pathname.startsWith("/api/users/")) return "admin";
+  if (pathname === "/api/settings") return method === "GET" ? null : "settings";
+  if (pathname.startsWith("/api/settings/")) return "settings";
+  if (pathname === "/api/materials" || pathname.startsWith("/api/materials/")) return "materials";
+  if (pathname === "/api/scripts/generate") return "create";
+  if (pathname === "/api/videos") return method === "POST" ? "create" : "jobs";
+  if (pathname.startsWith("/api/videos/") && pathname.endsWith("/publish")) return "publish";
+  if (pathname.startsWith("/api/videos/")) return "jobs";
+  if (pathname === "/api/publishes") return "publish";
+  if (pathname.startsWith("/api/douyin/")) return "publish";
+  return null;
+}
+
+function isPublicApi(pathname: string): boolean {
+  return pathname === "/api" || pathname.startsWith("/api/auth/") || pathname === "/api/douyin/callback";
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function permissionInput(value: unknown): MenuPermission[] | undefined {
+  return value === undefined ? undefined : (value as MenuPermission[]);
+}
+
+async function handleAuthSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  const user = await resolveSessionUser(ctx, req);
+  sendJson(res, 200, await authPayload(ctx, user));
+}
+
+async function handleSetup(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  const body = await readJsonBody(req);
+  const user = await ctx.users.setup({
+    username: optionalString(body.username) ?? "",
+    displayName: optionalString(body.displayName),
+    password: optionalString(body.password) ?? "",
+  });
+  const token = ctx.sessions.create(user.id);
+  await ctx.users.markLogin(user.id);
+  const record = await ctx.users.findById(user.id);
+  sendJson(
+    res,
+    201,
+    await authPayload(ctx, record ?? null),
+    { "set-cookie": sessionCookie(token) },
+  );
+}
+
+async function handleLogin(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  const body = await readJsonBody(req);
+  const username = optionalString(body.username)?.trim() ?? "";
+  const password = optionalString(body.password) ?? "";
+  const throttleKey = `${req.socket.remoteAddress ?? "unknown"}|${username.toLowerCase()}`;
+  ctx.loginThrottle.check(throttleKey);
+  const user = await ctx.users.verify(username, password);
+  if (!user) {
+    ctx.loginThrottle.fail(throttleKey);
+    throw new AppError("用户名或密码错误", { code: "INVALID_CREDENTIALS", status: 401 });
+  }
+  ctx.loginThrottle.reset(throttleKey);
+  const token = ctx.sessions.create(user.id);
+  await ctx.users.markLogin(user.id);
+  sendJson(res, 200, await authPayload(ctx, user), { "set-cookie": sessionCookie(token) });
+}
+
+async function handleLogout(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  ctx.sessions.destroy(readSessionToken(req));
+  sendJson(res, 200, { ok: true }, { "set-cookie": clearSessionCookie() });
+}
+
+async function handleCreateUser(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  const body = await readJsonBody(req);
+  const input: CreateUserInput = {
+    username: optionalString(body.username) ?? "",
+    displayName: optionalString(body.displayName),
+    password: optionalString(body.password) ?? "",
+    role: body.role === undefined ? undefined : (body.role as UserRole),
+    permissions: permissionInput(body.permissions),
+  };
+  const user = await ctx.users.create(input);
+  sendJson(res, 201, { user });
+}
+
+async function handleUpdateUser(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+  id: string,
+  actor: UserRecord,
+): Promise<void> {
+  assertSameOrigin(req);
+  const body = await readJsonBody(req);
+  const patch: UpdateUserInput = {};
+  if (body.displayName !== undefined) patch.displayName = body.displayName as string;
+  if (body.password !== undefined) patch.password = body.password as string;
+  if (body.role === "admin" || body.role === "member") patch.role = body.role;
+  else if (body.role !== undefined) patch.role = body.role as UserRole;
+  if (body.permissions !== undefined) patch.permissions = permissionInput(body.permissions);
+  const disabled = optionalBoolean(body, "disabled", "禁用状态");
+  if (disabled !== undefined) patch.disabled = disabled;
+  const user = await ctx.users.update(id, patch, actor.id);
+  if (user.disabled) ctx.sessions.destroyUser(id);
+  // 管理员重置他人密码后，旧会话立即失效；修改自己的密码保留当前会话。
+  if (body.password !== undefined && id !== actor.id) ctx.sessions.destroyUser(id);
+  sendJson(res, 200, { user });
+}
+
+async function handleDeleteUser(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+  id: string,
+  actor: UserRecord,
+): Promise<void> {
+  assertSameOrigin(req);
+  await ctx.users.remove(id, actor.id);
+  ctx.sessions.destroyUser(id);
+  sendJson(res, 200, { ok: true });
 }
 
 async function handleSettingsTest(
@@ -585,6 +805,26 @@ async function handleRequest(
     return;
   }
 
+  if (pathname === "/api/auth/session" && method === "GET") {
+    await handleAuthSession(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/setup" && method === "POST") {
+    await handleSetup(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/login" && method === "POST") {
+    await handleLogin(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/logout" && method === "POST") {
+    await handleLogout(req, res, ctx);
+    return;
+  }
+
   if ((method === "GET" || method === "HEAD") && !pathname.startsWith("/api/")) {
     const ext = path.extname(pathname).toLowerCase();
     if (ext && CONTENT_TYPES[ext]) {
@@ -595,6 +835,43 @@ async function handleRequest(
       await serveFile(req, res, file, CONTENT_TYPES[ext]!);
       return;
     }
+  }
+
+  const actor = await resolveSessionUser(ctx, req);
+  if (pathname.startsWith("/api/") && !isPublicApi(pathname)) {
+    if (!actor) {
+      throw new AppError("请先登录", { code: "AUTH_REQUIRED", status: 401 });
+    }
+    const required = requiredPermission(method, pathname);
+    if (required === "admin" && actor.role !== "admin") {
+      throw new AppError("需要管理员权限", { code: "FORBIDDEN", status: 403 });
+    }
+    if (required && required !== "admin" && !hasMenuPermission(actor, required)) {
+      throw new AppError(`没有访问${MENU_PERMISSIONS.includes(required) ? "该模块" : "该资源"}的权限`, {
+        code: "FORBIDDEN",
+        status: 403,
+      });
+    }
+  }
+
+  if (pathname === "/api/users" && method === "GET") {
+    sendJson(res, 200, { users: await ctx.users.list() });
+    return;
+  }
+
+  if (pathname === "/api/users" && method === "POST") {
+    await handleCreateUser(req, res, ctx);
+    return;
+  }
+
+  const userMatch = /^\/api\/users\/([a-zA-Z0-9]+)$/.exec(pathname);
+  if (userMatch && method === "PATCH") {
+    await handleUpdateUser(req, res, ctx, userMatch[1]!, actor!);
+    return;
+  }
+  if (userMatch && method === "DELETE") {
+    await handleDeleteUser(req, res, ctx, userMatch[1]!, actor!);
+    return;
   }
 
   if (pathname === "/api/settings" && method === "GET") {
@@ -815,6 +1092,9 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
   });
   const jobs = new JobManager(config, logger);
   const library = new MaterialLibrary(config.libraryDir, logger);
+  const users = new UserStore(path.join(path.dirname(config.settingsFile), "users.json"), logger);
+  const sessions = new SessionStore();
+  const loginThrottle = new LoginThrottle();
   const douyin = new DouyinClient(config, logger, deps.fetchImpl ?? fetch);
   const tokens = new DouyinTokenStore(path.join(config.cacheDir, "douyin-token.json"), logger);
   const publishes = new PublishStore(path.join(path.dirname(config.settingsFile), "publishes.json"), logger);
@@ -825,6 +1105,9 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     jobs,
     library,
     settings,
+    users,
+    sessions,
+    loginThrottle,
     douyin,
     tokens,
     publishes,
@@ -848,6 +1131,8 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     jobs,
     library,
     settings,
+    users,
+    sessions,
     douyin,
     tokens,
     publishes,

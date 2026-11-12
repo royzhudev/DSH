@@ -8,6 +8,12 @@ async function parseResponse(response) {
   }
 }
 
+function notifyUnauthorized(path, response) {
+  if (response.status === 401 && !path.startsWith("/api/auth/")) {
+    window.dispatchEvent(new CustomEvent("va:unauthorized"));
+  }
+}
+
 export async function api(path, options = {}) {
   const { method = "GET", body, headers = {}, signal } = options;
   const init = { method, headers: { ...headers }, signal };
@@ -23,6 +29,7 @@ export async function api(path, options = {}) {
   }
   const data = await parseResponse(response);
   if (!response.ok) {
+    notifyUnauthorized(path, response);
     const message = data?.error?.message ?? data?.message ?? `请求失败（HTTP ${response.status}）`;
     const error = new Error(message);
     error.status = response.status;
@@ -45,6 +52,7 @@ export async function uploadMaterial(file, { title = "", tags = "" } = {}) {
   }
   const data = await parseResponse(response);
   if (!response.ok) {
+    notifyUnauthorized("/api/materials", response);
     throw new Error(data?.error?.message ?? `上传失败（HTTP ${response.status}）`);
   }
   return data;

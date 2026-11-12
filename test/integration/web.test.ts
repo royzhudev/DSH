@@ -6,7 +6,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../../src/server/server.js";
 import { silentLogger } from "../../src/logger.js";
-import { generateTestClip, generateTestImage, makeTempDir, makeTestConfig } from "../helpers.js";
+import {
+  generateTestClip,
+  generateTestImage,
+  makeTempDir,
+  makeTestConfig,
+  setupTestAdmin,
+  withCookie,
+} from "../helpers.js";
 
 const WEB_DIR = path.resolve(fileURLToPath(new URL("../../web", import.meta.url)));
 
@@ -73,8 +80,13 @@ async function startDouyinMock(): Promise<DouyinMock> {
   };
 }
 
-function jsonRequest(url: string, body: unknown, method = "POST"): Promise<Response> {
-  return fetch(url, {
+function jsonRequest(
+  requestImpl: typeof fetch,
+  url: string,
+  body: unknown,
+  method = "POST",
+): Promise<Response> {
+  return requestImpl(url, {
     method,
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -104,30 +116,36 @@ test(
       await fs.rm(dir, { recursive: true, force: true });
     });
 
-    const home = await fetch(`${app.url}/`);
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+
+    const home = await request(`${app.url}/`);
     assert.equal(home.status, 200);
     assert.match(home.headers.get("content-type") ?? "", /text\/html/);
     assert.match(await home.text(), /视频创作智能体/);
 
-    const css = await fetch(`${app.url}/styles.css`);
+    const css = await request(`${app.url}/styles.css`);
     assert.equal(css.status, 200);
     assert.match(css.headers.get("content-type") ?? "", /text\/css/);
-    const script = await fetch(`${app.url}/js/app.js`);
+    const script = await request(`${app.url}/js/app.js`);
     assert.equal(script.status, 200);
-    assert.match(await script.text(), /renderCreate/);
+    const scriptText = await script.text();
+    assert.match(scriptText, /renderCreate/);
+    assert.match(scriptText, /renderAuth/);
+    assert.match(scriptText, /usersCardHtml/);
 
-    const apiIndex = (await (await fetch(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
+    const apiIndex = (await (await request(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
     assert.equal(apiIndex.name, "video-agent");
     assert.ok(apiIndex.endpoints);
 
-    const settingsResponse = await fetch(`${app.url}/api/settings`);
+    const settingsResponse = await request(`${app.url}/api/settings`);
     const initial = (await settingsResponse.json()) as {
       settings: { script: { apiKeySet: boolean; provider: string; model: string } };
     };
     assert.equal(initial.settings.script.apiKeySet, false);
     assert.equal(initial.settings.script.provider, "offline");
 
-    const putResponse = await jsonRequest(`${app.url}/api/settings`, {
+    const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },
       tts: { provider: "silent" },
     }, "PUT");
@@ -139,23 +157,23 @@ test(
     assert.equal(updated.settings.tts.provider, "silent");
     assert.equal(config.script.model, "ui-model");
 
-    const secretPut = await jsonRequest(`${app.url}/api/settings`, {
+    const secretPut = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { apiKey: "sk-test-abcdef" },
     }, "PUT");
     assert.equal(secretPut.status, 200);
-    const settingsText = await (await fetch(`${app.url}/api/settings`)).text();
+    const settingsText = await (await request(`${app.url}/api/settings`)).text();
     assert.equal(settingsText.includes("sk-test-abcdef"), false);
     assert.equal(settingsText.includes('"apiKeySet": true'), true);
 
-    const invalid = await jsonRequest(`${app.url}/api/settings`, {
+    const invalid = await jsonRequest(request, `${app.url}/api/settings`, {
       videoGen: { provider: "http" },
     }, "PUT");
     assert.equal(invalid.status, 400);
 
-    const scriptTest = await jsonRequest(`${app.url}/api/settings/test`, { kind: "script" });
+    const scriptTest = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "script" });
     assert.equal(scriptTest.status, 200);
     assert.equal(((await scriptTest.json()) as { provider: string }).provider, "offline");
-    const ttsTest = await jsonRequest(`${app.url}/api/settings/test`, { kind: "tts" });
+    const ttsTest = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "tts" });
     assert.equal(ttsTest.status, 200);
     const ttsResult = (await ttsTest.json()) as { provider: string; durationSec: number };
     assert.equal(ttsResult.provider, "silent");
@@ -167,7 +185,7 @@ test(
     form.append("file", new Blob([await fs.readFile(clip)], { type: "video/mp4" }), "city-night.mp4");
     form.append("tags", "城市,夜景");
     form.append("title", "城市夜景空镜");
-    const uploadResponse = await fetch(`${app.url}/api/materials`, { method: "POST", body: form });
+    const uploadResponse = await request(`${app.url}/api/materials`, { method: "POST", body: form });
     assert.equal(uploadResponse.status, 201, await uploadResponse.clone().text());
     const uploaded = (await uploadResponse.json()) as {
       material: { id: string; tags: string[]; url: string };
@@ -180,20 +198,20 @@ test(
     const imageForm = new FormData();
     imageForm.append("file", new Blob([await fs.readFile(imagePath)], { type: "image/jpeg" }), "城市夜景.jpg");
     imageForm.append("title", "城市夜景海报");
-    const imageUpload = await fetch(`${app.url}/api/materials`, { method: "POST", body: imageForm });
+    const imageUpload = await request(`${app.url}/api/materials`, { method: "POST", body: imageForm });
     assert.equal(imageUpload.status, 201, await imageUpload.clone().text());
     const imageMaterial = (await imageUpload.json()) as { material: { tags: string[] } };
     assert.equal(imageMaterial.material.tags.includes("城市夜景"), true);
     assert.equal(imageMaterial.material.tags.some((tag) => tag.includes("å")), false);
 
-    const fileResponse = await fetch(`${app.url}${uploaded.material.url}`, {
+    const fileResponse = await request(`${app.url}${uploaded.material.url}`, {
       headers: { range: "bytes=0-99" },
     });
     assert.equal(fileResponse.status, 206);
     assert.equal(fileResponse.headers.get("content-type"), "video/mp4");
     assert.equal((await fileResponse.arrayBuffer()).byteLength, 100);
 
-    const previewResponse = await jsonRequest(`${app.url}/api/scripts/generate`, {
+    const previewResponse = await jsonRequest(request, `${app.url}/api/scripts/generate`, {
       topic: "城市夜景",
       targetDurationSec: 10,
       maxSegments: 2,
@@ -206,7 +224,7 @@ test(
     assert.equal(preview.provider, "offline");
     assert.equal(preview.script.segments.length, 2);
 
-    const createResponse = await jsonRequest(`${app.url}/api/videos`, {
+    const createResponse = await jsonRequest(request, `${app.url}/api/videos`, {
       topic: "城市夜景",
       targetDurationSec: 10,
       maxSegments: 2,
@@ -225,7 +243,7 @@ test(
       segments?: Array<{ source: string; material: unknown }>;
     } = created as never;
     for (let attempt = 0; attempt < 120; attempt += 1) {
-      job = (await (await fetch(`${app.url}/api/videos/${created.id}`)).json()) as typeof job;
+      job = (await (await request(`${app.url}/api/videos/${created.id}`)).json()) as typeof job;
       if (job.state === "succeeded" || job.state === "failed") break;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -235,40 +253,40 @@ test(
     assert.equal(job.segments?.[0]?.source, "material");
     assert.ok(job.segments?.[0]?.material);
 
-    const videoRange = await fetch(`${app.url}${job.videoUrl}`, { headers: { range: "bytes=0-99" } });
+    const videoRange = await request(`${app.url}${job.videoUrl}`, { headers: { range: "bytes=0-99" } });
     assert.equal(videoRange.status, 206);
     assert.equal((await videoRange.arrayBuffer()).byteLength, 100);
 
     assert.ok(job.posterUrl);
-    const poster = await fetch(`${app.url}${job.posterUrl}`);
+    const poster = await request(`${app.url}${job.posterUrl}`);
     assert.equal(poster.status, 200);
     assert.equal(poster.headers.get("content-type"), "image/jpeg");
     assert.equal((await poster.arrayBuffer()).byteLength > 500, true);
 
-    const douyinStatus = (await (await fetch(`${app.url}/api/douyin/status`)).json()) as {
+    const douyinStatus = (await (await request(`${app.url}/api/douyin/status`)).json()) as {
       configured: boolean;
       authorized: boolean;
     };
     assert.equal(douyinStatus.configured, true);
     assert.equal(douyinStatus.authorized, false);
 
-    const authorize = (await (await fetch(`${app.url}/api/douyin/authorize`)).json()) as { url: string };
+    const authorize = (await (await request(`${app.url}/api/douyin/authorize`)).json()) as { url: string };
     const state = new URL(authorize.url).searchParams.get("state");
     assert.ok(state);
-    const callback = await fetch(`${app.url}/api/douyin/callback?code=code-1&state=${state}`, {
+    const callback = await request(`${app.url}/api/douyin/callback?code=code-1&state=${state}`, {
       redirect: "manual",
     });
     assert.equal(callback.status, 302);
     assert.match(callback.headers.get("location") ?? "", /douyin=connected/);
 
-    const authorized = (await (await fetch(`${app.url}/api/douyin/status`)).json()) as {
+    const authorized = (await (await request(`${app.url}/api/douyin/status`)).json()) as {
       authorized: boolean;
       token?: { nickname?: string };
     };
     assert.equal(authorized.authorized, true);
     assert.equal(authorized.token?.nickname, "测试抖音号");
 
-    const publishResponse = await jsonRequest(`${app.url}/api/videos/${job.id}/publish`, {
+    const publishResponse = await jsonRequest(request, `${app.url}/api/videos/${job.id}/publish`, {
       text: "城市夜景测试",
       coverTsp: 1000,
     });
@@ -277,14 +295,14 @@ test(
     assert.equal(published.publish.itemId, "item-1");
     assert.equal(published.publish.videoId, "video-1");
 
-    const publishes = (await (await fetch(`${app.url}/api/publishes`)).json()) as {
+    const publishes = (await (await request(`${app.url}/api/publishes`)).json()) as {
       publishes: Array<{ itemId: string }>;
     };
     assert.equal(publishes.publishes.length, 1);
     assert.equal(publishes.publishes[0]!.itemId, "item-1");
 
-    await fetch(`${app.url}/api/douyin/disconnect`, { method: "POST" });
-    const publishAgain = await jsonRequest(`${app.url}/api/videos/${job.id}/publish`, {
+    await request(`${app.url}/api/douyin/disconnect`, { method: "POST" });
+    const publishAgain = await jsonRequest(request, `${app.url}/api/videos/${job.id}/publish`, {
       text: "再次发布",
     });
     assert.equal(publishAgain.status, 401);
