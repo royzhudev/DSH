@@ -190,10 +190,57 @@ function readPath(json: unknown, path: string): unknown {
     }
   }
   return current;
+const MAX_SCAN_DEPTH = 6;
+const IMAGE_HINTS = /thumb|poster|cover|image|img|pic|avatar|icon|qrcode/i;
+const VIDEO_HINTS = /video|mp4|download|play|file|asset|output|media|result/i;
+
+/** 广度优先遍历响应中的所有对象（含数组元素），兼容聚合平台的各种包装与嵌套。 */
+function scanRecords(json: unknown, maxLevel = MAX_SCAN_DEPTH): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  const queue: Array<{ node: unknown; level: number }> = [{ node: json, level: 0 }];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.level > maxLevel) continue;
+    const node = current.node;
+    if (Array.isArray(node)) {
+      for (const item of node.slice(0, 20)) queue.push({ node: item, level: current.level + 1 });
+      continue;
+    }
+    if (!isRecord(node)) continue;
+    records.push(node);
+    for (const value of Object.values(node)) {
+      if (typeof value === "object" && value !== null) {
+        queue.push({ node: value, level: current.level + 1 });
+      }
+    }
+  }
+  return records;
+}
+
+/**
+ * 找成片地址。不同聚合平台把链接放在 video_url、data[0].url、output.video_url、
+ * result.videos[].url 等位置，这里统一扫描并按“像不像视频链接”打分，避免字段名不兼容。
+ */
+function pickVideoUrl(json: unknown): string | undefined {
+  let best: { url: string; score: number } | undefined;
+  for (const record of scanRecords(json)) {
+    for (const [key, value] of Object.entries(record)) {
+      if (typeof value !== "string" || !isUrlLike(value)) continue;
+      const lowerKey = key.toLowerCase();
+      const lowerValue = value.toLowerCase();
+      let score = 0;
+      if (VIDEO_HINTS.test(lowerKey)) score += 6;
+      if (/\.(mp4|mov|webm|mkv|m4v)(\?|$)/.test(lowerValue)) score += 5;
+      if (/^(url|uri|link|src|href|path|output|file|download_url|video_url|videoUrl)$/.test(lowerKey)) score += 3;
+      if (IMAGE_HINTS.test(lowerKey)) score -= 12;
+      if (/\.(jpg|jpeg|png|webp|gif|bmp|svg)(\?|$)/.test(lowerValue)) score -= 12;
+      if (score > 0 && (!best || score > best.score)) best = { url: value, score };
+    }
+  }
+  return best?.url;
 }
 
 function pickTaskId(json: unknown): string | undefined {
-  if (!isRecord(json)) return undefined;
   const flat = unwrap(json);
   // 阿里百炼（DashScope）把任务 ID 放在 output.task_id，且响应里还有 request_id（请求 ID，不是任务 ID）。
   if (isRecord(flat.output)) {
@@ -214,6 +261,26 @@ function pickError(json: unknown): string | undefined {
   if (isRecord(message)) {
     const nested = pickString(message, ["message", "detail", "reason"]);
     if (nested) return nested;
+  return pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId", "request_id"]);
+}
+
+/** 状态字段同样可能出现在 data、数组元素或更深层的包装里。 */
+function pickStatus(json: unknown): string {
+  for (const record of scanRecords(json, 3)) {
+    const value = record.status ?? record.state ?? record.task_status;
+    if (typeof value === "string" && value.trim()) return value.trim().toLowerCase();
+  }
+  return "";
+}
+
+function pickError(json: unknown): string | undefined {
+  for (const record of scanRecords(json, 3)) {
+    const message = record.error ?? record.message ?? record.error_message ?? record.fail_reason;
+    if (typeof message === "string" && message.trim()) return message.trim();
+    if (isRecord(message)) {
+      const nested = pickString(message, ["message", "detail", "reason"]);
+      if (nested) return nested;
+    }
   }
   return undefined;
 }
@@ -452,6 +519,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         throw new AppError(
           `画面生成任务已完成，但返回里没有可识别的视频地址：${describeJson(json)}。` +
             "可在设置页填入「视频地址字段」（如 output.video_url）后继续等待该任务，不会重新扣费。",
+        throw new AppError(
+          `画面生成任务已完成，但响应里没有可用的视频地址：${JSON.stringify(json).slice(0, 300)}`,
           { code: "VIDEOGEN_INVALID_RESPONSE", status: 502 },
         );
       }
@@ -529,6 +598,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
     // 已完成但解析不到地址、响应格式不对：是确定的解析问题，不是“还在生成”，
     // 保留原始提示（含响应结构摘要与字段配置建议），否则用户只会看到“继续等待”。
+    // 任务已完成却找不到成片地址：属于确定的解析失败，再次轮询也不会变好。
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE") return error;
     if (!options.submitted) {
       return new VideoGenPendingError({

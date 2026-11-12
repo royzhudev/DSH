@@ -2395,6 +2395,10 @@ async function renderSettings() {
               <button class="btn btn-ghost btn-sm" type="button" data-test="videogen">生成测试视频</button>
               <span class="test-result" id="test-videogen-result">测试使用已保存的配置，会真实生成视频并可能消耗额度；未完成时会复用同一任务继续查询</span>
             </div>
+            <div class="test-row test-task-row">
+              <input class="input test-task-input" id="videogen-test-task" placeholder="已有任务 ID（可选）：只取回该任务的视频，不重新生成" />
+              <button class="btn btn-ghost btn-sm" type="button" data-resume="videogen">取回视频</button>
+            </div>
             <div id="test-videogen-preview"></div>
           </div>
         </div>
@@ -2498,7 +2502,21 @@ async function renderSettings() {
       void testProvider(button.dataset.test, button);
     });
   }
-
+  for (const button of view.querySelectorAll("[data-resume]")) {
+    button.addEventListener("click", () => {
+      const input = document.getElementById("videogen-test-task");
+      const taskId = (input?.value ?? "").trim();
+      if (!taskId) {
+        const result = document.getElementById("test-videogen-result");
+        if (result) {
+          result.textContent = "请先填写任务 ID";
+          result.className = "test-result fail";
+        }
+        return;
+      }
+      void testProvider(button.dataset.resume, button, { resumeTaskId: taskId });
+    });
+  }
   document.getElementById("settings-connect-douyin")?.addEventListener("click", () => {
     void connectDouyin();
   });
@@ -2616,7 +2634,7 @@ async function saveSettings() {
   }
 }
 
-async function testProvider(kind, button) {
+async function testProvider(kind, button, options = {}) {
   const result = document.getElementById(`test-${kind}-result`);
   const preview = kind === "videogen" ? document.getElementById("test-videogen-preview") : null;
   button.disabled = true;
@@ -2627,7 +2645,11 @@ async function testProvider(kind, button) {
   if (preview) preview.innerHTML = "";
   try {
     const body = { kind };
-    if (kind === "videogen") {
+    if (kind === "videogen" && options.resumeTaskId) {
+      body.resumeTaskId = options.resumeTaskId;
+      body.durationSec = Number(document.getElementById("videogen-test-duration")?.value ?? 5);
+      if (result) result.textContent = `正在取回任务 ${options.resumeTaskId} 的视频，不会重新生成…`;
+    } else if (kind === "videogen") {
       const prompt = document.getElementById("videogen-test-prompt")?.value ?? "";
       const durationSec = Number(document.getElementById("videogen-test-duration")?.value ?? 5);
       body.prompt = prompt;
@@ -2662,13 +2684,19 @@ async function testProvider(kind, button) {
                 durationSec: Number(data.durationSec),
               }
             : null;
-          button.textContent = data.taskId ? "继续等待这个任务" : "重新生成测试视频";
+          const taskInput = document.getElementById("videogen-test-task");
+          if (taskInput && data.taskId) taskInput.value = data.taskId;
+          if (options.resumeTaskId) {
+            button.textContent = "取回视频";
+          } else {
+            button.textContent = data.taskId ? "继续等待这个任务" : "重新生成测试视频";
+          }
           result.textContent = data.submitted
             ? `${data.message} 再次点击“继续等待这个任务”会接着查询，不会重复扣费。`
             : data.message;
         } else {
           pendingVideoTest = null;
-          button.textContent = "生成测试视频";
+          button.textContent = options.resumeTaskId ? "取回视频" : "生成测试视频";
           result.textContent = data.reused
             ? `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒（复用之前已提交的任务，未重复扣费）`
             : `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒`;
