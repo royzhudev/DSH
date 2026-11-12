@@ -165,13 +165,13 @@ GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
 
 轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态；图生视频时首帧放在 `input.img_url`（DashScope 的参考图只取首帧，角色库里的多张参考图请改用通用 HTTP 网关）。
 
-> **报错 `AccessDenied: current user api does not support synchronous calls`** 说明请求没带异步头。百炼的 `video-synthesis` 只支持异步调用，必须带 `X-DashScope-Async: enable`。现在的实现会对百炼地址（`*.aliyuncs.com`）和百炼提交路径（`/api/v1/services/aigc/video-generation/...`）自动按异步协议发送，即使「接口协议」误选成「通用 HTTP 契约」也不会漏头；日志里会提示一次。
+> **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
 >
-> **反过来报 `AccessDenied: current user api does not support asynchronous calls`** 是接口/模型只支持同步调用（官方说明：移除 `X-DashScope-Async` 或设为 `disable`）。程序看到这条报错会自动去掉请求头重试一次，并按「地址+路径+模型」记住结果，后续请求不再先撞一次 403；如果换了模型或路径还失败，错误里会带上实际请求地址，便于核对。
+> 接入步骤：设置 → AI 画面生成 → 点「一键填入百炼 Wan 3.0 默认值」→ 填 API Key → 保存设置 → 点「生成测试视频」。默认值为：接口协议「阿里百炼 DashScope」、接口地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。
 >
-> 推荐设置：接口协议「自动」或「阿里百炼 DashScope」、接口地址 `https://dashscope.aliyuncs.com`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`、模型 `wan3.0-video`，API Key 填百炼的 Key。
-
-> 反向代理/自建网关如果改写了域名和路径，请把「接口协议」显式设为「阿里百炼 DashScope」，否则无法识别为百炼接口。
+> 万相 3.0 的请求体是 `{model, input:{prompt, media[]}, parameters:{resolution, ratio, duration}}`：竖屏默认 `720P` + `9:16`，时长 2–30 秒；图生视频首帧放 `media:[{type:"first_frame", url:"data:image/png;base64,..."}]`。早期 Wan 模型仍用 `parameters.size` 与 `input.img_url`。
+>
+> 地址用业务空间专属域名（`https://{业务空间ID}.cn-beijing.maas.aliyuncs.com`）时，API Key、模型和地址必须在同一地域；官方文档建议生产环境使用这种域名。自定义域名/反向代理请显式选择「通用 HTTP 契约」，程序不会把它误判成百炼。
 
 通用 HTTP 契约（`protocol=generic`，任务创建时打开“AI 画面”开关）：
 
