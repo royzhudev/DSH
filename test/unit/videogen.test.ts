@@ -74,6 +74,42 @@ async function startVideoMock(): Promise<MockVideoServer> {
   };
 }
 
+test("HTTP 文生视频：测试配置提交最短任务并校验轮询", async () => {
+  const dir = await makeTempDir();
+  const mock = await startVideoMock();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: mock.url,
+        model: "video-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 3,
+        fallbackToMaterials: true,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    const result = await provider.check();
+    assert.equal(result.model, "video-model");
+    assert.equal(result.taskId, "task-1");
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.videoUrlReturned, true);
+
+    await assert.rejects(
+      new HttpVideoGenProvider(
+        { ...config.videoGen, baseUrl: "http://127.0.0.1:1", timeoutMs: 2000 },
+        silentLogger,
+      ).check(),
+      (error: unknown) => error instanceof AppError && error.code === "VIDEOGEN_REQUEST_FAILED",
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
 test("HTTP 文生视频：提交、轮询、下载与 ffprobe 校验", async () => {
   const dir = await makeTempDir();
   const clip = path.join(dir, "clip.mp4");

@@ -7,6 +7,7 @@ import { shortId } from "../util/fs.js";
 import { effectiveRedirectUri } from "../server/settings.js";
 
 const TOKEN_PATH = "/oauth/access_token/";
+const CLIENT_TOKEN_PATH = "/oauth/client_token/";
 const REFRESH_PATH = "/oauth/refresh_token/";
 const USERINFO_PATH = "/oauth/userinfo/";
 const UPLOAD_PATH = "/api/douyin/v1/video/upload_video/";
@@ -155,6 +156,35 @@ export class DouyinClient {
       avatar: previous?.avatar,
       updatedAt: new Date(now).toISOString(),
     };
+  }
+
+  /** 设置页“测试配置”：用 client_credential 换取 client_token，验证应用凭证是否有效。 */
+  async verifyCredentials(signal?: AbortSignal): Promise<{ expiresInSec: number }> {
+    if (!this.configured) {
+      throw new AppError("尚未配置抖音开放平台 client_key / client_secret", {
+        code: "DOUYIN_NOT_CONFIGURED",
+        status: 400,
+      });
+    }
+    const data = await this.callJson(
+      CLIENT_TOKEN_PATH,
+      {
+        method: "POST",
+        body: {
+          client_key: this.settings.clientKey,
+          client_secret: this.settings.clientSecret,
+          grant_type: "client_credential",
+        },
+      },
+      signal,
+    );
+    if (!stringField(data, "access_token")) {
+      throw new AppError("抖音 client_token 响应缺少 access_token", {
+        code: "DOUYIN_INVALID_RESPONSE",
+        status: 502,
+      });
+    }
+    return { expiresInSec: numberField(data, "expires_in") ?? 0 };
   }
 
   async exchangeCode(code: string, signal?: AbortSignal): Promise<DouyinToken> {

@@ -74,6 +74,8 @@ node dist/cli.js create --topic "城市夜景"
 
 设置页不会回显已保存的密钥，只显示“已配置”和末四位提示；留空表示保持不变，勾选“清除”后保存才会删除。
 
+脚本模型、配音、AI 画面生成和抖音开放平台四个分组都有“测试”按钮，使用**已保存**的配置验证连通性：脚本/配音会实际生成一次内容；AI 画面会按配置的单段时长提交一次生成请求并查询一次任务（可能消耗少量额度）；抖音会用应用凭证换取 `client_token`。
+
 ## 用户与权限
 
 - **首次初始化**：没有 `data/users.json` 时，网页会显示“创建管理员账号”。创建后需要登录才能使用工作台。
@@ -220,7 +222,7 @@ pnpm dev serve --port 8787
 | `GET/POST` | `/api/users` | 用户列表 / 添加用户（仅管理员） |
 | `PATCH/DELETE` | `/api/users/:id` | 修改（密码/角色/权限/禁用）/ 删除用户（仅管理员） |
 | `GET/PUT` | `/api/settings` | 读取/保存设置（密钥只返回是否已配置；保存需要 `settings` 权限） |
-| `POST` | `/api/settings/test` | 测试脚本或配音配置，`{"kind":"script"\|"tts"}` |
+| `POST` | `/api/settings/test` | 测试设置配置，`{"kind":"script"\|"tts"\|"videogen"\|"douyin"}` |
 | `GET/POST` | `/api/materials` | 素材列表 / 上传（multipart：`file`、`title`、`tags`） |
 | `GET/DELETE` | `/api/materials/:id` | 素材详情 / 删除 |
 | `GET` | `/api/materials/:id/file` | 素材文件（支持 Range） |
