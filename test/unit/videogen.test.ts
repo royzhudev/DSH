@@ -295,10 +295,6 @@ test("HTTP 视频：识别聚合平台常见的嵌套与数组返回结构", asy
     const custom = await run({ data: { weird: { addr: "/files/clip.mp4" } } }, "data.weird.addr");
     assert.equal(custom.generated.durationSec > 0.5, true);
 
-    // 通用字段里带视频扩展名的链接也能识别（{urls: ["...mp4"]}）
-    const genericUrlArray = await run({ data: { urls: ["/files/clip.mp4"] } });
-    assert.equal(genericUrlArray.generated.durationSec > 0.5, true);
-
     // 点号路径支持数组下标
     const indexed = await run(
       { content: { clips: [{ file: { link: "/files/clip.mp4" } }] } },
@@ -426,6 +422,8 @@ test("HTTP 视频：阿里百炼 DashScope 协议提交与轮询", async () => {
     assert.equal(seen.filter((item) => item.url.includes("/api/v1/tasks/")).length, 1);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("HTTP 文生视频：兼容聚合平台把成片地址放在数组/嵌套字段里", async () => {
   const dir = await makeTempDir();

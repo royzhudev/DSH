@@ -38,158 +38,6 @@ function isUrlLike(value: string): boolean {
   return /^https?:\/\//i.test(value) || value.startsWith("/") || value.startsWith("./") || value.startsWith("../");
 }
 
-/** 明确表示“这是成片地址”的字段。 */
-const VIDEO_URL_KEYS = new Set([
-  "video_url",
-  "videourl",
-  "download_url",
-  "downloadurl",
-  "file_url",
-  "fileurl",
-  "result_url",
-  "resulturl",
-  "output_url",
-  "outputurl",
-  "play_url",
-  "playurl",
-  "video_uri",
-  "media_url",
-]);
-/** 结构特殊时也能兜底的通用地址字段。 */
-const GENERIC_URL_KEYS = new Set(["url", "uri", "href", "src", "link"]);
-/** 容器字段，继续往下找。 */
-const CONTAINER_KEYS = new Set([
-  "data",
-  "result",
-  "results",
-  "output",
-  "outputs",
-  "task",
-  "tasks",
-  "job",
-  "payload",
-  "response",
-  "content",
-  "items",
-  "list",
-  "video",
-  "videos",
-  "file",
-  "files",
-  "asset",
-  "assets",
-  "artifacts",
-  "generations",
-]);
-/** 封面、缩略图之类不是成片。 */
-const NON_VIDEO_KEY = /(cover|thumb|thumbnail|poster|image|img|avatar|icon|logo|sprite|qr_?code|preview_image|watermark)/i;
-const MAX_WALK_DEPTH = 6;
-
-/**
- * 视频地址字段的兼容解析。
- *
- * 聚合平台的返回结构差异很大：有的直接给 video_url，有的包成
- * {code:0,data:{status:"completed",output:{video_url:"..."}}}，
- * 还有的给 data[0].url 或 result.videos[0].file_url。这里按字段语义递归查找，
- * 优先选“明确是成片”的字段，其次才是通用 url，并跳过封面/缩略图。
- */
-function findVideoUrl(json: unknown): string | undefined {
-  let best: { url: string; score: number } | undefined;
-  const consider = (key: string, raw: string): void => {
-    const url = raw.trim();
-    if (!isUrlLike(url)) return;
-    const lower = key.toLowerCase();
-    // 链接本身带视频扩展名时也算候选，兼容 {urls: ["...mp4"]} 这类通用字段。
-    const looksLikeVideo = /\.(mp4|mov|webm|mkv|m4v)(\?|$)/i.test(url);
-    let score = 0;
-    if (VIDEO_URL_KEYS.has(lower)) score = 4;
-    else if (GENERIC_URL_KEYS.has(lower) || CONTAINER_KEYS.has(lower)) score = 3;
-    else if (looksLikeVideo) score = 2;
-    else return;
-    if (!best || score > best.score) best = { url, score };
-  };
-  const walk = (value: unknown, depth: number): void => {
-    if (depth > MAX_WALK_DEPTH || value === null || value === undefined) return;
-    if (typeof value === "string" || typeof value === "number") return;
-    if (Array.isArray(value)) {
-      for (const item of value) walk(item, depth + 1);
-      return;
-    }
-    if (!isRecord(value)) return;
-    for (const [key, child] of Object.entries(value)) {
-      if (NON_VIDEO_KEY.test(key)) continue;
-      if (typeof child === "string") {
-        consider(key, child);
-        continue;
-      }
-      if (Array.isArray(child)) {
-        // 兼容 {urls: ["...mp4"]}：数组里的字符串沿用父级字段名参与判断
-        for (const item of child) {
-          if (typeof item === "string") consider(key, item);
-          else walk(item, depth + 1);
-        }
-        continue;
-      }
-      walk(child, depth + 1);
-    }
-  };
-  walk(json, 0);
-  return best?.url;
-}
-
-const STATUS_KEYS = new Set(["status", "state", "task_status", "taskstate", "job_status", "progress_status"]);
-const STATUS_CONTAINER_KEYS = new Set(["data", "result", "task", "job", "payload", "response", "output"]);
-
-/** 状态字段同样兼容嵌套：data.status、data.task.status 等。 */
-function pickStatus(json: unknown): string {
-  let best: { status: string; score: number } | undefined;
-  const walk = (value: unknown, depth: number, containerKey: string): void => {
-    if (depth > 4 || value === null || value === undefined || typeof value !== "object") return;
-    if (Array.isArray(value)) {
-      for (const item of value) walk(item, depth + 1, containerKey);
-      return;
-    }
-    if (!isRecord(value)) return;
-    for (const [key, child] of Object.entries(value)) {
-      const lower = key.toLowerCase();
-      if (typeof child === "string" && STATUS_KEYS.has(lower)) {
-        const score = (STATUS_KEYS.has(lower) ? 2 : 1) + (STATUS_CONTAINER_KEYS.has(containerKey) ? 1 : 0);
-        if (!best || score > best.score) best = { status: child.trim().toLowerCase(), score };
-        continue;
-      }
-      walk(child, depth + 1, lower);
-    }
-  };
-  walk(json, 0, "");
-  return best?.status ?? "";
-}
-
-/** 读点号路径，支持 data.result.videos[0].file_url 这种下标写法。 */
-function readPath(json: unknown, path: string): unknown {
-  let current: unknown = json;
-  for (const raw of path.split(".")) {
-    const segment = raw.trim();
-    if (!segment) continue;
-    const match = /^([^[\]]*)((?:\[\d+\])*)$/.exec(segment);
-    if (!match) return undefined;
-    const key = match[1];
-    if (key) {
-      if (Array.isArray(current)) {
-        const numeric = Number(key);
-        if (!Number.isInteger(numeric) || numeric < 0) return undefined;
-        current = current[numeric];
-      } else if (isRecord(current)) {
-        current = current[key];
-      } else {
-        return undefined;
-      }
-    }
-    for (const index of match[2].matchAll(/\[(\d+)\]/g)) {
-      if (!Array.isArray(current)) return undefined;
-      current = current[Number(index[1])];
-    }
-  }
-  return current;
 const MAX_SCAN_DEPTH = 6;
 const IMAGE_HINTS = /thumb|poster|cover|image|img|pic|avatar|icon|qrcode/i;
 const VIDEO_HINTS = /video|mp4|download|play|file|asset|output|media|result/i;
@@ -242,7 +90,7 @@ function pickVideoUrl(json: unknown): string | undefined {
 
 function pickTaskId(json: unknown): string | undefined {
   const flat = unwrap(json);
-  // 阿里百炼（DashScope）把任务 ID 放在 output.task_id，且响应里还有 request_id（请求 ID，不是任务 ID）。
+  // 阿里百炼（DashScope）把任务 ID 放在 output.task_id，响应里同时还有 request_id（请求 ID，不是任务 ID）。
   if (isRecord(flat.output)) {
     const nested = pickString(flat.output, ["task_id", "taskId", "id"]);
     if (nested) return nested;
@@ -251,17 +99,6 @@ function pickTaskId(json: unknown): string | undefined {
   if (direct) return direct;
   if (isRecord(flat.task)) return pickString(flat.task, ["id", "task_id", "taskId"]);
   return pickString(flat, ["request_id"]);
-}
-
-function pickError(json: unknown): string | undefined {
-  if (!isRecord(json)) return undefined;
-  const flat = unwrap(json);
-  const message = flat.error ?? flat.message ?? flat.msg ?? flat.error_message ?? flat.fail_reason;
-  if (typeof message === "string" && message.trim()) return message.trim();
-  if (isRecord(message)) {
-    const nested = pickString(message, ["message", "detail", "reason"]);
-    if (nested) return nested;
-  return pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId", "request_id"]);
 }
 
 /** 状态字段同样可能出现在 data、数组元素或更深层的包装里。 */
@@ -283,6 +120,34 @@ function pickError(json: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/** 读点号路径，支持 data.result.videos[0].file_url 这种下标写法。 */
+function readPath(json: unknown, path: string): unknown {
+  let current: unknown = json;
+  for (const raw of path.split(".")) {
+    const segment = raw.trim();
+    if (!segment) continue;
+    const match = /^([^[\]]*)((?:\[\d+\])*)$/.exec(segment);
+    if (!match) return undefined;
+    const key = match[1];
+    if (key) {
+      if (Array.isArray(current)) {
+        const numeric = Number(key);
+        if (!Number.isInteger(numeric) || numeric < 0) return undefined;
+        current = current[numeric];
+      } else if (isRecord(current)) {
+        current = current[key];
+      } else {
+        return undefined;
+      }
+    }
+    for (const index of match[2].matchAll(/\[(\d+)\]/g)) {
+      if (!Array.isArray(current)) return undefined;
+      current = current[Number(index[1])];
+    }
+  }
+  return current;
 }
 
 /** 返回结构摘要，截断长字符串，避免日志与错误信息过长。 */
@@ -400,9 +265,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   private protocol(): "dashscope" | "generic" {
     const configured = this.settings.protocol;
     if (configured === "dashscope" || configured === "generic") return configured;
-    return /(^|\.)dashscope\.aliyuncs\.com$/i.test(this.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
-      ? "dashscope"
-      : "generic";
+    const host = this.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    return /(^|\.)dashscope(-intl)?\.aliyuncs\.com$/i.test(host) ? "dashscope" : "generic";
   }
 
   private headers(): Record<string, string> {
@@ -417,7 +281,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
 
   /**
    * 按协议组装提交体。DashScope（阿里百炼）用 {model, input, parameters}，
-   * 图生视频的首帧放 input.img_url；通用 HTTP 约定保持扁平字段。
+   * 图生视频的首帧放 input.img_url；通用 HTTP 契约保持扁平字段。
    */
   private submitBody(
     request: VideoGenRequest,
@@ -445,6 +309,18 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       ...(image ? { image } : {}),
       ...(referenceImages.length > 0 ? { reference_images: referenceImages } : {}),
     };
+  }
+
+  /** 先用配置的「视频地址字段」，取不到再回退自动识别；任务已完成时不会重新扣费。 */
+  private videoUrlOf(json: unknown): string | undefined {
+    const configured = this.settings.resultPath?.trim();
+    if (configured) {
+      const value = readPath(json, configured);
+      // 允许相对地址（如 /files/clip.mp4），下载时按 baseUrl 解析。
+      if (typeof value === "string" && value.trim()) return value.trim();
+      this.logger.warn(`配置的视频地址字段 ${configured} 没有取到地址，回退到自动识别`);
+    }
+    return pickVideoUrl(json);
   }
 
   private withTimeout(signal?: AbortSignal): AbortSignal {
@@ -485,17 +361,6 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     }
   }
 
-  /** 优先使用配置的点号路径，其次按常见字段语义自动识别。 */
-  private videoUrlOf(json: unknown): string | undefined {
-    const configured = this.settings.resultPath?.trim();
-    if (configured) {
-      const value = readPath(json, configured);
-      if (typeof value === "string" && isUrlLike(value.trim())) return value.trim();
-      this.logger.warn(`配置的视频地址字段 ${configured} 没有取到地址，回退到自动识别`);
-    }
-    return findVideoUrl(json);
-  }
-
   private async waitForVideoUrl(taskId: string, signal: AbortSignal): Promise<string> {
     const pollUrl = `${this.baseUrl}${this.settings.pollPath.replace("{id}", encodeURIComponent(taskId))}`;
     const deadline = Date.now() + this.settings.timeoutMs;
@@ -519,8 +384,6 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         throw new AppError(
           `画面生成任务已完成，但返回里没有可识别的视频地址：${describeJson(json)}。` +
             "可在设置页填入「视频地址字段」（如 output.video_url）后继续等待该任务，不会重新扣费。",
-        throw new AppError(
-          `画面生成任务已完成，但响应里没有可用的视频地址：${JSON.stringify(json).slice(0, 300)}`,
           { code: "VIDEOGEN_INVALID_RESPONSE", status: 502 },
         );
       }
@@ -596,8 +459,6 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     if (error instanceof AppError && error.status < 500) return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_TASK_FAILED") return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
-    // 已完成但解析不到地址、响应格式不对：是确定的解析问题，不是“还在生成”，
-    // 保留原始提示（含响应结构摘要与字段配置建议），否则用户只会看到“继续等待”。
     // 任务已完成却找不到成片地址：属于确定的解析失败，再次轮询也不会变好。
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE") return error;
     if (!options.submitted) {
