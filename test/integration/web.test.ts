@@ -587,3 +587,55 @@ test(
     assert.equal(mock.state.submits, 1);
   },
 );
+
+test(
+  "网页与 API：同一个测试并发点两次只提交一次生成任务",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const clip = path.join(dir, "source", "slow-source.mp4");
+    await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+    const mock = await startSlowVideoGenMock(clip);
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      videoGen: {
+        provider: "http",
+        baseUrl: mock.url,
+        model: "slow-model",
+        apiKey: "slow-key",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5_000,
+        clipDurationSec: 3,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      await mock.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+    const payload = { kind: "videogen", prompt: "一只慢动作的猫", durationSec: 3 };
+
+    // 模拟双击 / 两个标签页同时点测试：两个请求在同一时刻发出。
+    const [first, second] = await Promise.all([
+      jsonRequest(request, `${app.url}/api/settings/test`, payload),
+      jsonRequest(request, `${app.url}/api/settings/test`, payload),
+    ]);
+    assert.equal(first.status, 200, await first.clone().text());
+    assert.equal(second.status, 200, await second.clone().text());
+    const a = (await first.json()) as { pending: boolean; taskId: string | null };
+    const b = (await second.json()) as { pending: boolean; taskId: string | null };
+    assert.equal(a.pending, true);
+    assert.equal(b.pending, true);
+    assert.equal(a.taskId, "task-slow");
+    assert.equal(b.taskId, "task-slow");
+    // 关键：只有一个 POST，第二次请求共用第一次的结果，没有重复扣费。
+    assert.equal(mock.state.submits, 1);
+  },
+);
+

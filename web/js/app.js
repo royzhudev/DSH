@@ -2716,8 +2716,22 @@ async function testProvider(kind, button, options = {}) {
         if (result) {
           result.textContent = `继续查询上次已提交的任务（${pendingVideoTest.taskId}），不会重复提交…`;
         }
-      } else if (result) {
-        result.textContent = "生成中…（可能需要 1–2 分钟）";
+      } else {
+        // 上一个任务还在生成时改提示词/时长会再提交一条新任务（再扣一次费），先确认。
+        if (pendingVideoTest && pendingVideoTest.taskId) {
+          const ok = window.confirm(
+            `上一个任务 ${pendingVideoTest.taskId} 还在生成，重新提交会再生成一条视频并可能再次扣费。\n\n` +
+              "只想取回旧任务：把提示词和时长改回原样再点测试。\n继续提交新任务吗？",
+          );
+          if (!ok) {
+            if (result) {
+              result.textContent = `已取消：没有提交新任务，${pendingVideoTest.taskId} 还可以继续等待。`;
+            }
+            stopVideoTestAuto();
+            return;
+          }
+        }
+        if (result) result.textContent = "生成中…（可能需要 1–2 分钟）";
       }
     }
     const data = await api("/api/settings/test", { method: "POST", body });
@@ -2759,7 +2773,7 @@ async function testProvider(kind, button, options = {}) {
           button.textContent = "生成测试视频";
           result.textContent = data.reused
             ? `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒（复用之前已提交的任务，未重复扣费）`
-            : `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒`;
+            : `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒（本次只提交 1 次生成）`;
           if (preview && data.videoUrl) {
             preview.innerHTML = `<video class="test-video" controls playsinline preload="metadata" src="${attr(data.videoUrl)}"></video>`;
           }
