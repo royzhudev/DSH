@@ -148,6 +148,8 @@ cp video-agent.config.example.json video-agent.config.json
 
 `protocol` 决定请求格式：`auto`（默认）按服务地址判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope` 或 `generic`。
 
+服务地址填的是阿里百炼（`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com`）时会自动纠正成异步写法：协议若是「通用 HTTP 契约」会改回 `dashscope`，提交/查询路径还是通用默认值（`/v1/videos/generations`）也会换成上面的百炼路径；只填域名（少了 `https://`）或把完整接口地址粘进「服务地址」也会被纠正。这样就不会出现平台报 `AccessDenied: current user api does not support synchronous calls`（该接口只支持异步调用，需要 `X-DashScope-Async: enable`）。
+
 阿里百炼模式（`protocol=dashscope`）的请求与轮询：
 
 ```http
