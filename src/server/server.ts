@@ -806,9 +806,6 @@ function settingsTestKey(
   return [config.videoGen.baseUrl, config.videoGen.model, durationSec, prompt].join("|");
 }
 
-/** 同一配置的并发测试请求共用一次执行结果，避免重复提交生成任务。 */
-const inflightVideoTests = new Map<string, Promise<Record<string, unknown>>>();
-
 async function runVideoTestOnce(
   key: string,
   run: () => Promise<Record<string, unknown>>,
