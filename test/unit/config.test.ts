@@ -71,3 +71,79 @@ test("视频尺寸会被校正为偶数", async () => {
   assert.equal(config.video.width, 722);
   assert.equal(config.video.height, 1082);
 });
+
+test("loadConfig 把阿里百炼的视频配置纠正为异步协议", async () => {
+  const dir = await makeTempDir();
+  await fs.writeFile(
+    path.join(dir, "video-agent.config.json"),
+    JSON.stringify({
+      videoGen: {
+        provider: "http",
+        // 用户手选过“通用 HTTP 契约”，服务地址却是阿里百炼：这种组合必然被平台拒绝。
+        protocol: "generic",
+        baseUrl: "  https://dashscope.aliyuncs.com  ",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+      },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.baseUrl, "https://dashscope.aliyuncs.com");
+  assert.equal(config.videoGen.protocol, "dashscope");
+  assert.equal(
+    config.videoGen.submitPath,
+    "/api/v1/services/aigc/video-generation/video-synthesis",
+  );
+  assert.equal(config.videoGen.pollPath, "/api/v1/tasks/{id}");
+});
+
+test("loadConfig 给只填域名的百炼地址补上 https://", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({
+    cwd: dir,
+    env: {},
+    overrides: {
+      videoGen: { provider: "http", protocol: "generic", baseUrl: "dashscope.aliyuncs.com" },
+    },
+  });
+  assert.equal(config.videoGen.baseUrl, "https://dashscope.aliyuncs.com");
+  assert.equal(config.videoGen.protocol, "dashscope");
+});
+
+test("loadConfig 收回被当成服务地址的百炼完整接口地址", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({
+    cwd: dir,
+    env: {},
+    overrides: {
+      videoGen: {
+        provider: "http",
+        baseUrl:
+          "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
+        protocol: "auto",
+      },
+    },
+  });
+  assert.equal(config.videoGen.baseUrl, "https://dashscope.aliyuncs.com");
+  assert.equal(config.videoGen.protocol, "auto");
+});
+
+test("loadConfig 不改动非阿里百炼地址上的通用协议", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({
+    cwd: dir,
+    env: {},
+    overrides: {
+      videoGen: {
+        provider: "http",
+        protocol: "generic",
+        baseUrl: "https://gateway.example.com",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+      },
+    },
+  });
+  assert.equal(config.videoGen.protocol, "generic");
+  assert.equal(config.videoGen.submitPath, "/v1/videos/generations");
+});

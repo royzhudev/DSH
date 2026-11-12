@@ -2378,6 +2378,7 @@ async function renderSettings() {
                   ["generic", "通用 HTTP 契约"],
                 ], s.videoGen.protocol ?? "auto")}
               </select>
+              <div class="field-hint">服务地址是阿里百炼时会自动按异步接口发送（带 X-DashScope-Async: enable），不用自己加请求头；保存后按服务地址自动纠正</div>
             </div>
           </div>
           <div class="field-grid-3">

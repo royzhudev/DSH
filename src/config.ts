@@ -422,13 +422,62 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   config.castDir = path.resolve(cwd, config.castDir);
   config.cacheDir = path.resolve(cwd, config.cacheDir);
   config.settingsFile = settingsPath;
-  config.script.baseUrl = config.script.baseUrl.replace(/\/+$/, "");
-  config.tts.baseUrl = config.tts.baseUrl.replace(/\/+$/, "");
-  config.videoGen.baseUrl = config.videoGen.baseUrl.replace(/\/+$/, "");
-  config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.replace(/\/+$/, "");
+  config.script.baseUrl = config.script.baseUrl.trim().replace(/\/+$/, "");
+  config.tts.baseUrl = config.tts.baseUrl.trim().replace(/\/+$/, "");
+  config.videoGen.baseUrl = config.videoGen.baseUrl.trim().replace(/\/+$/, "");
+  if (config.videoGen.baseUrl && !/^[a-z][a-z0-9+.-]*:\/\//i.test(config.videoGen.baseUrl)) {
+    // 直接填域名（dashscope.aliyuncs.com）也能用，省得因为少了 https:// 而报连接失败。
+    config.videoGen.baseUrl = `https://${config.videoGen.baseUrl}`;
+  }
+  config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.trim().replace(/\/+$/, "");
+  normalizeVideoGenProtocol(config);
 
   validateConfig(config);
   return config;
+}
+
+export const DASHSCOPE_VIDEO_SUBMIT_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
+export const DASHSCOPE_VIDEO_POLL_PATH = "/api/v1/tasks/{id}";
+
+function isDashscopeBaseUrl(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return /(^|\.)dashscope(-intl)?\.aliyuncs\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 服务地址就是阿里百炼时，视频接口只支持异步调用（缺少 X-DashScope-Async: enable 会被
+ * 平台以 AccessDenied「current user api does not support synchronous calls」拒绝）。
+ * 「通用 HTTP」协议发的是扁平字段、也没有异步请求头，必然失败，所以这里直接纠正，
+ * 避免用户选错协议后只能看到一段平台报错。
+ */
+function normalizeVideoGenProtocol(config: AppConfig): void {
+  if (!isDashscopeBaseUrl(config.videoGen.baseUrl)) return;
+  // 常见的手填错误：把完整接口地址（或 compatible-mode 地址）当成「服务地址」。
+  // 百炼的异步视频接口固定挂在域名根下，这里收回域名，避免路径重复。
+  try {
+    const url = new URL(config.videoGen.baseUrl);
+    const suffix = url.pathname.replace(/\/+$/, "");
+    if (
+      suffix === "/api/v1" ||
+      suffix === "/compatible-mode/v1" ||
+      suffix === DASHSCOPE_VIDEO_SUBMIT_PATH
+    ) {
+      config.videoGen.baseUrl = url.origin;
+    }
+  } catch {
+    return;
+  }
+  if (config.videoGen.protocol === "generic") config.videoGen.protocol = "dashscope";
+  if (config.videoGen.submitPath === "/v1/videos/generations") {
+    config.videoGen.submitPath = DASHSCOPE_VIDEO_SUBMIT_PATH;
+  }
+  if (config.videoGen.pollPath === "/v1/videos/generations/{id}") {
+    config.videoGen.pollPath = DASHSCOPE_VIDEO_POLL_PATH;
+  }
 }
 
 export function resolveSettingsPath(options: {
