@@ -90,7 +90,7 @@ interface VideoGenMock {
   close(): Promise<void>;
 }
 
-async function startVideoGenMock(): Promise<VideoGenMock> {
+async function startVideoGenMock(clipPath: string): Promise<VideoGenMock> {
   const calls: VideoGenMock["calls"] = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -111,7 +111,13 @@ async function startVideoGenMock(): Promise<VideoGenMock> {
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-1") {
-      send({ data: { status: "succeeded", video_url: "http://127.0.0.1/clip.mp4" } });
+      send({ data: { status: "succeeded", video_url: "/files/clip.mp4" } });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clipPath);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
       return;
     }
     res.writeHead(404);
@@ -150,7 +156,9 @@ test(
   async (t) => {
     const dir = await makeTempDir();
     const douyin = await startDouyinMock();
-    const videoGen = await startVideoGenMock();
+    const videoGenClip = path.join(dir, "source", "settings-test-source.mp4");
+    await generateTestClip(videoGenClip, { durationSec: 1, size: "160x160" });
+    const videoGen = await startVideoGenMock(videoGenClip);
     const config = makeTestConfig(dir, {
       server: { port: 0 },
       douyin: {
@@ -251,22 +259,43 @@ test(
       },
     }, "PUT");
     assert.equal(videoGenPut.status, 200, await videoGenPut.clone().text());
-    const videoGenTest = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "videogen" });
+    const videoGenTest = await jsonRequest(request, `${app.url}/api/settings/test`, {
+      kind: "videogen",
+      prompt: "一只橘猫在窗台上看雨",
+      durationSec: 3,
+    });
     assert.equal(videoGenTest.status, 200, await videoGenTest.clone().text());
     const videoGenResult = (await videoGenTest.json()) as {
+      provider: string;
       model: string;
-      taskId: string;
-      status: string;
-      videoUrlReturned: boolean;
+      prompt: string;
+      durationSec: number;
+      videoUrl: string;
     };
+    assert.equal(videoGenResult.provider, "http");
     assert.equal(videoGenResult.model, "test-model");
-    assert.equal(videoGenResult.taskId, "task-1");
-    assert.equal(videoGenResult.status, "succeeded");
-    assert.equal(videoGenResult.videoUrlReturned, true);
+    assert.equal(videoGenResult.prompt, "一只橘猫在窗台上看雨");
+    assert.equal(videoGenResult.durationSec > 0.5, true);
+    assert.match(videoGenResult.videoUrl, /^\/api\/settings\/test\/video\/[a-zA-Z0-9_-]+\.mp4$/);
     const submitCall = videoGen.calls.find((call) => call.method === "POST");
     assert.ok(submitCall);
     assert.equal(submitCall.authorization, "Bearer videogen-key");
-    assert.equal((JSON.parse(submitCall.body) as { duration_sec: number }).duration_sec, 2);
+    const submitBody = JSON.parse(submitCall.body) as { prompt: string; duration_sec: number };
+    assert.equal(submitBody.prompt, "一只橘猫在窗台上看雨");
+    assert.equal(submitBody.duration_sec, 3);
+
+    const testVideo = await request(`${app.url}${videoGenResult.videoUrl}`);
+    assert.equal(testVideo.status, 200);
+    assert.equal(testVideo.headers.get("content-type"), "video/mp4");
+    assert.equal((await testVideo.arrayBuffer()).byteLength > 0, true);
+    const anonymousVideo = await fetch(`${app.url}${videoGenResult.videoUrl}`);
+    assert.equal(anonymousVideo.status, 401);
+
+    const badDuration = await jsonRequest(request, `${app.url}/api/settings/test`, {
+      kind: "videogen",
+      durationSec: 4,
+    });
+    assert.equal(badDuration.status, 400);
 
     // 测试完成后关闭 AI 画面，避免影响后面的完整任务流程。
     const videoGenReset = await jsonRequest(request, `${app.url}/api/settings`, {

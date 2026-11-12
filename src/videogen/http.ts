@@ -88,13 +88,6 @@ export interface HttpVideoGenDeps {
   fetchImpl?: typeof fetch;
 }
 
-export interface VideoGenCheckResult {
-  model: string;
-  taskId?: string;
-  status?: string;
-  videoUrlReturned: boolean;
-}
-
 /**
  * 通用 HTTP 文生视频适配器。约定：
  *  - POST {baseUrl}{submitPath}  JSON {model, prompt, duration_sec, aspect_ratio}
@@ -129,8 +122,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     return headers;
   }
 
-  private withTimeout(signal?: AbortSignal, maxMs?: number): AbortSignal {
-    const timeout = AbortSignal.timeout(Math.min(this.settings.timeoutMs, maxMs ?? this.settings.timeoutMs));
+  private withTimeout(signal?: AbortSignal): AbortSignal {
+    const timeout = AbortSignal.timeout(this.settings.timeoutMs);
     if (!signal) return timeout;
     return AbortSignal.any([signal, timeout]);
   }
@@ -224,63 +217,6 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     const file = path.join(outputDir, `${sha256(`${absolute}:${Date.now()}`).slice(0, 16)}.mp4`);
     await fsp.writeFile(file, buffer);
     return file;
-  }
-
-  /**
-   * 设置页“测试配置”：按配置的单段时长提交一次生成请求并查询一次任务，
-   * 验证服务地址、密钥、模型与提交/查询路径是否可用。不下载成片、不等待生成完成。
-   */
-  async check(signal?: AbortSignal): Promise<VideoGenCheckResult> {
-    const composed = this.withTimeout(signal, 30_000);
-    const submitUrl = `${this.baseUrl}${this.settings.submitPath}`;
-    const json = await this.requestJson(
-      submitUrl,
-      {
-        method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify({
-          model: this.settings.model,
-          prompt: "配置测试：纯色渐变背景",
-          duration_sec: this.settings.clipDurationSec,
-          aspect_ratio: "9:16",
-        }),
-      },
-      composed,
-    );
-
-    if (pickVideoUrl(json)) {
-      return { model: this.settings.model, videoUrlReturned: true };
-    }
-    const taskId = pickTaskId(json);
-    if (!taskId) {
-      throw new AppError(`画面生成服务响应缺少任务 ID 或视频地址：${JSON.stringify(json).slice(0, 300)}`, {
-        code: "VIDEOGEN_INVALID_RESPONSE",
-        status: 502,
-      });
-    }
-
-    const pollUrl = `${this.baseUrl}${this.settings.pollPath.replace("{id}", encodeURIComponent(taskId))}`;
-    const pollJson = await this.requestJson(pollUrl, { method: "GET", headers: this.headers() }, composed);
-    const status = pickStatus(pollJson);
-    if (FAILED_STATES.has(status)) {
-      throw new AppError(`画面生成任务失败${pickError(pollJson) ? `：${pickError(pollJson)}` : ""}`, {
-        code: "VIDEOGEN_TASK_FAILED",
-        status: 502,
-      });
-    }
-    const videoUrlReturned = Boolean(pickVideoUrl(pollJson));
-    if (!status && !videoUrlReturned) {
-      throw new AppError("画面生成查询接口的响应缺少状态或视频地址", {
-        code: "VIDEOGEN_INVALID_RESPONSE",
-        status: 502,
-      });
-    }
-    return {
-      model: this.settings.model,
-      taskId,
-      status: status || "pending",
-      videoUrlReturned,
-    };
   }
 
   async generate(
