@@ -12,8 +12,12 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body>
-    <div class="app-shell">
+  <body class="auth-locked">
+    <div class="auth-screen" id="auth-screen">
+      <div class="auth-loading"><span class="spinner"></span><span>正在检查登录状态…</span></div>
+    </div>
+
+    <div class="app-shell" id="app-shell">
       <aside class="sidebar">
         <a class="brand" href="#/create" aria-label="视频创作智能体首页">
           <span class="brand-mark" aria-hidden="true">
@@ -71,7 +75,15 @@
           </div>
           <div class="topbar-actions">
             <span class="pill pill-soft" id="model-pill" title="当前模型配置">离线模式</span>
-            <a class="btn btn-primary btn-sm" href="#/create">＋ 新建视频</a>
+            <a class="btn btn-primary btn-sm" id="new-video-btn" href="#/create">＋ 新建视频</a>
+            <div class="user-menu" id="user-menu" hidden>
+              <span class="user-avatar" id="user-avatar" aria-hidden="true">A</span>
+              <span class="user-info">
+                <strong id="user-name"></strong>
+                <small id="user-role"></small>
+              </span>
+              <button class="btn-link" id="logout-btn" type="button">退出</button>
+            </div>
           </div>
         </header>
 
