@@ -792,6 +792,11 @@ interface PendingVideoTest {
  * 再次点击测试时复用这些任务继续查询，避免对同一段测试视频重复付费。
  */
 const pendingVideoTests = new Map<string, PendingVideoTest>();
+/**
+ * 正在跑的视频测试。同一个“地址+模型+时长+描述”的重复请求（连点、自动续查、
+ * 多标签页）共享同一次提交，避免向平台重复提交、重复扣费。
+ */
+const inflightVideoTests = new Map<string, Promise<Record<string, unknown>>>();
 
 function settingsTestKey(
   config: { videoGen: { baseUrl: string; model: string } },

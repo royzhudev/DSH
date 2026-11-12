@@ -578,6 +578,17 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       return abortReason(options.callerSignal);
     }
     if (error instanceof VideoGenPendingError) return error;
+    // 任务已经建好、只是轮到查询时出错（网络、限流、4xx）：任务还在平台侧，
+    // 必须带着 taskId 交回调用方继续查询，不能当成“测试失败”让用户重新提交。
+    if (options.submitted && options.taskId && error instanceof AppError && error.status < 500) {
+      return new VideoGenPendingError({
+        message:
+          `画面生成已提交（任务 ${options.taskId}），查询结果时出错：${error.message}` +
+          "任务仍在平台侧生成，重新测试会复用该任务继续查询，不会重复提交或扣费。",
+        taskId: options.taskId,
+        submitted: true,
+      });
+    }
     if (error instanceof AppError && error.status < 500) return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_TASK_FAILED") return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
