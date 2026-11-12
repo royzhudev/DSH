@@ -2,8 +2,10 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import type {
   AppConfig,
+  CastAsset,
   GeneratedClip,
   JobProgress,
+  JobStage,
   PipelineResult,
   ProgressReporter,
   ScriptProvider,
@@ -20,6 +22,9 @@ import { createTtsProvider } from "./tts/index.js";
 import { createVideoGenProvider } from "./videogen/index.js";
 import { MaterialLibrary } from "./materials/library.js";
 import { matchMaterial, materialTagPool } from "./materials/match.js";
+import { CastLibrary, castSummary, resolveCastNames, selectCastAssets } from "./cast/library.js";
+import { buildShotPrompt } from "./cast/prompt.js";
+import { preflightVideoJob } from "./preflight.js";
 import { renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
@@ -34,25 +39,29 @@ export interface RunPipelineOptions {
   jobId?: string;
   signal?: AbortSignal;
   library?: MaterialLibrary;
+  /** 角色/道具库；默认按 config.castDir 创建。 */
+  castLibrary?: CastLibrary;
   scriptProvider?: ScriptProvider;
   ttsProvider?: TtsProvider;
   /** 显式传入 null 可禁用画面生成；未传时按配置创建。 */
   videoGenProvider?: VideoGenProvider | null;
+  /** 剧本/大纲文本；为空时只按主题创作。 */
+  story?: string;
+  /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定。 */
+  castIds?: string[];
 }
 
-/** 把主题、口播和关键词拼成画面生成提示词。 */
-export function buildVideoPrompt(topic: string, segment: { narration: string; keywords: string[] }): string {
-  const keywords = segment.keywords.filter(Boolean).join("、");
-  const prompt = [
-    `主题：${topic}`,
-    `画面：${segment.narration}`,
-    keywords ? `关键词：${keywords}` : "",
-    "竖屏 9:16，真实拍摄质感，光线自然，镜头稳定，无文字水印。",
-  ]
-    .filter(Boolean)
-    .join("；");
-  return prompt.slice(0, 800);
-}
+const STAGE_LABELS: Record<JobStage, string> = {
+  queued: "排队",
+  preflight: "检查配置",
+  script: "脚本生成",
+  materials: "画面准备",
+  tts: "配音合成",
+  videogen: "AI 画面生成",
+  render: "分镜剪辑",
+  concat: "成片拼接",
+  done: "完成",
+};
 
 export function createJobId(now = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -70,6 +79,23 @@ function round3(value: number): number {
   return Number(value.toFixed(3));
 }
 
+function castPromptInput(assets: CastAsset[]): Array<Pick<CastAsset, "name" | "kind" | "description">> {
+  return assets.map(({ name, kind, description }) => ({ name, kind, description }));
+}
+
+/** 把阶段信息加到错误消息前面，用户能直接看出是哪一步出的问题。 */
+function withStageLabel(stage: JobStage, error: unknown): unknown {
+  if (error instanceof AppError && error.code === "ABORTED") return error;
+  if (stage === "preflight") return error;
+  const message = toErrorMessage(error);
+  if (message.startsWith("【")) return error;
+  return new AppError(`【${STAGE_LABELS[stage] ?? stage}】${message}`, {
+    code: error instanceof AppError ? error.code : "PIPELINE_FAILED",
+    status: error instanceof AppError ? error.status : 500,
+    cause: error,
+  });
+}
+
 export async function runPipeline(options: RunPipelineOptions): Promise<PipelineResult> {
   const { topic, config } = options;
   const logger = options.logger ?? silentLogger;
@@ -81,8 +107,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   if (normalizedTopic.length > 200) {
     throw new AppError("主题不能超过 200 个字符", { code: "INVALID_TOPIC", status: 400 });
   }
+  const story = options.story?.trim() || undefined;
 
+  let currentStage: JobStage = "preflight";
   const report = (progress: JobProgress): void => {
+    currentStage = progress.stage;
     try {
       options.onProgress?.(progress);
     } catch {
@@ -97,13 +126,30 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   const srtPath = path.join(jobDir, "subtitles.srt");
   const scriptPath = path.join(jobDir, "script.json");
   const resultPath = path.join(jobDir, "result.json");
-
-  await ensureDir(jobDir);
-  await ensureDir(config.workDir);
-  await ensureDir(config.libraryDir);
-  await ensureDir(config.cacheDir);
+  const warnings: string[] = [];
 
   try {
+    await ensureDir(jobDir);
+    await ensureDir(config.workDir);
+    await ensureDir(config.libraryDir);
+    await ensureDir(config.castDir);
+    await ensureDir(config.cacheDir);
+
+    // 先做本地检查，再调用任何可能产生费用的模型。
+    report({ stage: "preflight", percent: 2, message: "检查配置、参考图与运行环境" });
+    const castLibrary = options.castLibrary ?? new CastLibrary(config.castDir, logger);
+    const allCast = await castLibrary.list();
+    const cast = selectCastAssets(allCast, options.castIds);
+    await preflightVideoJob({
+      config,
+      topic: normalizedTopic,
+      story,
+      castAssets: cast,
+      options: { castIds: options.castIds, videoGenEnabled: config.videoGen.provider !== "none" },
+      logger,
+    });
+    throwIfAborted(signal);
+
     report({ stage: "script", percent: 5, message: "读取素材库并生成脚本" });
     const library = options.library ?? new MaterialLibrary(config.libraryDir, logger);
     const materials = await library.list();
@@ -114,10 +160,17 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         targetDurationSec: config.script.targetDurationSec,
         maxSegments: config.script.maxSegments,
         availableTags: materialTagPool(materials),
+        ...(story ? { story } : {}),
+        ...(cast.length > 0 ? { cast: castPromptInput(cast) } : {}),
       },
       signal,
     );
     throwIfAborted(signal);
+    if (story && script.provider === "offline") {
+      warnings.push(
+        "当前使用离线脚本模板，剧本/大纲没有参与分镜生成；配置脚本模型后可严格按剧本生成。",
+      );
+    }
     await writeJsonFile(scriptPath, script);
     logger.info(`脚本已生成：${script.title}（${script.segments.length} 段）`);
     report({
@@ -145,6 +198,9 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         ].join("|"),
       ).slice(0, 40);
       const tts = await ttsProvider.synthesize({ text: segment.narration, cacheKey }, signal);
+      if (config.tts.provider !== "silent" && tts.provider === "silent") {
+        warnings.push(`分镜 ${index + 1} 配音失败，已回退为静音占位（详见服务日志）。`);
+      }
       const durationSec = round3(
         Math.max(tts.durationSec + config.video.tailPaddingSec, config.video.minSegmentSec),
       );
@@ -158,6 +214,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         index,
         segment,
         material: null,
+        cast: resolveCastNames(segment.cast, cast),
         tts,
         durationSec,
         cues,
@@ -180,28 +237,45 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     for (let index = 0; index < plans.length; index += 1) {
       throwIfAborted(signal);
       const plan = plans[index]!;
+      let fallbackReason: string | undefined;
       if (videoGen) {
         report({
           stage: "videogen",
           percent: Math.round(50 + (index / plans.length) * 14),
-          message: `AI 生成画面 ${index + 1}/${plans.length}`,
+          message: `AI 生成画面 ${index + 1}/${plans.length}${plan.cast.length > 0 ? `（${plan.cast.map((item) => item.name).join("、")}）` : ""}`,
         });
+        const references = plan.cast
+          .filter((asset) => asset.imageFile)
+          .map((asset) => ({
+            role: asset.kind,
+            name: asset.name,
+            file: path.join(config.castDir, asset.imageFile!),
+          }));
+        const primary = references.find((reference) => reference.role === "character") ?? references[0];
         try {
           const generated: GeneratedClip = await videoGen.generate(
             {
-              prompt: buildVideoPrompt(normalizedTopic, plan.segment),
+              prompt: buildShotPrompt({
+                topic: normalizedTopic,
+                index: index + 1,
+                total: plans.length,
+                segment: plan.segment,
+                cast: plan.cast,
+              }),
               durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
+              ...(primary ? { image: primary.file } : {}),
+              ...(references.length > 0 ? { references } : {}),
             },
             path.join(jobDir, "generated"),
             signal,
           );
           plan.generated = generated;
+          plan.imageToVideo = Boolean(primary);
         } catch (error) {
           if (signal?.aborted) throw error;
           if (!config.videoGen.fallbackToMaterials) throw error;
-          logger.warn(
-            `分镜 ${index + 1} AI 画面生成失败，回退素材匹配：${toErrorMessage(error)}`,
-          );
+          fallbackReason = toErrorMessage(error);
+          logger.warn(`分镜 ${index + 1} AI 画面生成失败，回退素材匹配：${fallbackReason}`);
         }
       }
       if (!plan.generated) {
@@ -211,6 +285,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         });
         if (material) usedIds.add(material.id);
         plan.material = material;
+        if (fallbackReason) {
+          warnings.push(
+            `分镜 ${index + 1} AI 画面生成失败，已回退${material ? "素材库" : "渐变背景"}：${fallbackReason}`,
+          );
+        }
       }
     }
     report({
@@ -276,6 +355,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       index: plan.index + 1,
       narration: plan.segment.narration,
       keywords: plan.segment.keywords,
+      ...(plan.segment.scene ? { scene: plan.segment.scene } : {}),
+      ...(plan.segment.shot ? { shot: plan.segment.shot } : {}),
+      ...(plan.cast.length > 0
+        ? { cast: plan.cast.map(({ id, name, kind }) => ({ id, name, kind })) }
+        : {}),
       material: plan.material
         ? {
             id: plan.material.id,
@@ -290,6 +374,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       startSec: plan.startSec,
       subtitleCues: plan.cues.length,
       source: plan.generated ? "generated" : plan.material ? "material" : "background",
+      ...(plan.imageToVideo ? { imageToVideo: true } : {}),
       generated: plan.generated
         ? { provider: plan.generated.provider, model: plan.generated.model }
         : undefined,
@@ -299,6 +384,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     const result: PipelineResult = {
       jobId,
       topic: normalizedTopic,
+      ...(story ? { story } : {}),
       createdAt,
       finishedAt,
       durationSec: round3(finalDuration || videoProbe.durationSec || cursor),
@@ -308,7 +394,9 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       scriptPath,
       resultPath,
       script,
+      cast: castSummary(cast),
       segments: segmentResults,
+      ...(warnings.length > 0 ? { warnings } : {}),
       video: {
         width: videoProbe.width ?? config.video.width,
         height: videoProbe.height ?? config.video.height,
@@ -320,12 +408,14 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     logger.info(`成片完成：${outputFile}（${result.durationSec.toFixed(1)}s）`);
     return result;
   } catch (error) {
+    const failure = withStageLabel(currentStage, error);
     await writeJsonFile(path.join(jobDir, "error.json"), {
-      message: toErrorMessage(error),
-      code: error instanceof AppError ? error.code : "PIPELINE_FAILED",
-      stack: error instanceof Error ? error.stack : undefined,
+      message: toErrorMessage(failure),
+      code: failure instanceof AppError ? failure.code : "PIPELINE_FAILED",
+      stage: currentStage,
+      stack: failure instanceof Error ? failure.stack : undefined,
       at: new Date().toISOString(),
     }).catch(() => undefined);
-    throw error;
+    throw failure;
   }
 }

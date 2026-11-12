@@ -61,6 +61,52 @@ test("normalizeScript 拆分过长口播并限制分镜数", () => {
   for (const segment of script.segments) assert.ok(segment.narration.length <= 110);
 });
 
+test("normalizeScript 保留场景、镜头与出场角色，并截断超长字段", () => {
+  const script = normalizeScript(
+    {
+      title: "钟表店",
+      segments: [
+        {
+          narration: "林小满抬头看了一眼门口。",
+          scene: "老城区钟表店 · 黄昏",
+          shot: "中景，缓慢推近",
+          cast: ["林小满", "林小满", "旧怀表", "额外角色"],
+          keywords: ["钟表店"],
+        },
+        {
+          narration: "怀表在柜台里轻轻震动。",
+          scene: "店" + "内".repeat(300),
+          shot: "特写".repeat(300),
+          cast: Array.from({ length: 12 }, (_, index) => `角色${index}`),
+        },
+      ],
+    },
+    { provider: "test", topic: "钟表店", maxSegments: 3 },
+  );
+  assert.equal(script.segments[0]!.scene, "老城区钟表店 · 黄昏");
+  assert.equal(script.segments[0]!.shot, "中景，缓慢推近");
+  assert.deepEqual(script.segments[0]!.cast, ["林小满", "旧怀表", "额外角色"]);
+  assert.ok((script.segments[1]!.scene ?? "").length <= 200);
+  assert.ok((script.segments[1]!.shot ?? "").length <= 400);
+  assert.equal(script.segments[1]!.cast?.length, 10);
+});
+
+test("离线脚本在给定角色/剧本时保持出场设定", async () => {
+  const provider = new OfflineScriptProvider();
+  const script = await provider.generate({
+    ...BASE_REQUEST,
+    story: "林小满在钟表店遇到一位神秘客人。",
+    cast: [
+      { name: "林小满", kind: "character", description: "短发，米色风衣" },
+      { name: "旧怀表", kind: "prop", description: "铜质，表盘有裂纹" },
+    ],
+  });
+  const names = script.segments.flatMap((segment) => segment.cast ?? []);
+  assert.ok(names.includes("林小满"), "离线脚本应保留角色");
+  assert.ok(script.segments.every((segment) => typeof segment.scene === "string" && segment.scene));
+  assert.ok(script.segments.every((segment) => typeof segment.shot === "string" && segment.shot));
+});
+
 test("normalizeScript 拒绝无效结构", () => {
   assert.throws(
     () => normalizeScript({ title: "只有一段", segments: [{ narration: "唯一一段" }] }, {

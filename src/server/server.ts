@@ -9,6 +9,7 @@ import { pipeline } from "node:stream/promises";
 import Busboy from "busboy";
 import type {
   AppConfig,
+  CastAsset,
   DouyinToken,
   JobOptions,
   ScriptProviderName,
@@ -19,10 +20,20 @@ import { AppError, toErrorMessage } from "../errors.js";
 import { MaterialLibrary, materialType } from "../materials/library.js";
 import { materialTagPool } from "../materials/match.js";
 import { ensureDir, isInside, sanitizeFilename, sha256 } from "../util/fs.js";
+import {
+  CastLibrary,
+  castImageType,
+  parseCastDescription,
+  parseCastKind,
+  parseCastName,
+  selectCastAssets,
+  type UpdateCastOptions,
+} from "../cast/library.js";
+import { STORY_MAX_LENGTH, preflightScript, preflightVideoJob } from "../preflight.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
-import { JobManager } from "./jobs.js";
+import { buildJobConfig, JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
 import {
   LoginThrottle,
@@ -85,6 +96,7 @@ export interface VideoServer {
   server: http.Server;
   jobs: JobManager;
   library: MaterialLibrary;
+  cast: CastLibrary;
   settings: SettingsStore;
   users: UserStore;
   sessions: SessionStore;
@@ -104,6 +116,7 @@ interface ServerContext {
   logger: Logger;
   jobs: JobManager;
   library: MaterialLibrary;
+  cast: CastLibrary;
   settings: SettingsStore;
   users: UserStore;
   sessions: SessionStore;
@@ -278,6 +291,36 @@ function optionalBoolean(body: Record<string, unknown>, key: string, label: stri
   return value;
 }
 
+function optionalStory(body: Record<string, unknown>): string | undefined {
+  const value = body.story;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw new AppError("剧本/大纲必须是文本", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  const story = value.trim();
+  if (!story) return undefined;
+  if (story.length > STORY_MAX_LENGTH) {
+    throw new AppError(`剧本/大纲不能超过 ${STORY_MAX_LENGTH} 个字符`, {
+      code: "INVALID_OPTIONS",
+      status: 400,
+    });
+  }
+  return story;
+}
+
+function optionalCastIds(body: Record<string, unknown>): string[] | undefined {
+  const value = body.castIds;
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
+    throw new AppError("castIds 必须是角色/道具 id 数组", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  const ids = [...new Set(value.map((id) => (id as string).trim()).filter(Boolean))];
+  if (ids.length > 30) {
+    throw new AppError("单个视频最多选择 30 个角色/道具", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  return ids;
+}
+
 function parseJobOptions(body: Record<string, unknown>): JobOptions {
   const options: JobOptions = {};
   const targetDurationSec = optionalNumber(body, "targetDurationSec", "目标时长");
@@ -300,18 +343,36 @@ function parseJobOptions(body: Record<string, unknown>): JobOptions {
   if (videoGenEnabled !== undefined) options.videoGenEnabled = videoGenEnabled;
   const allowUnmatched = optionalBoolean(body, "allowUnmatched", "素材兜底开关");
   if (allowUnmatched !== undefined) options.allowUnmatched = allowUnmatched;
+  const story = optionalStory(body);
+  if (story !== undefined) options.story = story;
+  const castIds = optionalCastIds(body);
+  if (castIds !== undefined) options.castIds = castIds;
   return options;
 }
 
-async function handleUpload(
+interface MultipartUpload {
+  fields: Record<string, string>;
+  file?: { tempPath: string; filename: string };
+  tempDir: string;
+}
+
+/**
+ * 读取单个 multipart 上传：文件先落到临时目录，调用方负责清理 tempDir。
+ * 通过 accept 校验文件类型，让素材与角色参考图各自给出明确提示。
+ */
+async function readMultipartUpload(
   req: http.IncomingMessage,
-  res: http.ServerResponse,
   config: AppConfig,
-  library: MaterialLibrary,
-): Promise<void> {
+  options: {
+    accept: (filename: string) => boolean;
+    unsupportedMessage: (filename: string) => string;
+    unsupportedCode: string;
+    required: boolean;
+  },
+): Promise<MultipartUpload> {
   const contentType = req.headers["content-type"] ?? "";
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
-    throw new AppError("素材上传需要 multipart/form-data", {
+    throw new AppError("上传需要 multipart/form-data", {
       code: "UNSUPPORTED_MEDIA_TYPE",
       status: 415,
     });
@@ -346,11 +407,11 @@ async function handleUpload(
         return;
       }
       const filename = info.filename ?? "upload";
-      if (!materialType(filename)) {
-        fileError = new AppError(
-          `不支持的素材格式：${path.extname(filename) || "未知"}（支持 mp4/mov/webm/mkv 与 jpg/png/webp）`,
-          { code: "MATERIAL_UNSUPPORTED", status: 415 },
-        );
+      if (!options.accept(filename)) {
+        fileError = new AppError(options.unsupportedMessage(filename), {
+          code: options.unsupportedCode,
+          status: 415,
+        });
         stream.resume();
         return;
       }
@@ -377,27 +438,107 @@ async function handleUpload(
 
     if (fileError) throw fileError;
     if (truncated) {
-      throw new AppError(`素材超过上传上限 ${config.server.maxUploadBytes} 字节`, {
+      throw new AppError(`文件超过上传上限 ${config.server.maxUploadBytes} 字节`, {
         code: "FILE_TOO_LARGE",
         status: 413,
       });
     }
-    if (!tempFile) {
+    if (options.required && !tempFile) {
       throw new AppError("缺少 file 字段", { code: "MISSING_FILE", status: 400 });
     }
+    return {
+      fields,
+      ...(tempFile ? { file: { tempPath: tempFile, filename: originalName } } : {}),
+      tempDir,
+    };
+  } catch (error) {
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
 
-    const tags = (fields.tags ?? "")
+async function handleUpload(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: AppConfig,
+  library: MaterialLibrary,
+): Promise<void> {
+  const upload = await readMultipartUpload(req, config, {
+    accept: (filename) => Boolean(materialType(filename)),
+    unsupportedMessage: (filename) =>
+      `不支持的素材格式：${path.extname(filename) || "未知"}（支持 mp4/mov/webm/mkv 与 jpg/png/webp）`,
+    unsupportedCode: "MATERIAL_UNSUPPORTED",
+    required: true,
+  });
+  try {
+    const tags = (upload.fields.tags ?? "")
       .split(/[,，]/)
       .map((tag) => tag.trim())
       .filter(Boolean);
-    const material = await library.add(tempFile, {
+    const material = await library.add(upload.file!.tempPath, {
       tags,
-      title: fields.title?.trim() || originalName.replace(/\.[^.]+$/, ""),
+      title: upload.fields.title?.trim() || upload.file!.filename.replace(/\.[^.]+$/, ""),
     });
     sendJson(res, 201, { material: { ...material, url: `/api/materials/${material.id}/file` } });
   } finally {
-    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    await fsp.rm(upload.tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+function castView(asset: CastAsset): Record<string, unknown> {
+  return {
+    ...asset,
+    ...(asset.imageFile ? { imageUrl: `/api/cast/${asset.id}/image` } : {}),
+  };
+}
+
+async function handleCastUpload(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+  replaceId?: string,
+): Promise<void> {
+  const upload = await readMultipartUpload(req, ctx.config, {
+    accept: (filename) => Boolean(castImageType(filename)),
+    unsupportedMessage: (filename) =>
+      `参考图只支持 jpg/png/webp，当前为 ${path.extname(filename) || "未知格式"}`,
+    unsupportedCode: "CAST_UNSUPPORTED",
+    required: Boolean(replaceId),
+  });
+  try {
+    if (replaceId) {
+      const asset = await ctx.cast.setImage(replaceId, upload.file!.tempPath);
+      sendJson(res, 200, { cast: castView(asset) });
+      return;
+    }
+    const kind = parseCastKind(upload.fields.kind);
+    const name = parseCastName(upload.fields.name);
+    const description = parseCastDescription(upload.fields.description);
+    const asset = await ctx.cast.add({
+      kind,
+      name,
+      description,
+      imagePath: upload.file?.tempPath ?? null,
+    });
+    sendJson(res, 201, { cast: castView(asset) });
+  } finally {
+    await fsp.rm(upload.tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function handleCastUpdate(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+  id: string,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const patch: UpdateCastOptions = {};
+  if (body.kind !== undefined) patch.kind = parseCastKind(body.kind);
+  if (body.name !== undefined) patch.name = parseCastName(body.name);
+  if (body.description !== undefined) patch.description = parseCastDescription(body.description);
+  const asset = await ctx.cast.update(id, patch);
+  sendJson(res, 200, { cast: castView(asset) });
 }
 
 function apiIndex(config: AppConfig): Record<string, unknown> {
@@ -417,13 +558,20 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       users: "GET/POST /api/users（管理员）",
       updateUser: "PATCH /api/users/:id（管理员）",
       deleteUser: "DELETE /api/users/:id（管理员）",
-      createVideo: "POST /api/videos {topic, targetDurationSec?, maxSegments?, voice?, ...}",
+      createVideo:
+        "POST /api/videos {topic, story?, castIds?, targetDurationSec?, maxSegments?, voice?, ...}",
       listVideos: "GET /api/videos",
       videoStatus: "GET /api/videos/:id",
       videoFile: "GET /api/videos/:id/video",
       videoPoster: "GET /api/videos/:id/poster",
       subtitles: "GET /api/videos/:id/subtitles",
-      generateScript: "POST /api/scripts/generate {topic}",
+      generateScript: "POST /api/scripts/generate {topic, story?, castIds?}",
+      listCast: "GET /api/cast",
+      createCast: "POST /api/cast (multipart: kind, name, description?, file?)",
+      updateCast: "PATCH /api/cast/:id {name?, description?, kind?}",
+      castImage: "GET /api/cast/:id/image",
+      replaceCastImage: "POST /api/cast/:id/image (multipart: file)",
+      deleteCast: "DELETE /api/cast/:id",
       listMaterials: "GET /api/materials",
       uploadMaterial: "POST /api/materials (multipart: file, tags?, title?)",
       materialFile: "GET /api/materials/:id/file",
@@ -484,6 +632,7 @@ function requiredPermission(method: string, pathname: string): MenuPermission | 
   if (pathname === "/api/settings") return method === "GET" ? null : "settings";
   if (pathname.startsWith("/api/settings/")) return "settings";
   if (pathname === "/api/materials" || pathname.startsWith("/api/materials/")) return "materials";
+  if (pathname === "/api/cast" || pathname.startsWith("/api/cast/")) return "cast";
   if (pathname === "/api/scripts/generate") return "create";
   if (pathname === "/api/videos") return method === "POST" ? "create" : "jobs";
   if (pathname.startsWith("/api/videos/") && pathname.endsWith("/publish")) return "publish";
@@ -855,6 +1004,12 @@ async function handleGenerateScript(
   if (config.script.maxSegments < 2 || config.script.maxSegments > 20) {
     throw new AppError("分镜数量必须在 2 到 20 之间", { code: "INVALID_OPTIONS", status: 400 });
   }
+  const story = optionalStory(body);
+  const castIds = optionalCastIds(body);
+  const allCast = await ctx.cast.list();
+  const selectedCast = selectCastAssets(allCast, castIds);
+  // 预览同样会在调用模型前拦截明显问题，避免预览就产生费用。
+  await preflightScript({ config, topic, story, castAssets: selectedCast });
   const materials = await ctx.library.list();
   const provider = createScriptProvider(config, ctx.logger);
   const script = await provider.generate(
@@ -863,6 +1018,12 @@ async function handleGenerateScript(
       targetDurationSec: config.script.targetDurationSec,
       maxSegments: config.script.maxSegments,
       availableTags: materialTagPool(materials),
+      ...(story ? { story } : {}),
+      ...(selectedCast.length > 0
+        ? {
+            cast: selectedCast.map(({ name, kind, description }) => ({ name, kind, description })),
+          }
+        : {}),
     },
     AbortSignal.timeout(Math.min(config.script.timeoutMs, 120_000)),
   );
@@ -872,6 +1033,7 @@ async function handleGenerateScript(
     targetDurationSec: config.script.targetDurationSec,
     maxSegments: config.script.maxSegments,
     availableTags: materialTagPool(materials),
+    cast: selectedCast.map(castView),
   });
 }
 
@@ -1050,6 +1212,52 @@ async function handleRequest(
     return;
   }
 
+
+  if (pathname === "/api/cast" && method === "GET") {
+    const assets = await ctx.cast.list();
+    sendJson(res, 200, { cast: assets.map(castView) });
+    return;
+  }
+
+  if (pathname === "/api/cast" && method === "POST") {
+    await handleCastUpload(req, res, ctx);
+    return;
+  }
+
+  const castImage = /^\/api\/cast\/([a-zA-Z0-9]+)\/image$/.exec(pathname);
+  if (castImage) {
+    const asset = await ctx.cast.find(castImage[1]!);
+    if (!asset) throw new AppError("角色/道具不存在", { code: "CAST_NOT_FOUND", status: 404 });
+    if (method === "POST") {
+      await handleCastUpload(req, res, ctx, asset.id);
+      return;
+    }
+    if (method === "GET") {
+      if (!asset.imageFile) throw new AppError("该角色/道具还没有参考图", { code: "CAST_IMAGE_MISSING", status: 404 });
+      const file = path.join(ctx.cast.dir, asset.imageFile);
+      if (!isInside(ctx.cast.dir, file)) {
+        throw new AppError("角色/道具不存在", { code: "CAST_NOT_FOUND", status: 404 });
+      }
+      await serveFile(req, res, file, contentTypeFor(file));
+      return;
+    }
+  }
+
+  const castItem = /^\/api\/cast\/([a-zA-Z0-9]+)$/.exec(pathname);
+  if (castItem) {
+    if (method === "PATCH") {
+      await handleCastUpdate(req, res, ctx, castItem[1]!);
+      return;
+    }
+    if (method === "DELETE") {
+      const removed = await ctx.cast.remove(castItem[1]!);
+      if (!removed) throw new AppError("角色/道具不存在", { code: "CAST_NOT_FOUND", status: 404 });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+  }
+
+
   if (pathname === "/api/materials" && method === "GET") {
     const materials = await ctx.library.list();
     sendJson(res, 200, {
@@ -1100,7 +1308,19 @@ async function handleRequest(
   if (pathname === "/api/videos" && method === "POST") {
     const body = await readJsonBody(req);
     const topic = requireTopic(body.topic);
-    const record = ctx.jobs.create(topic, parseJobOptions(body));
+    const options = parseJobOptions(body);
+    // 先验证这次任务实际会用的配置与角色参考图，再入队，避免扣费后才报错。
+    const jobConfig = buildJobConfig(ctx.config, options);
+    const selectedCast = selectCastAssets(await ctx.cast.list(), options.castIds);
+    await preflightVideoJob({
+      config: jobConfig,
+      topic,
+      story: options.story,
+      options,
+      castAssets: selectedCast,
+      logger: ctx.logger,
+    });
+    const record = ctx.jobs.create(topic, options);
     res.writeHead(202, {
       ...securityHeaders(),
       "content-type": "application/json; charset=utf-8",
@@ -1252,6 +1472,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
   });
   const jobs = new JobManager(config, logger);
   const library = new MaterialLibrary(config.libraryDir, logger);
+  const cast = new CastLibrary(config.castDir, logger);
   const users = new UserStore(path.join(path.dirname(config.settingsFile), "users.json"), logger);
   const sessions = new SessionStore();
   const loginThrottle = new LoginThrottle();
@@ -1264,6 +1485,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     logger,
     jobs,
     library,
+    cast,
     settings,
     users,
     sessions,
@@ -1290,6 +1512,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     server,
     jobs,
     library,
+    cast,
     settings,
     users,
     sessions,

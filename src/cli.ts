@@ -25,6 +25,8 @@ create 选项：
       --offline          使用离线脚本模板（不调用大模型）
       --silent           使用静音占位配音（仅演示/测试）
       --voice <音色>     覆盖 TTS 音色，如 zh-CN-XiaoxiaoNeural
+      --story <文本>     剧本/大纲，分镜会按剧本生成
+      --cast <id,id>     使用角色库中的角色/道具 id（默认全部）
       --width <像素>     视频宽度，默认 1080
       --height <像素>    视频高度，默认 1920
       --json             以 JSON 输出结果
@@ -87,7 +89,22 @@ async function commandCreate(
   logger.info(
     `脚本=${summary.scriptProvider} 配音=${summary.ttsProvider} 尺寸=${summary.video.width}x${summary.video.height}`,
   );
-  const result = await runPipeline({ topic, config, logger, onProgress: printProgress });
+  const story = typeof values.story === "string" ? values.story.trim() : undefined;
+  const castIds =
+    typeof values.cast === "string"
+      ? values.cast
+          .split(/[,，]/)
+          .map((id) => id.trim())
+          .filter(Boolean)
+      : undefined;
+  const result = await runPipeline({
+    topic,
+    config,
+    logger,
+    onProgress: printProgress,
+    ...(story ? { story } : {}),
+    ...(castIds && castIds.length > 0 ? { castIds } : {}),
+  });
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
@@ -188,6 +205,8 @@ async function main(): Promise<void> {
       voice: { type: "string" },
       width: { type: "string" },
       height: { type: "string" },
+      story: { type: "string" },
+      cast: { type: "string" },
       json: { type: "boolean" },
       tags: { type: "string" },
       port: { type: "string" },

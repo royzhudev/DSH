@@ -21,7 +21,7 @@ test("用户存储：初始化管理员、密码哈希与持久化", async () =>
       password: "admin-password-1",
     });
     assert.equal(admin.role, "admin");
-    assert.deepEqual(admin.permissions, ["create", "jobs", "materials", "publish", "settings"]);
+    assert.deepEqual(admin.permissions, ["create", "jobs", "cast", "materials", "publish", "settings"]);
     assert.equal(await store.hasUsers(), true);
 
     const verified = await store.verify("admin", "admin-password-1");
@@ -61,7 +61,7 @@ test("用户权限：菜单归一化、编辑、禁用与最后管理员保护",
       role: "member",
       permissions: ["create", "materials", "create"],
     });
-    assert.deepEqual(member.permissions, ["create", "jobs", "materials"]);
+    assert.deepEqual(member.permissions, ["create", "jobs", "cast", "materials"]);
 
     await assert.rejects(
       () => store.create({ username: "EDITOR", password: "editor-password-1" }),
@@ -114,7 +114,7 @@ test("用户权限：菜单归一化、编辑、禁用与最后管理员保护",
       password: "ops-password-1",
       role: "admin",
     });
-    assert.deepEqual(secondAdmin.permissions, ["create", "jobs", "materials", "publish", "settings"]);
+    assert.deepEqual(secondAdmin.permissions, ["create", "jobs", "cast", "materials", "publish", "settings"]);
     const demoted = await store.update(secondAdmin.id, { role: "member" }, admin.id);
     assert.equal(demoted.role, "member");
     assert.deepEqual(demoted.permissions, []);

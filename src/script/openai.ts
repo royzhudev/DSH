@@ -4,21 +4,49 @@ import type { Script, ScriptProvider, ScriptRequest, ScriptSettings } from "../t
 import { truncate } from "../util/text.js";
 import { normalizeScript, parseScriptJson } from "./parse.js";
 
-const SYSTEM_PROMPT = `你是一名资深短视频编导，擅长为竖屏短视频写口播脚本。
+const SYSTEM_PROMPT = `你是一名资深短剧编导，擅长把主题或剧本拆成竖屏短剧分镜。
+你要保证同一人物、同一道具在后续镜头里外观和设定一致，不能前后矛盾。
 你的输出必须是严格合法的 JSON，不要包含 Markdown 代码围栏、注释或任何额外说明。`;
+
+function castSection(request: ScriptRequest): string {
+  const cast = request.cast ?? [];
+  if (cast.length === 0) return "";
+  const lines = cast.map(
+    (item) =>
+      `- ${item.kind === "character" ? "人物" : "道具"}「${item.name}」：${item.description || "（未填写外观设定，请保持名称与身份一致）"}`,
+  );
+  return `
+
+角色/道具设定（必须原样使用这些名称，不得改名或替换外观）：
+${lines.join("\n")}
+要求：每个分镜用 cast 列出该镜头出场的名称（只能来自上面的清单，没有出场就给空数组）；
+同一人物/道具的服装、发型、年龄、外形在整条片子里保持不变。`;
+}
+
+function storySection(request: ScriptRequest): string {
+  const story = request.story?.trim();
+  if (!story) return "";
+  return `
+
+用户提供的剧本/大纲（必须严格按此改编，不得改变人物关系、关键情节与结局）：
+"""
+${story.slice(0, 6000)}
+"""`;
+}
 
 function buildUserPrompt(request: ScriptRequest): string {
   const tags = request.availableTags.length > 0
     ? request.availableTags.slice(0, 40).join("、")
     : "（素材库暂无可选标签，请给出通用画面关键词）";
-  return `请围绕主题「${request.topic}」写一条竖屏短视频脚本。
+  return `请围绕主题「${request.topic}」写一条竖屏短剧脚本。${storySection(request)}${castSection(request)}
 
 硬性要求：
 1. 目标总时长约 ${request.targetDurationSec} 秒，拆成 3 到 ${request.maxSegments} 个分镜。
 2. 每个分镜的口播文案 20 到 60 个汉字，口语化、有节奏，开头 2 秒内抓住注意力，结尾有总结或互动引导。
 3. 每个分镜给出 2 到 4 个画面检索关键词，优先从以下素材标签中选择：${tags}
-4. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
-5. 只输出如下结构的 JSON：
+4. 每个分镜补全 scene（场景：地点/时间/光线）和 shot（镜头：景别、人物动作、构图），用于画面生成。
+5. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
+6. 只输出如下结构的 JSON：
 {
   "title": "视频标题，20 字以内",
   "summary": "一句话概括",
@@ -26,7 +54,10 @@ function buildUserPrompt(request: ScriptRequest): string {
     {
       "narration": "这一段的口播文案",
       "keywords": ["画面关键词1", "画面关键词2"],
-      "durationHintSec": 7
+      "durationHintSec": 7,
+      "scene": "老城区咖啡馆，傍晚，暖色台灯",
+      "shot": "中景，女主推门进来，镜头缓慢跟随",
+      "cast": ["林小满", "旧怀表"]
     }
   ]
 }`;

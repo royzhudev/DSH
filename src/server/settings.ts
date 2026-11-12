@@ -56,7 +56,7 @@ export interface SettingsView {
     effectiveRedirectUri: string;
   };
   server: { host: string; port: number };
-  paths: { outputDir: string; libraryDir: string; settingsFile: string };
+  paths: { outputDir: string; libraryDir: string; castDir: string; settingsFile: string };
   updatedAt?: string;
 }
 
@@ -88,7 +88,12 @@ export function serializeSettings(config: AppConfig, settingsPath: string, updat
       effectiveRedirectUri: effectiveRedirectUri(config),
     } as SettingsView["douyin"],
     server: { host: config.server.host, port: config.server.port },
-    paths: { outputDir: config.outputDir, libraryDir: config.libraryDir, settingsFile: settingsPath },
+    paths: {
+      outputDir: config.outputDir,
+      libraryDir: config.libraryDir,
+      castDir: config.castDir,
+      settingsFile: settingsPath,
+    },
     updatedAt,
   };
 }

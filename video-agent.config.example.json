@@ -3,6 +3,7 @@
   "workDir": "./.work",
   "libraryDir": "./materials",
   "cacheDir": "./.cache",
+  "castDir": "./cast",
   "video": {
     "width": 1080,
     "height": 1920,

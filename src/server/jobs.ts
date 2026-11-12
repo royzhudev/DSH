@@ -1,7 +1,9 @@
 import type {
   AppConfig,
+  CastAsset,
   JobOptions,
   JobProgress,
+  JobStage,
   PipelineResult,
   Script,
   SegmentResult,
@@ -11,6 +13,7 @@ import type {
 import type { Logger } from "../logger.js";
 import { createJobId, runPipeline } from "../pipeline.js";
 import { AppError, toErrorMessage } from "../errors.js";
+import { STORY_MAX_LENGTH } from "../preflight.js";
 
 export type JobState = "queued" | "running" | "succeeded" | "failed";
 
@@ -25,6 +28,8 @@ export interface JobRecord {
   finishedAt?: string;
   result?: PipelineResult;
   error?: string;
+  /** 任务失败时所在的阶段，便于界面提示“失败于哪一步”。 */
+  errorStage?: JobStage;
   /** 任务创建时的配置快照，保证运行期间设置变更不影响本任务。 */
   config: AppConfig;
 }
@@ -45,7 +50,11 @@ export interface SerializedJob {
   scriptUrl?: string;
   resultUrl?: string;
   error?: string;
+  errorStage?: JobStage;
   script?: Script;
+  story?: string;
+  cast?: Array<Pick<CastAsset, "id" | "name" | "kind" | "description" | "imageFile">>;
+  warnings?: string[];
   segments?: SegmentResult[];
   video?: VideoInfo;
 }
@@ -84,6 +93,25 @@ function validateOptions(options: JobOptions, config: AppConfig): void {
       code: "VIDEOGEN_NOT_CONFIGURED",
       status: 400,
     });
+  }
+  if (options.story !== undefined) {
+    if (typeof options.story !== "string") {
+      throw new AppError("剧本/大纲必须是文本", { code: "INVALID_OPTIONS", status: 400 });
+    }
+    if (options.story.trim().length > STORY_MAX_LENGTH) {
+      throw new AppError(`剧本/大纲不能超过 ${STORY_MAX_LENGTH} 个字符`, {
+        code: "INVALID_OPTIONS",
+        status: 400,
+      });
+    }
+  }
+  if (options.castIds !== undefined) {
+    if (!Array.isArray(options.castIds) || options.castIds.some((id) => typeof id !== "string")) {
+      throw new AppError("castIds 必须是角色/道具 id 数组", { code: "INVALID_OPTIONS", status: 400 });
+    }
+    if (options.castIds.length > 30) {
+      throw new AppError("单个视频最多选择 30 个角色/道具", { code: "INVALID_OPTIONS", status: 400 });
+    }
   }
 }
 
@@ -168,9 +196,13 @@ export class JobManager {
       scriptUrl: record.state === "succeeded" ? `${base}/script` : undefined,
       resultUrl: record.state === "succeeded" ? `${base}/result` : undefined,
       error: record.error,
+      errorStage: record.errorStage,
       ...(detail && record.result
         ? {
             script: record.result.script,
+            story: record.result.story,
+            cast: record.result.cast,
+            warnings: record.result.warnings,
             segments: record.result.segments,
             video: record.result.video,
           }
@@ -196,6 +228,8 @@ export class JobManager {
             config: record.config,
             logger: this.logger,
             jobId: id,
+            story: record.options.story,
+            castIds: record.options.castIds,
             onProgress: (progress) => {
               record.progress = progress;
             },
@@ -208,6 +242,7 @@ export class JobManager {
         } catch (error) {
           record.state = "failed";
           record.error = toErrorMessage(error);
+          record.errorStage = record.progress.stage;
           record.finishedAt = new Date().toISOString();
           record.progress = { ...record.progress, message: "任务失败" };
           this.logger.error(`任务失败：${id}`, error);

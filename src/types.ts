@@ -3,12 +3,37 @@ export type TtsProviderName = "edge" | "openai" | "silent";
 /** 画面来源：none 只使用素材库；http 调用可配置的 AI 视频生成接口。 */
 export type VideoGenProviderName = "none" | "http";
 
-/** 一个分镜：口播文案 + 画面检索关键词。 */
+/** 角色或道具：短剧里需要跨镜头保持一致的主体。 */
+export type CastKind = "character" | "prop";
+
+/** 角色库中的一条设定：名称 + 外观描述 + 可选参考图。 */
+export interface CastAsset {
+  id: string;
+  kind: CastKind;
+  name: string;
+  /** 外观设定，会写入每个分镜的画面提示词，保证跨镜头一致。 */
+  description: string;
+  /** 参考图相对 castDir 的文件名；没有参考图时不参与图生视频。 */
+  imageFile?: string;
+  width?: number;
+  height?: number;
+  sizeBytes?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 一个分镜：口播文案 + 画面检索关键词 + 短剧镜头信息。 */
 export interface ScriptSegment {
   id: number;
   narration: string;
   keywords: string[];
   durationHintSec?: number;
+  /** 场景（地点/时间/光线），同一场景的多个镜头保持一致。 */
+  scene?: string;
+  /** 镜头描述：景别、人物动作、构图，用于生成画面提示词。 */
+  shot?: string;
+  /** 出场角色/道具名称，对应角色库中的名字。 */
+  cast?: string[];
 }
 
 /** 大模型或离线模板生成的完整脚本。 */
@@ -64,6 +89,10 @@ export interface SegmentPlan {
   material: Material | null;
   /** AI 生成的分镜画面；存在时优先于素材。 */
   generated?: GeneratedClip;
+  /** 该分镜解析出的角色/道具设定。 */
+  cast: CastAsset[];
+  /** 是否用参考图做了图生视频。 */
+  imageToVideo?: boolean;
   tts: TtsResult;
   durationSec: number;
   /** 相对当前分镜的本地时间轴。 */
@@ -82,6 +111,10 @@ export interface SegmentResult {
   index: number;
   narration: string;
   keywords: string[];
+  scene?: string;
+  shot?: string;
+  /** 本分镜出场的角色/道具。 */
+  cast?: Array<Pick<CastAsset, "id" | "name" | "kind">>;
   material: Pick<Material, "id" | "title" | "type" | "file"> | null;
   voice: string;
   ttsProvider: TtsProviderName;
@@ -90,6 +123,8 @@ export interface SegmentResult {
   subtitleCues: number;
   /** 该分镜画面来源：素材库命中、AI 生成或渐变背景。 */
   source: "material" | "generated" | "background";
+  /** AI 画面是否使用了角色/道具参考图（图生视频）。 */
+  imageToVideo?: boolean;
   generated?: {
     provider: string;
     model: string;
@@ -99,6 +134,8 @@ export interface SegmentResult {
 export interface PipelineResult {
   jobId: string;
   topic: string;
+  /** 用户提供的剧本/大纲（如果有）。 */
+  story?: string;
   createdAt: string;
   finishedAt: string;
   durationSec: number;
@@ -108,12 +145,17 @@ export interface PipelineResult {
   scriptPath: string;
   resultPath: string;
   script: Script;
+  /** 本片使用的角色/道具设定。 */
+  cast: Array<Pick<CastAsset, "id" | "name" | "kind" | "description" | "imageFile">>;
   segments: SegmentResult[];
+  /** 生成过程中不致命、但需要告知用户的问题（如画面生成失败已回退）。 */
+  warnings?: string[];
   video: VideoInfo;
 }
 
 export type JobStage =
   | "queued"
+  | "preflight"
   | "script"
   | "materials"
   | "tts"
@@ -225,6 +267,8 @@ export interface AppConfig {
   outputDir: string;
   workDir: string;
   libraryDir: string;
+  /** 角色/道具参考图与设定索引目录。 */
+  castDir: string;
   cacheDir: string;
   /** 网页设置持久化文件；由 loadConfig 解析为绝对路径。 */
   settingsFile: string;
@@ -247,6 +291,10 @@ export interface JobOptions {
   subtitlesEnabled?: boolean;
   videoGenEnabled?: boolean;
   allowUnmatched?: boolean;
+  /** 剧本或大纲文本；为空时只按主题创作。 */
+  story?: string;
+  /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定，空数组表示不使用。 */
+  castIds?: string[];
 }
 
 export interface ScriptRequest {
@@ -254,6 +302,10 @@ export interface ScriptRequest {
   targetDurationSec: number;
   maxSegments: number;
   availableTags: string[];
+  /** 用户提供的剧本/大纲，生成分镜时必须遵循。 */
+  story?: string;
+  /** 可选的角色/道具设定，用于安排出场并保持外观一致。 */
+  cast?: Array<Pick<CastAsset, "name" | "kind" | "description">>;
 }
 
 export interface ScriptProvider {
@@ -271,9 +323,20 @@ export interface TtsProvider {
   readonly voice: string;
   synthesize(request: TtsRequest, signal?: AbortSignal): Promise<TtsResult>;
 }
+export interface VideoGenReferenceImage {
+  role: CastKind;
+  name: string;
+  /** 本地参考图绝对路径。 */
+  file: string;
+}
+
 export interface VideoGenRequest {
   prompt: string;
   durationSec: number;
+  /** 图生视频的首帧/主参考图（本地路径）；为空时按文生视频处理。 */
+  image?: string;
+  /** 角色/道具参考图，按出场顺序排列。 */
+  references?: VideoGenReferenceImage[];
 }
 
 export interface GeneratedClip {

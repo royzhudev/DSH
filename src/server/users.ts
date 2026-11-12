@@ -6,7 +6,7 @@ import type { Logger } from "../logger.js";
 import { ensureDir } from "../util/fs.js";
 
 /** 网页左侧导航对应的模块权限。 */
-export const MENU_PERMISSIONS = ["create", "jobs", "materials", "publish", "settings"] as const;
+export const MENU_PERMISSIONS = ["create", "jobs", "cast", "materials", "publish", "settings"] as const;
 export type MenuPermission = (typeof MENU_PERMISSIONS)[number];
 export type UserRole = "admin" | "member";
 
@@ -159,6 +159,8 @@ export function normalizePermissions(value: unknown, role: UserRole): MenuPermis
   }
   // 创建视频后需要查看任务进度，因此创作权限自动包含任务。
   if (selected.has("create")) selected.add("jobs");
+  // 角色/道具和素材同属画面素材管理，勾选素材库时一并开放。
+  if (selected.has("materials")) selected.add("cast");
   return MENU_PERMISSIONS.filter((permission) => selected.has(permission));
 }
 

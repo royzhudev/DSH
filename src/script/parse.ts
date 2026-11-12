@@ -8,6 +8,9 @@ const segmentSchema = z.object({
   keywords: z.array(z.string()).optional(),
   durationHintSec: z.number().positive().optional(),
   onScreenText: z.string().optional(),
+  scene: z.string().optional(),
+  shot: z.string().optional(),
+  cast: z.array(z.string()).optional(),
 });
 
 const scriptSchema = z.object({
@@ -83,6 +86,9 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
     const narration = cleanNarration(raw.narration);
     if (!narration) continue;
     const keywords = normalizeTagList(raw.keywords ?? []).slice(0, 6);
+    const scene = raw.scene?.trim().slice(0, 200);
+    const shot = raw.shot?.trim().slice(0, 400);
+    const cast = normalizeTagList(raw.cast ?? []).slice(0, 10);
     const pieces = splitOverlongNarration(narration);
     for (const piece of pieces) {
       segments.push({
@@ -90,6 +96,9 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
         narration: piece,
         keywords,
         durationHintSec: raw.durationHintSec,
+        ...(scene ? { scene } : {}),
+        ...(shot ? { shot } : {}),
+        ...(cast.length > 0 ? { cast } : {}),
       });
     }
   }

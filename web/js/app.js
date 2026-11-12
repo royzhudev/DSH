@@ -1,4 +1,4 @@
-import { api, uploadMaterial } from "./api.js";
+import { api, replaceCastImage, uploadCast, uploadMaterial } from "./api.js";
 import { icon, hydrateIcons } from "./icons.js";
 
 const EDGE_VOICES = [
@@ -24,6 +24,7 @@ const TOPIC_SUGGESTIONS = [
 
 const STAGES = [
   { key: "queued", label: "排队等待" },
+  { key: "preflight", label: "检查配置" },
   { key: "script", label: "生成脚本" },
   { key: "tts", label: "合成配音" },
   { key: "visual", label: "准备画面" },
@@ -35,6 +36,7 @@ const STAGES = [
 const MENU_META = [
   { key: "create", label: "创作", desc: "生成脚本、创建视频" },
   { key: "jobs", label: "任务", desc: "查看进度、播放与下载成片" },
+  { key: "cast", label: "角色库", desc: "管理角色/道具设定与参考图" },
   { key: "materials", label: "素材库", desc: "上传、预览与删除素材" },
   { key: "publish", label: "发布", desc: "抖音授权与发布记录" },
   { key: "settings", label: "设置", desc: "模型、抖音与系统配置" },
@@ -44,14 +46,19 @@ const MENU_KEYS = MENU_META.map((item) => item.key);
 
 const STAGE_INDEX = {
   queued: 0,
-  script: 1,
-  tts: 2,
-  materials: 3,
-  videogen: 3,
-  render: 4,
-  concat: 5,
-  done: 6,
+  preflight: 1,
+  script: 2,
+  tts: 3,
+  materials: 4,
+  videogen: 4,
+  render: 5,
+  concat: 6,
+  done: 7,
 };
+
+const CAST_KIND_LABEL = { character: "角色", prop: "道具" };
+
+const STAGE_LABEL = Object.fromEntries(STAGES.map((stage) => [stage.key, stage.label]));
 
 const STATUS_TEXT = {
   queued: "排队中",
@@ -79,12 +86,17 @@ const state = {
   jobs: [],
   job: null,
   materials: [],
+  cast: [],
+  castIds: null,
+  castUploadFile: null,
   douyin: null,
   publishes: [],
   scriptPreview: null,
   createTopic: "",
+  createStory: "",
   pollTimer: null,
   uploadFile: null,
+  castDenied: false,
   route: { name: "create" },
 };
 
@@ -200,7 +212,7 @@ function parseRoute() {
   const raw = location.hash.replace(/^#\/?/, "");
   const parts = raw.split("/").filter(Boolean);
   if (parts[0] === "jobs" && parts[1]) return { name: "job", id: parts[1] };
-  if (["jobs", "materials", "publish", "settings"].includes(parts[0])) return { name: parts[0] };
+  if (["jobs", "cast", "materials", "publish", "settings"].includes(parts[0])) return { name: parts[0] };
   return { name: "create" };
 }
 
@@ -227,6 +239,7 @@ async function render() {
     if (route.name === "create") await renderCreate();
     else if (route.name === "jobs") await renderJobs();
     else if (route.name === "job") await renderJob(route.id);
+    else if (route.name === "cast") await renderCast();
     else if (route.name === "materials") await renderMaterials();
     else if (route.name === "publish") await renderPublish();
     else if (route.name === "settings") await renderSettings();
@@ -519,6 +532,7 @@ function renderPreview(data) {
       <div class="script-meta">
         <span class="pill pill-soft">目标 ${esc(data.targetDurationSec)} 秒</span>
         <span class="pill pill-soft">${esc(script.segments.length)} 个分镜</span>
+        ${(data.cast ?? []).length ? `<span class="pill pill-soft">${esc(data.cast.length)} 个角色/道具</span>` : ""}
       </div>
     </div>
     ${script.segments
@@ -527,6 +541,12 @@ function renderPreview(data) {
           <span class="seg-index">${esc(segment.id)}</span>
           <div>
             <p class="seg-text">${esc(segment.narration)}</p>
+            ${segment.scene || segment.shot ? `<p class="seg-shot">${[segment.scene, segment.shot].filter(Boolean).map((text) => esc(text)).join(" · ")}</p>` : ""}
+            ${
+              (segment.cast ?? []).length
+                ? `<div class="seg-tags">${segment.cast.map((name) => `<span class="tag tag-brand">${esc(name)}</span>`).join("")}</div>`
+                : ""
+            }
             ${
               segment.keywords?.length
                 ? `<div class="seg-tags">${segment.keywords.map((keyword) => `<span class="tag">${esc(keyword)}</span>`).join("")}</div>`
@@ -540,22 +560,77 @@ function renderPreview(data) {
   </div>`;
 }
 
+function castPickerHtml(cast, denied = false) {
+  if (denied) {
+    return `<div class="settings-note">${icon("info", 16)}<span>当前账号没有「角色库」菜单权限，本片会使用角色库中已保存的全部设定；需要挑选出场角色时请联系管理员开通权限。</span></div>`;
+  }
+  if (!cast.length) {
+    return `<div class="settings-note">${icon("info", 16)}<span>角色库还没有设定。先在「角色库」上传人物或道具的参考图和外观描述，生成时会自动保持跨镜头一致。</span><a class="btn-link" href="#/cast">去添加</a></div>`;
+  }
+  const selected = new Set(state.castIds ?? cast.map((asset) => asset.id));
+  return `<div class="cast-picker" id="cast-picker">
+    ${cast
+      .map(
+        (asset) => `<button class="cast-chip ${selected.has(asset.id) ? "active" : ""}" type="button" data-cast-id="${attr(asset.id)}" aria-pressed="${selected.has(asset.id)}">
+          <span class="cast-chip-thumb">${asset.imageUrl ? `<img src="${attr(asset.imageUrl)}" alt="" loading="lazy" />` : icon(asset.kind === "character" ? "users" : "box", 16)}</span>
+          <span class="cast-chip-main"><strong>${esc(asset.name)}</strong><small>${esc(CAST_KIND_LABEL[asset.kind] ?? asset.kind)}${asset.imageFile ? " · 有参考图" : ""}</small></span>
+        </button>`,
+      )
+      .join("")}
+  </div>
+  <div class="hint-row">
+    <span>选中的角色/道具会参与分镜编排；有参考图的分镜会用图生视频延续形象</span>
+    <span class="cast-picker-actions">
+      <button class="btn-link" type="button" id="cast-select-all">全选</button>
+      <button class="btn-link" type="button" id="cast-select-none">清空</button>
+    </span>
+  </div>`;
+}
+
+function updateCastPickerSelection() {
+  const cast = state.cast ?? [];
+  const selected = new Set(state.castIds ?? cast.map((asset) => asset.id));
+  for (const chip of document.querySelectorAll("#cast-picker [data-cast-id]")) {
+    const active = selected.has(chip.dataset.castId);
+    chip.classList.toggle("active", active);
+    chip.setAttribute("aria-pressed", String(active));
+  }
+}
+
 async function renderCreate() {
   setPage("创作", "开始创作");
   const settings = await ensureSettings();
+  let cast = [];
+  let castDenied = false;
+  try {
+    cast = (await api("/api/cast")).cast ?? [];
+  } catch (error) {
+    // 没有角色库权限时仍然可以创作，服务端会使用全部角色设定。
+    castDenied = error.status === 403;
+  }
   if (state.route.name !== "create") return;
+  state.cast = cast;
+  state.castDenied = castDenied;
+  if (state.castIds === null) {
+    state.castIds = cast.map((asset) => asset.id);
+  } else {
+    // 角色可能已在别的页面被删除，避免提交时带着失效 id。
+    const known = new Set(cast.map((asset) => asset.id));
+    state.castIds = state.castIds.filter((id) => known.has(id));
+  }
   const target = Number(settings.script.targetDurationSec) || 45;
   const durations = [...new Set([15, 30, 45, 60, target])].sort((a, b) => a - b);
   const segmentOptions = [...new Set([3, 4, 5, 6, Number(settings.script.maxSegments) || 6])].sort(
     (a, b) => a - b,
   );
   const videoGenReady = settings.videoGen.provider === "http";
+  const castWithImages = cast.filter((asset) => asset.imageFile).length;
 
   view.innerHTML = `
     <section class="page-head">
       <p class="eyebrow">AI Video Studio</p>
-      <h2>把一个主题，变成一条竖屏成片</h2>
-      <p>输入主题，智能体自动生成脚本、匹配素材或 AI 画面、合成配音与字幕，并剪辑输出 9:16 成片。</p>
+      <h2>把一个主题或剧本，变成一条竖屏短剧</h2>
+      <p>输入主题或粘贴剧本，智能体生成分镜、匹配素材或 AI 画面、合成配音与字幕；角色与道具会在后续镜头里保持同一形象。</p>
     </section>
 
     <div class="create-grid">
@@ -568,6 +643,18 @@ async function renderCreate() {
             <div class="chips" id="topic-chips">
               ${TOPIC_SUGGESTIONS.map((topic) => `<button type="button" class="chip" data-topic="${attr(topic)}">${esc(topic)}</button>`).join("")}
             </div>
+          </div>
+
+          <div class="field">
+            <label for="story">剧本 / 大纲 <span class="optional">可选</span></label>
+            <textarea class="textarea" id="story" maxlength="6000" rows="5" placeholder="粘贴剧本或故事大纲，例如：
+林小满在老城区开了一家钟表店，某天一位客人送来一块旧怀表……">${esc(state.createStory)}</textarea>
+            <div class="hint-row"><span>填写后分镜会严格按剧本改编；不填则只围绕主题创作</span><span id="story-count">${state.createStory.length} / 6000</span></div>
+          </div>
+
+          <div class="field">
+            <span class="field-label">角色与道具</span>
+            ${castPickerHtml(cast, castDenied)}
           </div>
 
           <div class="field-row">
@@ -607,12 +694,12 @@ async function renderCreate() {
                 <span>烧录字幕</span>
               </label>
               <span class="hint">按配音时间轴自动对齐，同时导出 SRT</span>
-              <label class="switch ${videoGenReady ? "" : "disabled"}" id="videogen-row" title="${videoGenReady ? "无匹配素材的分镜改用 AI 画面" : "未配置 AI 画面模型，可在设置中启用"}">
+              <label class="switch ${videoGenReady ? "" : "disabled"}" id="videogen-row" title="${videoGenReady ? "有角色参考图的分镜使用图生视频，其余分镜文生视频" : "未配置 AI 画面模型，可在设置中启用"}">
                 <input type="checkbox" id="videogen" ${videoGenReady ? "checked" : "disabled"} />
                 <span class="track"></span>
                 <span>AI 生成画面</span>
               </label>
-              <span class="hint">${videoGenReady ? `已启用 ${esc(settings.videoGen.model)}，无匹配素材时调用` : "未配置 AI 画面模型，可在设置中启用"}</span>
+              <span class="hint">${videoGenReady ? `${esc(settings.videoGen.model)}${castWithImages > 0 ? ` · ${castWithImages} 个角色/道具可图生视频` : " · 有参考图时自动图生视频"}` : "未配置 AI 画面模型，可在设置中启用"}</span>
             </div>
           </div>
 
@@ -620,7 +707,7 @@ async function renderCreate() {
             <button class="btn btn-ghost" id="preview-btn" type="button">${icon("wand", 16)} 生成脚本预览</button>
             <button class="btn btn-primary" id="create-btn" type="button">${icon("play", 16)} 开始生成视频</button>
           </div>
-          <p class="fineprint">未配置大模型时使用离线模板；配音默认使用 Edge TTS，失败会回退静音占位。</p>
+          <p class="fineprint">创建前会先检查配置、参考图与运行环境；有问题会立即提示，不会先调用模型产生费用。未配置大模型时使用离线模板。</p>
         </div>
       </section>
 
@@ -628,7 +715,7 @@ async function renderCreate() {
         <div class="card-head">
           <div>
             <div class="card-title">脚本预览</div>
-            <div class="card-sub">生成前先看看分镜和画面关键词</div>
+            <div class="card-sub">生成前先看看分镜、出场角色与画面关键词</div>
           </div>
           <span class="pill pill-soft" id="preview-provider">待生成</span>
         </div>
@@ -645,6 +732,13 @@ async function renderCreate() {
     topicCount.textContent = `${topicInput.value.length} / 200`;
   });
 
+  const storyInput = document.getElementById("story");
+  const storyCount = document.getElementById("story-count");
+  storyInput.addEventListener("input", () => {
+    state.createStory = storyInput.value;
+    storyCount.textContent = `${storyInput.value.length} / 6000`;
+  });
+
   document.getElementById("topic-chips").addEventListener("click", (event) => {
     const chip = event.target.closest("[data-topic]");
     if (!chip) return;
@@ -652,6 +746,25 @@ async function renderCreate() {
     state.createTopic = topicInput.value;
     topicCount.textContent = `${topicInput.value.length} / 200`;
     topicInput.focus();
+  });
+
+  document.getElementById("cast-picker")?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-cast-id]");
+    if (!chip) return;
+    const selected = new Set(state.castIds ?? []);
+    const id = chip.dataset.castId;
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+    state.castIds = [...selected];
+    updateCastPickerSelection();
+  });
+  document.getElementById("cast-select-all")?.addEventListener("click", () => {
+    state.castIds = (state.cast ?? []).map((asset) => asset.id);
+    updateCastPickerSelection();
+  });
+  document.getElementById("cast-select-none")?.addEventListener("click", () => {
+    state.castIds = [];
+    updateCastPickerSelection();
   });
 
   document.getElementById("duration").addEventListener("click", (event) => {
@@ -674,6 +787,8 @@ function readCreateForm() {
   const voice = document.getElementById("voice")?.value.trim() ?? "";
   return {
     topic: document.getElementById("topic")?.value.trim() ?? "",
+    story: document.getElementById("story")?.value.trim() ?? "",
+    castIds: state.castDenied ? undefined : (state.castIds ?? []),
     targetDurationSec: Number(activeDuration?.dataset.value ?? 45),
     maxSegments: Number(document.getElementById("segments")?.value ?? 6),
     voice,
@@ -697,6 +812,8 @@ async function previewScript() {
       method: "POST",
       body: {
         topic: values.topic,
+        story: values.story || undefined,
+        castIds: values.castIds,
         targetDurationSec: values.targetDurationSec,
         maxSegments: values.maxSegments,
       },
@@ -726,11 +843,13 @@ async function createVideo() {
     subtitlesEnabled: values.subtitlesEnabled,
     videoGenEnabled: values.videoGenEnabled,
     ttsProvider: settings.tts.provider,
+    ...(values.castIds ? { castIds: values.castIds } : {}),
   };
+  if (values.story) body.story = values.story;
   if (values.voice) body.voice = values.voice;
   const button = document.getElementById("create-btn");
   button.disabled = true;
-  button.innerHTML = `<span class="spinner"></span> 正在创建…`;
+  button.innerHTML = `<span class="spinner"></span> 正在检查并创建…`;
   try {
     const job = await api("/api/videos", { method: "POST", body });
     toast("任务已创建，正在生成", "success");
@@ -901,18 +1020,31 @@ function publishCardHtml(job) {
 
 function scriptSectionHtml(job) {
   if (!job.segments?.length) return "";
+  const cast = job.cast ?? [];
   return `<section class="card mt-24">
     <div class="card-head">
       <div><div class="card-title">分镜脚本</div><div class="card-sub">${esc(job.script?.title ?? job.topic)}</div></div>
       <span class="pill pill-soft">${job.segments.length} 段</span>
     </div>
     <div class="card-body">
+      ${
+        cast.length
+          ? `<div class="cast-summary">
+              <span class="muted small">本片角色/道具</span>
+              ${cast
+                .map(
+                  (asset) => `<span class="tag tag-brand">${esc(asset.name)} · ${esc(CAST_KIND_LABEL[asset.kind] ?? asset.kind)}${asset.imageFile ? " · 有参考图" : ""}</span>`,
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
       <div class="script-table">
         ${job.segments
           .map((segment) => {
             const visual =
               segment.source === "generated"
-                ? `AI 生成画面${segment.generated?.model ? ` · ${segment.generated.model}` : ""}`
+                ? `AI 生成画面${segment.imageToVideo ? "（图生视频）" : ""}${segment.generated?.model ? ` · ${segment.generated.model}` : ""}`
                 : segment.material
                   ? `${segment.material.title}（${segment.material.type === "video" ? "视频" : "图片"}）`
                   : "渐变背景";
@@ -920,6 +1052,12 @@ function scriptSectionHtml(job) {
               <span class="num">${esc(segment.index)}</span>
               <div>
                 <p class="narration">${esc(segment.narration)}</p>
+                ${segment.scene || segment.shot ? `<p class="seg-shot">${[segment.scene, segment.shot].filter(Boolean).map((text) => esc(text)).join(" · ")}</p>` : ""}
+                ${
+                  (segment.cast ?? []).length
+                    ? `<div class="keywords">${segment.cast.map((item) => `<span class="tag tag-brand">${esc(item.name)}</span>`).join("")}</div>`
+                    : ""
+                }
                 <div class="keywords">${(segment.keywords ?? []).map((keyword) => `<span class="tag">${esc(keyword)}</span>`).join("")}</div>
               </div>
               <div class="visual">
@@ -933,6 +1071,24 @@ function scriptSectionHtml(job) {
       </div>
     </div>
   </section>`;
+}
+
+function warningsHtml(job) {
+  const warnings = job.warnings ?? [];
+  if (!warnings.length) return "";
+  return `<div class="warning-box mt-12">
+    <div class="warning-head">${icon("alert", 15)}<strong>生成过程中有以下问题，请确认是否符合预期</strong></div>
+    <ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul>
+  </div>`;
+}
+
+function jobErrorHtml(job) {
+  if (!job.error) return "";
+  const stage = job.errorStage ? STAGE_LABEL[job.errorStage] : "";
+  return `<div class="error-box mt-12">
+    ${stage ? `<strong>失败于：${esc(stage)}</strong><br />` : ""}
+    ${esc(job.error)}
+  </div>`;
 }
 
 function renderJobView() {
@@ -983,7 +1139,8 @@ function renderJobView() {
           <div class="mt-12">${progressBarHtml(job)}</div>
           <p class="hint mt-8" id="job-message">${esc(job.progress?.message ?? "")}</p>
           <div class="stage-list" id="job-stages">${stagesHtml(job)}</div>
-          ${job.error ? `<div class="error-box mt-12">${esc(job.error)}</div>` : ""}
+          ${jobErrorHtml(job)}
+          ${warningsHtml(job)}
         </div></section>
         ${downloads}
         ${succeeded ? publishCardHtml(job) : ""}
@@ -1267,6 +1424,326 @@ async function renderMaterials() {
       video.currentTime = 0;
     });
   }
+}
+
+/* ---------------- cast ---------------- */
+
+function castThumb(asset) {
+  if (!asset.imageUrl) {
+    return `<span class="cast-placeholder">${icon(asset.kind === "character" ? "users" : "box", 26)}</span>`;
+  }
+  const version = encodeURIComponent(asset.updatedAt ?? "");
+  return `<img loading="lazy" src="${attr(asset.imageUrl)}?v=${version}" alt="${attr(asset.name)}" />`;
+}
+
+function castCardHtml(asset) {
+  const meta = [
+    asset.imageFile ? "参考图已上传" : "仅文字设定",
+    asset.width && asset.height ? `${asset.width}×${asset.height}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<article class="card cast-card" data-cast="${attr(asset.id)}">
+    <div class="cast-thumb">
+      ${castThumb(asset)}
+      <span class="material-type">${esc(CAST_KIND_LABEL[asset.kind] ?? asset.kind)}</span>
+    </div>
+    <div class="material-body">
+      <div class="material-title" title="${attr(asset.name)}">${esc(asset.name)}</div>
+      <p class="cast-desc">${esc(asset.description || "（未填写外观设定，建议补充）")}</p>
+      <div class="material-meta">${esc(meta)}</div>
+    </div>
+    <div class="material-foot">
+      <div class="cast-actions">
+        <button class="icon-btn" type="button" data-edit-cast="${attr(asset.id)}" title="编辑设定">${icon("pencil", 15)}</button>
+        <button class="icon-btn" type="button" data-replace-cast="${attr(asset.id)}" title="${asset.imageFile ? "更换参考图" : "上传参考图"}">${icon("image", 15)}</button>
+        <button class="icon-btn" type="button" data-delete-cast="${attr(asset.id)}" title="删除">${icon("trash", 15)}</button>
+      </div>
+      <span class="material-meta">${formatDate(asset.updatedAt)}</span>
+    </div>
+  </article>`;
+}
+
+function castUploadCardHtml() {
+  return `<section class="card">
+    <div class="card-head">
+      <div><div class="card-title">添加角色或道具</div><div class="card-sub">名称 + 外观设定 + 参考图；参考图会用于图生视频，让后续镜头保持同一形象</div></div>
+    </div>
+    <div class="card-body">
+      <div class="field-row">
+        <div class="field">
+          <span class="field-label">类型</span>
+          <div class="segmented" id="cast-kind">
+            <button type="button" data-value="character" class="active">角色</button>
+            <button type="button" data-value="prop">道具</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="cast-name">名称</label>
+          <input class="input" id="cast-name" maxlength="40" placeholder="例如：林小满 / 旧怀表" />
+          <span class="hint">名称会和剧本里的出场名称对应，请保持简短一致</span>
+        </div>
+      </div>
+      <div class="field">
+        <label for="cast-desc">外观设定 <span class="optional">建议填写</span></label>
+        <textarea class="textarea" id="cast-desc" maxlength="500" rows="3" placeholder="例如：25 岁女性，齐肩短发，米色风衣，左眉有一道浅疤"></textarea>
+        <span class="hint">会写进每个出场分镜的提示词，越具体越容易保持一致</span>
+      </div>
+      <div class="dropzone" id="cast-dropzone">
+        ${icon("upload", 26)}
+        <strong id="cast-drop-title">点击或拖拽上传参考图</strong>
+        <small id="cast-drop-hint">支持 jpg / png / webp，可选；没有参考图时只做文字一致性</small>
+        <input type="file" id="cast-file-input" accept="image/*,.jpg,.jpeg,.png,.webp" />
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" id="cast-add-btn" type="button" disabled>${icon("plus", 16)} 添加</button>
+      </div>
+    </div>
+  </section>`;
+}
+
+function castDialogHtml() {
+  return `<dialog class="user-dialog" id="cast-dialog">
+    <form id="cast-form" novalidate>
+      <div class="dialog-head">
+        <div>
+          <div class="card-title" id="cast-dialog-title">编辑角色/道具</div>
+          <div class="card-sub" id="cast-dialog-sub">修改名称、类型与外观设定</div>
+        </div>
+        <button class="icon-btn" type="button" id="close-cast-dialog" aria-label="关闭">${icon("x", 16)}</button>
+      </div>
+      <div class="dialog-body">
+        <input type="hidden" id="cast-edit-id" />
+        <div class="field-grid-2">
+          <div class="field">
+            <label for="cast-edit-kind">类型</label>
+            <select class="select" id="cast-edit-kind">
+              <option value="character">角色</option>
+              <option value="prop">道具</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cast-edit-name">名称</label>
+            <input class="input" id="cast-edit-name" maxlength="40" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="cast-edit-desc">外观设定</label>
+          <textarea class="textarea" id="cast-edit-desc" maxlength="500" rows="4"></textarea>
+        </div>
+        <div class="dialog-error" id="cast-form-error" hidden></div>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" id="cancel-cast-dialog">取消</button>
+        <button class="btn btn-primary" type="submit" id="save-cast">保存</button>
+      </div>
+    </form>
+  </dialog>`;
+}
+
+function openCastDialog(id) {
+  const asset = (state.cast ?? []).find((item) => item.id === id);
+  const dialog = document.getElementById("cast-dialog");
+  if (!asset || !dialog) return;
+  document.getElementById("cast-edit-id").value = asset.id;
+  document.getElementById("cast-edit-kind").value = asset.kind;
+  document.getElementById("cast-edit-name").value = asset.name;
+  document.getElementById("cast-edit-desc").value = asset.description ?? "";
+  const error = document.getElementById("cast-form-error");
+  if (error) error.hidden = true;
+  dialog.showModal();
+  document.getElementById("cast-edit-name").focus();
+}
+
+async function saveCastEdit() {
+  const id = document.getElementById("cast-edit-id")?.value ?? "";
+  const kind = document.getElementById("cast-edit-kind")?.value ?? "character";
+  const name = document.getElementById("cast-edit-name")?.value.trim() ?? "";
+  const description = document.getElementById("cast-edit-desc")?.value.trim() ?? "";
+  const error = document.getElementById("cast-form-error");
+  const button = document.getElementById("save-cast");
+  if (error) error.hidden = true;
+  if (!name) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = "请填写名称";
+    }
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> 保存中…`;
+  }
+  try {
+    await api(`/api/cast/${id}`, { method: "PATCH", body: { kind, name, description } });
+    document.getElementById("cast-dialog")?.close();
+    toast("设定已更新", "success");
+    await renderCast();
+  } catch (caught) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = caught.message;
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "保存";
+    }
+  }
+}
+
+async function deleteCast(id) {
+  const asset = (state.cast ?? []).find((item) => item.id === id);
+  if (!asset) return;
+  if (!window.confirm(`确定删除「${asset.name}」？已有任务不受影响，之后的分镜将不再使用这个设定。`)) return;
+  try {
+    await api(`/api/cast/${id}`, { method: "DELETE" });
+    state.castIds = (state.castIds ?? []).filter((item) => item !== id);
+    toast("已删除", "success");
+    await renderCast();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function renderCast() {
+  setPage("角色库", "角色与道具");
+  view.innerHTML = loadingView("正在读取角色库…");
+  const data = await api("/api/cast");
+  if (state.route.name !== "cast") return;
+  const cast = data.cast ?? [];
+  state.cast = cast;
+  view.innerHTML = `
+    <section class="page-head">
+      <p class="eyebrow">Cast & Props</p>
+      <h2>角色与道具</h2>
+      <p>给人物和关键物品建立设定与参考图。生成短剧时，同一角色/道具会复用同一套外观描述和参考图，保证跨镜头、甚至跨视频延续同一形象。</p>
+    </section>
+    ${castUploadCardHtml()}
+    <div class="materials-toolbar mt-24">
+      <span class="muted small">共 ${cast.length} 个设定${cast.filter((asset) => asset.imageFile).length ? ` · ${cast.filter((asset) => asset.imageFile).length} 个有参考图` : ""}</span>
+      <a class="btn btn-ghost btn-sm" href="#/create">${icon("plus", 15)} 去创作</a>
+    </div>
+    ${
+      cast.length
+        ? `<div class="material-grid">${cast.map(castCardHtml).join("")}</div>`
+        : emptyState("users", "还没有角色或道具", "添加人物或物品的参考图与外观设定，之后的分镜会保持同一形象。")
+    }
+    <input type="file" id="cast-image-input" accept="image/*,.jpg,.jpeg,.png,.webp" hidden />
+    ${castDialogHtml()}`;
+
+  const kindPicker = document.getElementById("cast-kind");
+  const fileInput = document.getElementById("cast-file-input");
+  const dropzone = document.getElementById("cast-dropzone");
+  const addButton = document.getElementById("cast-add-btn");
+  const dropTitle = document.getElementById("cast-drop-title");
+  const dropHint = document.getElementById("cast-drop-hint");
+  const nameInput = document.getElementById("cast-name");
+  const descInput = document.getElementById("cast-desc");
+  const imageInput = document.getElementById("cast-image-input");
+  let pendingReplaceId = null;
+
+  function selectFile(file) {
+    if (!file) return;
+    state.castUploadFile = file;
+    dropTitle.textContent = file.name;
+    dropHint.textContent = formatBytes(file.size);
+    addButton.disabled = false;
+    if (!nameInput.value.trim()) nameInput.value = file.name.replace(/\.[^.]+$/, "").slice(0, 40);
+  }
+
+  kindPicker.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-value]");
+    if (!button) return;
+    for (const item of kindPicker.querySelectorAll("button")) item.classList.remove("active");
+    button.classList.add("active");
+  });
+  dropzone.addEventListener("click", (event) => {
+    if (event.target === fileInput) return;
+    fileInput.click();
+  });
+  fileInput.addEventListener("click", (event) => event.stopPropagation());
+  dropzone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+  dropzone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropzone.classList.remove("dragover");
+    selectFile(event.dataTransfer?.files?.[0]);
+  });
+  fileInput.addEventListener("change", () => selectFile(fileInput.files?.[0]));
+
+  addButton.addEventListener("click", async () => {
+    const kind = kindPicker.querySelector("button.active")?.dataset.value ?? "character";
+    const name = nameInput.value.trim();
+    if (!name) {
+      toast("请填写名称", "error");
+      nameInput.focus();
+      return;
+    }
+    addButton.disabled = true;
+    addButton.innerHTML = `<span class="spinner"></span> 添加中…`;
+    try {
+      await uploadCast(state.castUploadFile, {
+        kind,
+        name,
+        description: descInput.value.trim(),
+      });
+      state.castUploadFile = null;
+      toast("已添加到角色库", "success");
+      await renderCast();
+    } catch (error) {
+      toast(error.message, "error");
+      addButton.disabled = false;
+      addButton.innerHTML = `${icon("plus", 16)} 添加`;
+    }
+  });
+
+  for (const button of view.querySelectorAll("[data-edit-cast]")) {
+    button.addEventListener("click", () => openCastDialog(button.dataset.editCast));
+  }
+  for (const button of view.querySelectorAll("[data-delete-cast]")) {
+    button.addEventListener("click", () => {
+      void deleteCast(button.dataset.deleteCast);
+    });
+  }
+  for (const button of view.querySelectorAll("[data-replace-cast]")) {
+    button.addEventListener("click", () => {
+      pendingReplaceId = button.dataset.replaceCast;
+      imageInput.value = "";
+      imageInput.click();
+    });
+  }
+  imageInput.addEventListener("change", async () => {
+    const file = imageInput.files?.[0];
+    if (!file || !pendingReplaceId) return;
+    const id = pendingReplaceId;
+    pendingReplaceId = null;
+    try {
+      await replaceCastImage(id, file);
+      toast("参考图已更新", "success");
+      await renderCast();
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  });
+
+  document.getElementById("close-cast-dialog")?.addEventListener("click", () => {
+    document.getElementById("cast-dialog")?.close();
+  });
+  document.getElementById("cancel-cast-dialog")?.addEventListener("click", () => {
+    document.getElementById("cast-dialog")?.close();
+  });
+  document.getElementById("cast-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveCastEdit();
+  });
+  const dialog = document.getElementById("cast-dialog");
+  dialog?.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
 }
 
 /* ---------------- publish ---------------- */
@@ -1575,6 +2052,10 @@ function syncUserPermissionControls() {
   const jobs = grid.querySelector('input[value="jobs"]');
   if (create?.checked && jobs) jobs.checked = true;
   if (jobs && !jobs.checked && create) create.checked = false;
+  const materials = grid.querySelector('input[value="materials"]');
+  const cast = grid.querySelector('input[value="cast"]');
+  if (materials?.checked && cast) cast.checked = true;
+  if (cast && !cast.checked && materials) materials.checked = false;
 }
 
 function openUserDialog(id) {
@@ -1843,16 +2324,16 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
-          <div><div class="card-title">AI 画面生成</div><div class="card-sub">可选：为没有素材命中的分镜调用文生视频接口</div></div>
+          <div><div class="card-title">AI 画面生成</div><div class="card-sub">可选：文生视频 + 图生视频，有角色参考图时自动沿用同一形象</div></div>
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? "已启用" : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>接口约定：POST {baseUrl}{submitPath} 提交 <code>{model, prompt, duration_sec, aspect_ratio}</code>，返回 video_url 或任务 id；GET {baseUrl}{pollPath}（{id} 替换为任务 ID）查询状态与 video_url。返回字段兼容 <code>{data: {...}}</code> 包裹。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span>接口约定：POST {baseUrl}{submitPath} 提交 <code>{model, prompt, duration_sec, aspect_ratio}</code>，返回 video_url 或任务 id；GET {baseUrl}{pollPath}（{id} 替换为任务 ID）查询状态与 video_url。图生视频时额外携带 <code>image</code>（首帧参考图）与 <code>reference_images</code>（角色/道具参考图），都是 data URL。返回字段兼容 <code>{data: {...}}</code> 包裹。</span></div>
           <div class="field-grid-3">
             <div class="field">
               <label for="videogen-provider">供应商</label>
               <select class="select" id="videogen-provider">
-                ${options([["none", "不使用"], ["http", "HTTP 文生视频接口"]], s.videoGen.provider)}
+                ${options([["none", "不使用"], ["http", "HTTP 文生/图生视频接口"]], s.videoGen.provider)}
               </select>
             </div>
             <div class="field">
@@ -2002,6 +2483,7 @@ async function renderSettings() {
       void testProvider(button.dataset.test, button);
     });
   }
+
   document.getElementById("settings-connect-douyin")?.addEventListener("click", () => {
     void connectDouyin();
   });

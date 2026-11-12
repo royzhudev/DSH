@@ -61,7 +61,7 @@ test(
 
     const admin = await setupTestAdmin(app.url);
     assert.equal(admin.user.role, "admin");
-    assert.deepEqual(admin.user.permissions, ["create", "jobs", "materials", "publish", "settings"]);
+    assert.deepEqual(admin.user.permissions, ["create", "jobs", "cast", "materials", "publish", "settings"]);
 
     const secondSetup = await jsonRequest(fetch, `${app.url}/api/auth/setup`, {
       username: "another",
@@ -89,10 +89,10 @@ test(
     });
     assert.equal(createMember.status, 201, await createMember.clone().text());
     const member = ((await createMember.json()) as { user: { id: string; permissions: string[] } }).user;
-    assert.deepEqual(member.permissions, ["create", "jobs", "materials"]);
+    assert.deepEqual(member.permissions, ["create", "jobs", "cast", "materials"]);
 
     const memberLogin = await loginTestUser(app.url, "editor", "editor-password-1");
-    assert.deepEqual(memberLogin.user.permissions, ["create", "jobs", "materials"]);
+    assert.deepEqual(memberLogin.user.permissions, ["create", "jobs", "cast", "materials"]);
     const memberRequest = withCookie(memberLogin.cookie);
 
     assert.equal((await memberRequest(`${app.url}/api/videos`)).status, 200);

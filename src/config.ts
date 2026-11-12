@@ -7,6 +7,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   outputDir: "./output",
   workDir: "./.work",
   libraryDir: "./materials",
+  castDir: "./cast",
   cacheDir: "./.cache",
   settingsFile: "./data/settings.json",
   video: {
@@ -146,6 +147,7 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
   config.outputDir = set(config.outputDir, envString(env, "VIDEO_AGENT_OUTPUT_DIR"));
   config.workDir = set(config.workDir, envString(env, "VIDEO_AGENT_WORK_DIR"));
   config.libraryDir = set(config.libraryDir, envString(env, "VIDEO_AGENT_LIBRARY_DIR"));
+  config.castDir = set(config.castDir, envString(env, "VIDEO_AGENT_CAST_DIR"));
   config.cacheDir = set(config.cacheDir, envString(env, "VIDEO_AGENT_CACHE_DIR"));
 
   config.video.width = set(config.video.width, envNumber(env, "VIDEO_WIDTH"));
@@ -390,6 +392,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   config.outputDir = path.resolve(cwd, config.outputDir);
   config.workDir = path.resolve(cwd, config.workDir);
   config.libraryDir = path.resolve(cwd, config.libraryDir);
+  config.castDir = path.resolve(cwd, config.castDir);
   config.cacheDir = path.resolve(cwd, config.cacheDir);
   config.settingsFile = settingsPath;
   config.script.baseUrl = config.script.baseUrl.replace(/\/+$/, "");
@@ -432,6 +435,7 @@ export interface ConfigSummary {
   video: { width: number; height: number; fps: number };
   outputDir: string;
   libraryDir: string;
+  castDir: string;
 }
 
 export function summarizeConfig(config: AppConfig): ConfigSummary {
@@ -447,5 +451,6 @@ export function summarizeConfig(config: AppConfig): ConfigSummary {
     },
     outputDir: config.outputDir,
     libraryDir: config.libraryDir,
+    castDir: config.castDir,
   };
 }

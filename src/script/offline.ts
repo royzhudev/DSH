@@ -28,12 +28,29 @@ export class OfflineScriptProvider implements ScriptProvider {
     ];
 
     const count = Math.max(2, Math.min(5, request.maxSegments));
-    const segments = narration.slice(0, count).map((text, index) => ({
-      id: index + 1,
-      narration: text,
-      keywords: keywordsAt(index),
-      durationHintSec: 6,
-    }));
+    const cast = request.cast ?? [];
+    const castAt = (index: number): string[] => {
+      if (cast.length === 0) return [];
+      if (cast.length === 1) return [cast[0]!.name];
+      // 轮转出场，让同一人物/道具在多个镜头里重复出现，方便检查一致性。
+      return [cast[index % cast.length]!.name, cast[(index + 1) % cast.length]!.name].filter(
+        (name, position, list) => list.indexOf(name) === position,
+      );
+    };
+    const segments = narration.slice(0, count).map((text, index) => {
+      const names = castAt(index);
+      return {
+        id: index + 1,
+        narration: text,
+        keywords: keywordsAt(index),
+        durationHintSec: 6,
+        scene: `${topic} · 场景 ${Math.floor(index / 2) + 1}`,
+        shot: names.length
+          ? `中景，${names.join("与")}自然互动，镜头稳定，画面延续上一镜`
+          : `中景，${topic}，镜头稳定`,
+        ...(names.length > 0 ? { cast: names } : {}),
+      };
+    });
 
     return {
       title: truncate(`${topic}｜${request.targetDurationSec} 秒看懂`, 60),
