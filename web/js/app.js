@@ -1878,6 +1878,10 @@ async function renderSettings() {
             ${numberField("videogen-clip-duration", "单段时长（秒）", s.videoGen.clipDurationSec, { min: 2, max: 60 })}
           </div>
           ${switchField("videogen-fallback", "生成失败时回退素材库", s.videoGen.fallbackToMaterials)}
+          <div class="test-row">
+            <button class="btn btn-ghost btn-sm" type="button" data-test="videogen">测试画面生成</button>
+            <span class="test-result" id="test-videogen-result">测试会按配置的单段时长提交一次生成请求</span>
+          </div>
         </div>
       </section>
 
@@ -1944,6 +1948,8 @@ async function renderSettings() {
           </div>
           <div class="settings-note">${icon("shield", 16)}<span>当前生效回调地址：<span class="mono">${esc(redirectUri)}</span> <button class="btn-link" type="button" data-copy="${attr(redirectUri)}">${icon("copy", 13)} 复制</button>。修改后请先保存，再发起授权。令牌只保存在本机 <span class="mono">.cache/douyin-token.json</span>。</span></div>
           <div class="test-row">
+            <button class="btn btn-ghost btn-sm" type="button" data-test="douyin">测试应用配置</button>
+            <span class="test-result" id="test-douyin-result">测试使用已保存的配置</span>
             ${douyin?.configured ? `<button class="btn btn-ghost btn-sm" type="button" id="settings-connect-douyin">${icon("external", 15)} ${douyin.authorized ? "重新授权" : "授权抖音"}</button>` : ""}
             ${douyin?.authorized ? `<button class="btn btn-danger btn-sm" type="button" id="settings-disconnect-douyin">断开连接</button>` : ""}
             <span class="hint">应用信息保存后生效</span>
@@ -2101,10 +2107,19 @@ async function testProvider(kind, button) {
   try {
     const data = await api("/api/settings/test", { method: "POST", body: { kind } });
     if (result) {
-      result.textContent =
-        kind === "script"
-          ? `连接成功：${data.provider}，生成 ${data.segments} 个分镜`
-          : `连接成功：${data.provider} / ${data.voice}，${Number(data.durationSec).toFixed(1)} 秒`;
+      if (kind === "script") {
+        result.textContent = `连接成功：${data.provider}，生成 ${data.segments} 个分镜`;
+      } else if (kind === "tts") {
+        result.textContent = `连接成功：${data.provider} / ${data.voice}，${Number(data.durationSec).toFixed(1)} 秒`;
+      } else if (kind === "videogen") {
+        result.textContent = data.videoUrlReturned
+          ? `连接成功：${data.model}，接口已返回视频地址`
+          : `连接成功：${data.model}，任务 ${data.taskId} 已受理（${data.status}）`;
+      } else if (kind === "douyin") {
+        result.textContent = `连接成功：应用凭证有效，client_token 有效期 ${Number(data.expiresInSec) || 0} 秒`;
+      } else {
+        result.textContent = "连接成功";
+      }
       result.className = "test-result ok";
     }
   } catch (error) {

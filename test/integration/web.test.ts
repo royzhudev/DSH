@@ -38,6 +38,10 @@ async function startDouyinMock(): Promise<DouyinMock> {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(value));
     };
+    if (url.pathname === "/oauth/client_token/") {
+      send({ data: { access_token: "client-token-1", expires_in: 7200, error_code: 0 } });
+      return;
+    }
     if (url.pathname === "/oauth/access_token/" || url.pathname === "/oauth/refresh_token/") {
       send({
         data: {
@@ -80,6 +84,53 @@ async function startDouyinMock(): Promise<DouyinMock> {
   };
 }
 
+interface VideoGenMock {
+  url: string;
+  calls: Array<{ method: string; path: string; body: string; authorization: string }>;
+  close(): Promise<void>;
+}
+
+async function startVideoGenMock(): Promise<VideoGenMock> {
+  const calls: VideoGenMock["calls"] = [];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    calls.push({
+      method: req.method ?? "GET",
+      path: url.pathname,
+      body: Buffer.concat(chunks).toString("utf8"),
+      authorization: String(req.headers.authorization ?? ""),
+    });
+    const send = (value: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.method === "POST" && url.pathname === "/v1/videos/generations") {
+      send({ task_id: "task-1" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-1") {
+      send({ data: { status: "succeeded", video_url: "http://127.0.0.1/clip.mp4" } });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    calls,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.();
+      }),
+  };
+}
+
 function jsonRequest(
   requestImpl: typeof fetch,
   url: string,
@@ -99,6 +150,7 @@ test(
   async (t) => {
     const dir = await makeTempDir();
     const douyin = await startDouyinMock();
+    const videoGen = await startVideoGenMock();
     const config = makeTestConfig(dir, {
       server: { port: 0 },
       douyin: {
@@ -113,6 +165,7 @@ test(
     t.after(async () => {
       await app.close();
       await douyin.close();
+      await videoGen.close();
       await fs.rm(dir, { recursive: true, force: true });
     });
 
@@ -133,6 +186,8 @@ test(
     assert.match(scriptText, /renderCreate/);
     assert.match(scriptText, /renderAuth/);
     assert.match(scriptText, /usersCardHtml/);
+    assert.match(scriptText, /data-test="videogen"/);
+    assert.match(scriptText, /data-test="douyin"/);
 
     const apiIndex = (await (await request(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
     assert.equal(apiIndex.name, "video-agent");
@@ -178,6 +233,53 @@ test(
     const ttsResult = (await ttsTest.json()) as { provider: string; durationSec: number };
     assert.equal(ttsResult.provider, "silent");
     assert.equal(ttsResult.durationSec >= 0, true);
+
+    const disabledVideoGen = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "videogen" });
+    assert.equal(disabledVideoGen.status, 400);
+
+    const videoGenPut = await jsonRequest(request, `${app.url}/api/settings`, {
+      videoGen: {
+        provider: "http",
+        baseUrl: videoGen.url,
+        model: "test-model",
+        apiKey: "videogen-key",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5000,
+        clipDurationSec: 2,
+      },
+    }, "PUT");
+    assert.equal(videoGenPut.status, 200, await videoGenPut.clone().text());
+    const videoGenTest = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "videogen" });
+    assert.equal(videoGenTest.status, 200, await videoGenTest.clone().text());
+    const videoGenResult = (await videoGenTest.json()) as {
+      model: string;
+      taskId: string;
+      status: string;
+      videoUrlReturned: boolean;
+    };
+    assert.equal(videoGenResult.model, "test-model");
+    assert.equal(videoGenResult.taskId, "task-1");
+    assert.equal(videoGenResult.status, "succeeded");
+    assert.equal(videoGenResult.videoUrlReturned, true);
+    const submitCall = videoGen.calls.find((call) => call.method === "POST");
+    assert.ok(submitCall);
+    assert.equal(submitCall.authorization, "Bearer videogen-key");
+    assert.equal((JSON.parse(submitCall.body) as { duration_sec: number }).duration_sec, 2);
+
+    // 测试完成后关闭 AI 画面，避免影响后面的完整任务流程。
+    const videoGenReset = await jsonRequest(request, `${app.url}/api/settings`, {
+      videoGen: { provider: "none" },
+    }, "PUT");
+    assert.equal(videoGenReset.status, 200, await videoGenReset.clone().text());
+
+    const douyinTest = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "douyin" });
+    assert.equal(douyinTest.status, 200, await douyinTest.clone().text());
+    const douyinTestResult = (await douyinTest.json()) as { expiresInSec: number; authorized: boolean };
+    assert.equal(douyinTestResult.expiresInSec, 7200);
+    assert.equal(douyinTestResult.authorized, false);
+    assert.equal(douyin.calls.some((call) => call.path === "/oauth/client_token/"), true);
 
     const clip = path.join(dir, "source", "city-night.mp4");
     await generateTestClip(clip, { durationSec: 1.5, size: "160x160" });

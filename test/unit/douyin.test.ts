@@ -14,7 +14,7 @@ interface MockServer {
   close(): Promise<void>;
 }
 
-async function startMock(options: { failCreate?: boolean } = {}): Promise<MockServer> {
+async function startMock(options: { failCreate?: boolean; failClientToken?: boolean } = {}): Promise<MockServer> {
   const calls: MockServer["calls"] = [];
   const server = http.createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -32,6 +32,14 @@ async function startMock(options: { failCreate?: boolean } = {}): Promise<MockSe
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(value));
     };
+    if (url.pathname === "/oauth/client_token/") {
+      if (options.failClientToken) {
+        send({ data: { error_code: 10010, description: "client_key 无效" } });
+        return;
+      }
+      send({ data: { access_token: "client-token-1", expires_in: 7200, error_code: 0 } });
+      return;
+    }
     if (url.pathname === "/oauth/access_token/") {
       send({
         data: {
@@ -184,6 +192,43 @@ test("抖音发布：上传视频并创建作品", async () => {
   } finally {
     await mock.close();
   }
+});
+
+test("抖音应用凭证测试：client_credential 换取 client_token", async () => {
+  const dir = await makeTempDir();
+  const mock = await startMock();
+  try {
+    const client = makeClient(dir, mock.url);
+    const result = await client.verifyCredentials();
+    assert.equal(result.expiresInSec, 7200);
+    const call = mock.calls.find((item) => item.path === "/oauth/client_token/");
+    assert.ok(call);
+    assert.equal(call.method, "POST");
+    assert.match(call.contentType, /application\/json/);
+    const body = JSON.parse(call.body.toString("utf8"));
+    assert.equal(body.client_key, "client-key");
+    assert.equal(body.client_secret, "client-secret");
+    assert.equal(body.grant_type, "client_credential");
+  } finally {
+    await mock.close();
+  }
+
+  const failing = await startMock({ failClientToken: true });
+  try {
+    const client = makeClient(dir, failing.url);
+    await assert.rejects(
+      client.verifyCredentials(),
+      (error: unknown) => error instanceof AppError && error.code === "DOUYIN_API_ERROR",
+    );
+  } finally {
+    await failing.close();
+  }
+
+  const unconfigured = new DouyinClient(makeTestConfig(dir), silentLogger);
+  await assert.rejects(
+    unconfigured.verifyCredentials(),
+    (error: unknown) => error instanceof AppError && error.code === "DOUYIN_NOT_CONFIGURED",
+  );
 });
 
 test("抖音未配置或接口报错时给出明确错误", async () => {

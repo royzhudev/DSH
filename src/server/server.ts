@@ -21,6 +21,7 @@ import { materialTagPool } from "../materials/match.js";
 import { isInside, sanitizeFilename, sha256 } from "../util/fs.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
+import { HttpVideoGenProvider } from "../videogen/http.js";
 import { JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
 import {
@@ -412,7 +413,7 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       login: "POST /api/auth/login {username, password}",
       logout: "POST /api/auth/logout",
       settings: "GET/PUT /api/settings",
-      testSettings: "POST /api/settings/test {kind: script|tts}",
+      testSettings: "POST /api/settings/test {kind: script|tts|videogen|douyin}",
       users: "GET/POST /api/users（管理员）",
       updateUser: "PATCH /api/users/:id（管理员）",
       deleteUser: "DELETE /api/users/:id（管理员）",
@@ -670,7 +671,35 @@ async function handleSettingsTest(
     });
     return;
   }
-  throw new AppError("kind 只能是 script 或 tts", { code: "INVALID_OPTIONS", status: 400 });
+  if (kind === "videogen") {
+    const config = structuredClone(ctx.config);
+    if (config.videoGen.provider !== "http") {
+      throw new AppError("AI 画面生成未启用：请选择「HTTP 文生视频接口」并保存", {
+        code: "VIDEOGEN_DISABLED",
+        status: 400,
+      });
+    }
+    const provider = new HttpVideoGenProvider(config.videoGen, ctx.logger);
+    const result = await provider.check();
+    sendJson(res, 200, { ok: true, kind, ...result });
+    return;
+  }
+  if (kind === "douyin") {
+    const result = await ctx.douyin.verifyCredentials(AbortSignal.timeout(20_000));
+    sendJson(res, 200, {
+      ok: true,
+      kind,
+      clientKey: ctx.config.douyin.clientKey,
+      redirectUri: effectiveRedirectUri(ctx.config),
+      expiresInSec: result.expiresInSec,
+      authorized: Boolean(await ctx.tokens.read()),
+    });
+    return;
+  }
+  throw new AppError("kind 只能是 script、tts、videogen 或 douyin", {
+    code: "INVALID_OPTIONS",
+    status: 400,
+  });
 }
 
 async function handleGenerateScript(
