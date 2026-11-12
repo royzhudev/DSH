@@ -300,6 +300,41 @@ test(
     });
     assert.equal(badDuration.status, 400);
 
+    // 百炼返回 400 时，要把平台原文和可操作的原因一起给出来。
+    const rejected = http.createServer((req, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ code: "InvalidParameter", message: "duration must be 5 or 10" }));
+    });
+    await new Promise<void>((resolve) => rejected.listen(0, "127.0.0.1", resolve));
+    const rejectedAddress = rejected.address();
+    const rejectedPort = typeof rejectedAddress === "object" && rejectedAddress ? rejectedAddress.port : 0;
+    try {
+      const dashscopePut = await jsonRequest(request, `${app.url}/api/settings`, {
+        videoGen: {
+          baseUrl: `http://127.0.0.1:${rejectedPort}`,
+          protocol: "dashscope",
+          model: "wan3.0-video",
+          apiKey: "sk-test",
+        },
+      }, "PUT");
+      assert.equal(dashscopePut.status, 200, await dashscopePut.clone().text());
+      const rejectedTest = await jsonRequest(request, `${app.url}/api/settings/test`, {
+        kind: "videogen",
+        prompt: "测试时长不被支持",
+        durationSec: 3,
+      });
+      assert.equal(rejectedTest.status, 400);
+      const rejectedBody = (await rejectedTest.json()) as { error: { message: string } };
+      assert.match(rejectedBody.error.message, /HTTP 400/);
+      assert.match(rejectedBody.error.message, /InvalidParameter/);
+      assert.match(rejectedBody.error.message, /百炼拒绝这次请求时/);
+    } finally {
+      await new Promise<void>((resolve) => {
+        rejected.close(() => resolve());
+        rejected.closeAllConnections?.();
+      });
+    }
+
     // 测试完成后关闭 AI 画面，避免影响后面的完整任务流程。
     const videoGenReset = await jsonRequest(request, `${app.url}/api/settings`, {
       videoGen: { provider: "none" },

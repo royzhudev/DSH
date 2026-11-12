@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../../src/videogen/http.js";
 import { createVideoGenProvider } from "../../src/videogen/index.js";
+import { videoTestWaitBudget } from "../../src/server/server.js";
 import { AppError } from "../../src/errors.js";
 import { silentLogger } from "../../src/logger.js";
 import { probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
@@ -493,6 +494,66 @@ test("HTTP 文生视频：兼容聚合平台把成片地址放在数组/嵌套�
       provider.generate({ prompt: "task-thumb", durationSec: 5 }, path.join(dir, "gen")),
       (error: unknown) => error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE",
     );
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});
+
+test("设置页测试的等待预算：跟随配置的 timeoutMs，最长 5 分钟", () => {
+  // 旧实现固定封顶 180 秒，慢一点的 wan 任务每次都会停在“已提交但没拿到成片”。
+  assert.equal(videoTestWaitBudget(300_000), 300_000);
+  assert.equal(videoTestWaitBudget(1_800_000), 300_000);
+  assert.equal(videoTestWaitBudget(90_000), 90_000);
+  assert.equal(videoTestWaitBudget(-1), 0);
+});
+
+test("HTTP 文生视频：平台 4xx 明确拒绝时报错，不当成“可能已提交”", async () => {
+  const dir = await makeTempDir();
+  let submitCount = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (req.method === "POST") {
+      submitCount += 1;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ code: "InvalidParameter", message: "duration must be 5 or 10" }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: `http://127.0.0.1:${port}`,
+        protocol: "dashscope",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 5,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    await assert.rejects(
+      provider.generate({ prompt: "时长不被支持", durationSec: 3 }, path.join(dir, "gen")),
+      (error: unknown) =>
+        error instanceof AppError &&
+        error.code === "VIDEOGEN_UPSTREAM_REJECTED" &&
+        /HTTP 400/.test(error.message) &&
+        /InvalidParameter/.test(error.message),
+    );
+    // 被拒绝的请求不应该被当成“已提交”，也不该触发第二次提交。
+    assert.equal(submitCount, 1);
   } finally {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());

@@ -2389,11 +2389,12 @@ async function renderSettings() {
                   <option value="3">3 秒</option>
                   <option value="5" selected>5 秒</option>
                 </select>
+                <div class="field-hint">百炼多数 wan 模型只支持 5 秒，3 秒被拒时会原样显示平台报错</div>
               </div>
             </div>
             <div class="test-row">
               <button class="btn btn-ghost btn-sm" type="button" data-test="videogen">生成测试视频</button>
-              <span class="test-result" id="test-videogen-result">测试使用已保存的配置，会真实生成视频并可能消耗额度；未完成时会复用同一任务继续查询</span>
+              <span class="test-result" id="test-videogen-result">测试使用已保存的配置，会真实生成视频并可能消耗额度；一次最多等 5 分钟，没出片时可点“继续等待这个任务”，不会重复提交</span>
             </div>
             <div class="test-row test-task-row">
               <input class="input test-task-input" id="videogen-test-task" placeholder="已有任务 ID（可选）：只取回该任务的视频，不重新生成" />
@@ -2665,7 +2666,10 @@ async function testProvider(kind, button, options = {}) {
           result.textContent = `继续查询上次已提交的任务（${pendingVideoTest.taskId}），不会重复提交…`;
         }
       } else if (result) {
-        result.textContent = "生成中…（可能需要 1–2 分钟）";
+        result.textContent =
+          pendingVideoTest && pendingVideoTest.taskId
+            ? `注意：上一个任务 ${pendingVideoTest.taskId} 还在生成，改提示词会重新提交一条新任务（可能再次扣费）；只想取回旧任务就把提示词改回去。正在提交…`
+            : "生成中…（可能需要 1–2 分钟）";
       }
     }
     const data = await api("/api/settings/test", { method: "POST", body });
@@ -2692,8 +2696,16 @@ async function testProvider(kind, button, options = {}) {
             button.textContent = data.taskId ? "继续等待这个任务" : "重新生成测试视频";
           }
           result.textContent = data.submitted
-            ? `${data.message} 再次点击“继续等待这个任务”会接着查询，不会重复扣费。`
+            ? `${data.message} 会自动再等一轮；也可以点“继续等待这个任务”，都不会重复扣费。`
             : data.message;
+          // 生成常常比一次请求的等待更长：自动续等一次，用户不用盯着按钮点。
+          if (data.taskId && !options.resumeTaskId && !options.autoContinued) {
+            setTimeout(() => {
+              if (pendingVideoTest && pendingVideoTest.taskId === data.taskId) {
+                testProvider("videogen", button, { autoContinued: true });
+              }
+            }, 1500);
+          }
         } else {
           pendingVideoTest = null;
           button.textContent = options.resumeTaskId ? "取回视频" : "生成测试视频";

@@ -777,6 +777,30 @@ async function handleDeleteUser(
 const SETTINGS_TEST_VIDEO_KEEP = 20;
 const DEFAULT_VIDEOGEN_TEST_PROMPT = "一只橘猫在窗台上看雨，电影感，近景";
 
+/**
+ * 设置页测试的等待预算：一次完整的 wan 生成常常超过 3 分钟，
+ * 所以不再用原来的 180 秒硬上限，而是跟随配置的 timeoutMs，最长 5 分钟。
+ */
+export function videoTestWaitBudget(timeoutMs: number): number {
+  return Math.min(Math.max(0, timeoutMs), 300_000);
+}
+
+/** 与 HttpVideoGenProvider 一致地判断是否走阿里百炼的异步接口。 */
+function usesDashscopeProtocol(videoGen: AppConfig["videoGen"]): boolean {
+  if (videoGen.protocol === "dashscope") return true;
+  if (videoGen.protocol === "generic") return false;
+  const host = videoGen.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  return /(^|\.)dashscope(-intl)?\.aliyuncs\.com$/i.test(host);
+}
+
+/** 百炼拒绝请求时给出可操作的原因提示，避免用户只看到一段 JSON。 */
+function withDashscopeHint(message: string): string {
+  return (
+    `${message}\n百炼拒绝这次请求时，常见原因是测试时长（多数 wan 模型只支持 5 秒或 10 秒）、` +
+    "画幅、模型名与账号权限；请对照设置页的「测试时长」「画幅」「模型」后保存重试。"
+  );
+}
+
 const SETTINGS_TEST_PENDING_TTL_MS = 30 * 60_000;
 
 interface PendingVideoTest {
@@ -903,10 +927,12 @@ async function handleSettingsTest(
     }
     const outputDir = path.join(config.cacheDir, "settings-test");
     await ensureDir(outputDir);
-    const provider = new HttpVideoGenProvider(config.videoGen, ctx.logger);
     const key = settingsTestKey(config, prompt, durationSec);
-    // 一次请求内最多等待 3 分钟；超时后任务通常仍在平台侧生成，继续复用而不是重新提交。
-    const budgetMs = Math.min(config.videoGen.timeoutMs, 180_000);
+    // 测试要等一条完整的生成：百炼的 wan 一般 1-3 分钟，原来固定 3 分钟的上限
+    // 会让慢一点的任务每次都停在“已提交但没拿到成片”。这里放宽到 5 分钟，
+    // 并用同一个预算构造 provider，否则 provider 内部的 timeoutMs 会先超时。
+    const budgetMs = videoTestWaitBudget(config.videoGen.timeoutMs);
+    const provider = new HttpVideoGenProvider({ ...config.videoGen, timeoutMs: budgetMs }, ctx.logger);
     const explicitTaskId = (optionalString(body.resumeTaskId) ?? "").trim();
     const pending = explicitTaskId ? undefined : takePendingVideoTest(key);
     const resumeTaskId = explicitTaskId || pending?.taskId;
@@ -930,6 +956,14 @@ async function handleSettingsTest(
     } catch (error) {
       if (!(error instanceof VideoGenPendingError)) {
         pendingVideoTests.delete(key);
+        if (
+          error instanceof AppError &&
+          (error.code === "VIDEOGEN_UPSTREAM_REJECTED" ||
+            (error.code === "VIDEOGEN_REQUEST_FAILED" && /HTTP 40\d/.test(error.message))) &&
+          usesDashscopeProtocol(config.videoGen)
+        ) {
+          throw new AppError(withDashscopeHint(error.message), { code: error.code, status: 400 });
+        }
         throw error;
       }
       // 已提交但还没出片：不算失败，如实告诉用户并记住任务，避免重复扣费。

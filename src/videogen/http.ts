@@ -346,9 +346,12 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     }
     const text = await response.text();
     if (!response.ok) {
+      // 4xx 是平台明确拒绝（Key 无效、参数不支持等），说明请求没有被受理；
+      // 5xx 才可能是“已经受理但没回包”，那种情况才需要按“可能已扣费”处理。
+      const rejected = response.status >= 400 && response.status < 500;
       throw new AppError(
         `画面生成服务返回 HTTP ${response.status}${text ? `：${text.slice(0, 300)}` : ""}`,
-        { code: "VIDEOGEN_REQUEST_FAILED", status: 502 },
+        { code: rejected ? "VIDEOGEN_UPSTREAM_REJECTED" : "VIDEOGEN_REQUEST_FAILED", status: 502 },
       );
     }
     try {
@@ -461,6 +464,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
     // 任务已完成却找不到成片地址：属于确定的解析失败，再次轮询也不会变好。
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE") return error;
+    // 平台用 4xx 明确拒绝（Key/参数/模型不对）：这不是“可能已提交”，要原样报错。
+    if (error instanceof AppError && error.code === "VIDEOGEN_UPSTREAM_REJECTED") return error;
     if (!options.submitted) {
       return new VideoGenPendingError({
         message:
