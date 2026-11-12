@@ -530,6 +530,31 @@ function previewEmpty() {
   </div>`;
 }
 
+const REVIEW_LEVEL_MARK = { ok: "✓", warn: "!", todo: "–" };
+const REVIEW_STAGE_NAME = { plan: "策划", script: "剧本", storyboard: "分镜", assets: "素材", publish: "发布" };
+
+function renderCreationReview(review) {
+  if (!review || !Array.isArray(review.items) || review.items.length === 0) return "";
+  const items = review.items
+    .map(
+      (item) => `<li class="review-item review-${esc(item.level)}">
+        <span class="review-mark" aria-hidden="true">${REVIEW_LEVEL_MARK[item.level] ?? "·"}</span>
+        <div>
+          <p class="review-title">${esc(item.title)}<span class="review-stage">${esc(REVIEW_STAGE_NAME[item.stage] ?? item.stage)}</span></p>
+          <p class="review-detail">${esc(item.detail)}</p>
+        </div>
+      </li>`,
+    )
+    .join("");
+  return `<div class="review-block">
+    <div class="review-head">
+      <span class="review-score">品控 ${esc(review.score)} 分</span>
+      <span class="hint">本地检查，不调用模型、不产生费用</span>
+    </div>
+    <ul class="review-list">${items}</ul>
+  </div>`;
+}
+
 function renderPreview(data) {
   const body = document.getElementById("preview-body");
   const pill = document.getElementById("preview-provider");
@@ -570,6 +595,7 @@ function renderPreview(data) {
         </div>`,
       )
       .join("")}
+    ${renderCreationReview(data.review)}
     <p class="fineprint">预览和正式生成会各自调用一次模型，分镜内容可能略有差异。</p>
   </div>`;
 }
@@ -722,6 +748,19 @@ async function renderCreate() {
             <button class="btn btn-primary" id="create-btn" type="button">${icon("play", 16)} 开始生成视频</button>
           </div>
           <p class="fineprint">创建前会先检查配置、参考图与运行环境；有问题会立即提示，不会先调用模型产生费用。未配置大模型时使用离线模板。</p>
+
+          <details class="flow-guide">
+            <summary>短剧制作流程：平台做什么、你还要做什么</summary>
+            <ul class="flow-list">
+              <li><span class="flow-stage">策划</span><span class="flow-badge flow-self">自己做</span><span>选题、受众、商业模式与合规预审：平台只能辅助给方向，判断能不能火要靠你。</span></li>
+              <li><span class="flow-stage">剧本</span><span class="flow-badge flow-assist">需人工</span><span>平台生成大纲与分镜初稿；反转、节奏、每集结尾钩子必须人工打磨。</span></li>
+              <li><span class="flow-stage">分镜</span><span class="flow-badge flow-platform">平台承接</span><span>自动拆分镜并写画面提示词；支持改单镜提示词、场景与景别。</span></li>
+              <li><span class="flow-stage">素材</span><span class="flow-badge flow-platform">平台承接</span><span>人设锁定、图生视频、配音、字幕、BGM：角色卡保证跨镜头同一形象。</span></li>
+              <li><span class="flow-stage">成片</span><span class="flow-badge flow-platform">平台承接</span><span>自动拼接、对齐音画、加字幕转场并导出竖屏成片；节奏仍需人工微调。</span></li>
+              <li><span class="flow-stage">发布</span><span class="flow-badge flow-self">自己做</span><span>备案、版权与素材商用授权、封面标题、投流与数据复盘：平台不承接。</span></li>
+            </ul>
+            <p class="fineprint">生成脚本预览后，右侧会给出“创作品控”检查：钩子、台词长度、景别、节奏、人物一致性。</p>
+          </details>
         </div>
       </section>
 

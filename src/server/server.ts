@@ -31,6 +31,7 @@ import {
   type UpdateCastOptions,
 } from "../cast/library.js";
 import { STORY_MAX_LENGTH, preflightScript, preflightVideoJob } from "../preflight.js";
+import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
@@ -1058,6 +1059,13 @@ async function handleGenerateScript(
     maxSegments: config.script.maxSegments,
     availableTags: materialTagPool(materials),
     cast: selectedCast.map(castView),
+    review: reviewCreation({
+      topic,
+      story,
+      targetDurationSec: config.script.targetDurationSec,
+      segments: script.segments,
+      cast: selectedCast.map(({ name, kind, imageFile }) => ({ name, kind, ...(imageFile ? { imageFile } : {}) })),
+    }),
   });
 }
 

@@ -2495,3 +2495,151 @@ body.auth-locked .app-shell {
   color: var(--danger);
   font-size: 12px;
 }
+
+/* 创作品控：流程边界与脚本检查 */
+.flow-guide {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+}
+
+.flow-guide summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.flow-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flow-list li {
+  display: grid;
+  grid-template-columns: 42px 68px 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.flow-stage {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.flow-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.flow-badge.flow-platform {
+  background: rgba(34, 160, 96, 0.12);
+  color: #1b7a49;
+}
+
+.flow-badge.flow-assist {
+  background: rgba(214, 141, 20, 0.14);
+  color: #8a5a06;
+}
+
+.flow-badge.flow-self {
+  background: rgba(120, 120, 130, 0.14);
+  color: #555;
+}
+
+.review-block {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+}
+
+.review-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.review-score {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.review-item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.review-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.review-ok .review-mark {
+  background: rgba(34, 160, 96, 0.16);
+  color: #1b7a49;
+}
+
+.review-warn .review-mark {
+  background: rgba(214, 141, 20, 0.18);
+  color: #8a5a06;
+}
+
+.review-todo .review-mark {
+  background: rgba(120, 120, 130, 0.14);
+  color: #555;
+}
+
+.review-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.review-stage {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.review-detail {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
