@@ -153,25 +153,30 @@ function pickStatus(json: unknown): string {
   return best?.status ?? "";
 }
 
+/** 读点号路径，支持 data.result.videos[0].file_url 这种下标写法。 */
 function readPath(json: unknown, path: string): unknown {
   let current: unknown = json;
   for (const raw of path.split(".")) {
-    const key = raw.trim();
-    if (!key) continue;
-    const index = /^\[(\d+)\]$/.exec(key);
-    if (index) {
+    const segment = raw.trim();
+    if (!segment) continue;
+    const match = /^([^[\]]*)((?:\[\d+\])*)$/.exec(segment);
+    if (!match) return undefined;
+    const key = match[1];
+    if (key) {
+      if (Array.isArray(current)) {
+        const numeric = Number(key);
+        if (!Number.isInteger(numeric) || numeric < 0) return undefined;
+        current = current[numeric];
+      } else if (isRecord(current)) {
+        current = current[key];
+      } else {
+        return undefined;
+      }
+    }
+    for (const index of match[2].matchAll(/\[(\d+)\]/g)) {
       if (!Array.isArray(current)) return undefined;
       current = current[Number(index[1])];
-      continue;
     }
-    if (Array.isArray(current)) {
-      const numeric = Number(key);
-      if (!Number.isInteger(numeric) || numeric < 0) return undefined;
-      current = current[numeric];
-      continue;
-    }
-    if (!isRecord(current)) return undefined;
-    current = current[key];
   }
   return current;
 }

@@ -294,6 +294,13 @@ test("HTTP 视频：识别聚合平台常见的嵌套与数组返回结构", asy
     // 结构完全自定义时，用「视频地址字段」点号路径兜底
     const custom = await run({ data: { weird: { addr: "/files/clip.mp4" } } }, "data.weird.addr");
     assert.equal(custom.generated.durationSec > 0.5, true);
+
+    // 点号路径支持数组下标
+    const indexed = await run(
+      { content: { clips: [{ file: { link: "/files/clip.mp4" } }] } },
+      "content.clips[0].file.link",
+    );
+    assert.equal(indexed.generated.durationSec > 0.5, true);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
