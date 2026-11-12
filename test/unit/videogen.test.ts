@@ -7,15 +7,17 @@ import { HttpVideoGenProvider, VideoGenPendingError } from "../../src/videogen/h
 import { createVideoGenProvider } from "../../src/videogen/index.js";
 import { AppError } from "../../src/errors.js";
 import { silentLogger } from "../../src/logger.js";
-import { probeMedia } from "../../src/media/ffmpeg.js";
+import { probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
 import { generateTestClip, makeTempDir, makeTestConfig } from "../helpers.js";
 
 interface MockVideoServer {
   url: string;
+  requests: Array<Record<string, unknown>>;
   close(): Promise<void>;
 }
 
 async function startVideoMock(): Promise<MockVideoServer> {
+  const requests: Array<Record<string, unknown>> = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const chunks: Buffer[] = [];
@@ -27,6 +29,7 @@ async function startVideoMock(): Promise<MockVideoServer> {
     };
     if (req.method === "POST" && url.pathname === "/v1/videos/generations") {
       const parsed = JSON.parse(body) as { prompt: string };
+      requests.push(parsed as Record<string, unknown>);
       if (parsed.prompt.includes("fail")) {
         send({ id: "task-fail" });
         return;
@@ -78,6 +81,7 @@ async function startVideoMock(): Promise<MockVideoServer> {
   const port = typeof address === "object" && address ? address.port : 0;
   return {
     url: `http://127.0.0.1:${port}`,
+    requests,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -148,6 +152,69 @@ test("HTTP 文生视频：提交、轮询、下载与 ffprobe 校验", async () 
 
     const disabled = makeTestConfig(dir);
     assert.equal(createVideoGenProvider(disabled, silentLogger), null);
+  } finally {
+    delete process.env.VIDEOGEN_TEST_CLIP;
+    await mock.close();
+  }
+});
+
+test("HTTP 图生视频：提交首帧与角色参考图 data URL", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  process.env.VIDEOGEN_TEST_CLIP = clip;
+  const mock = await startVideoMock();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: mock.url,
+        model: "video-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 3,
+        fallbackToMaterials: true,
+      },
+    });
+    const hero = path.join(dir, "cast", "hero.png");
+    await fs.mkdir(path.dirname(hero), { recursive: true });
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x884466:s=64x64", "-frames:v", "1", hero]);
+
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    const generated = await provider.generate(
+      {
+        prompt: "林小满走进钟表店",
+        durationSec: 3,
+        image: hero,
+        references: [{ role: "character", name: "林小满", file: hero }],
+      },
+      path.join(dir, "gen"),
+    );
+    assert.equal(generated.durationSec > 0.5, true);
+
+    const submitted = mock.requests.at(-1);
+    assert.ok(submitted, "没有捕获到提交请求");
+    assert.equal(submitted.prompt, "林小满走进钟表店");
+    assert.match(String(submitted.image), /^data:image\/png;base64,/);
+    const references = submitted.reference_images as Array<Record<string, unknown>>;
+    assert.equal(references.length, 1);
+    assert.equal(references[0]!.role, "character");
+    assert.equal(references[0]!.name, "林小满");
+    assert.match(String(references[0]!.image), /^data:image\/png;base64,/);
+
+    await assert.rejects(
+      provider.generate(
+        {
+          prompt: "参考图缺失",
+          durationSec: 3,
+          references: [{ role: "character", name: "林小满", file: path.join(dir, "missing.png") }],
+        },
+        path.join(dir, "gen"),
+      ),
+      (error: unknown) => error instanceof AppError && error.code === "VIDEOGEN_REFERENCE_INVALID",
+    );
   } finally {
     delete process.env.VIDEOGEN_TEST_CLIP;
     await mock.close();

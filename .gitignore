@@ -8,6 +8,8 @@ output/
 .cache/
 materials/*
 !materials/.gitkeep
+cast/*
+!cast/.gitkeep
 
 # Local configuration and secrets
 data/

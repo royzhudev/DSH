@@ -57,3 +57,33 @@ export async function uploadMaterial(file, { title = "", tags = "" } = {}) {
   }
   return data;
 }
+
+export async function uploadCast(file, { kind = "character", name = "", description = "" } = {}) {
+  const form = new FormData();
+  form.append("kind", kind);
+  form.append("name", name);
+  form.append("description", description);
+  if (file) form.append("file", file);
+  return postForm("/api/cast", form, "添加失败");
+}
+
+export async function replaceCastImage(id, file) {
+  const form = new FormData();
+  form.append("file", file);
+  return postForm(`/api/cast/${id}/image`, form, "上传参考图失败");
+}
+
+async function postForm(path, form, label) {
+  let response;
+  try {
+    response = await fetch(path, { method: "POST", body: form });
+  } catch (error) {
+    throw new Error(error instanceof Error ? `${label}：${error.message}` : label);
+  }
+  const data = await parseResponse(response);
+  if (!response.ok) {
+    notifyUnauthorized(path, response);
+    throw new Error(data?.error?.message ?? `${label}（HTTP ${response.status}）`);
+  }
+  return data;
+}

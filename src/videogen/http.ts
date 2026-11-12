@@ -8,6 +8,13 @@ import { ensureDir, sha256 } from "../util/fs.js";
 
 const SUCCESS_STATES = new Set(["succeeded", "success", "completed", "complete", "done", "finished"]);
 const FAILED_STATES = new Set(["failed", "failure", "error", "canceled", "cancelled"]);
+const IMAGE_MIME: Record<string, string> = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+};
+export const MAX_REFERENCE_BYTES = 8 * 1024 * 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -80,6 +87,42 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 读取本地参考图并转成 data URL，避免把本机路径暴露给生成服务。 */
+async function readImageDataUrl(file: string): Promise<string> {
+  const ext = path.extname(file).toLowerCase();
+  const mime = IMAGE_MIME[ext];
+  if (!mime) {
+    throw new AppError(`参考图格式不支持：${path.basename(file)}（支持 jpg/png/webp）`, {
+      code: "VIDEOGEN_REFERENCE_INVALID",
+      status: 400,
+    });
+  }
+  let stat;
+  try {
+    stat = await fsp.stat(file);
+  } catch (error) {
+    throw new AppError(`参考图无法读取：${path.basename(file)}`, {
+      code: "VIDEOGEN_REFERENCE_INVALID",
+      status: 400,
+      cause: error,
+    });
+  }
+  if (!stat.isFile() || stat.size === 0) {
+    throw new AppError(`参考图无法读取：${path.basename(file)}`, {
+      code: "VIDEOGEN_REFERENCE_INVALID",
+      status: 400,
+    });
+  }
+  if (stat.size > MAX_REFERENCE_BYTES) {
+    throw new AppError(`参考图超过 ${Math.round(MAX_REFERENCE_BYTES / 1024 / 1024)}MB：${path.basename(file)}`, {
+      code: "VIDEOGEN_REFERENCE_INVALID",
+      status: 400,
+    });
+  }
+  const buffer = await fsp.readFile(file);
+  return `data:${mime};base64,${buffer.toString("base64")}`;
+}
+
 function abortReason(signal?: AbortSignal): unknown {
   return signal?.reason ?? new AppError("AI 画面生成已取消", { code: "ABORTED", status: 499 });
 }
@@ -114,8 +157,10 @@ export class VideoGenPendingError extends AppError {
 }
 
 /**
- * 通用 HTTP 文生视频适配器。约定：
+ * 通用 HTTP 文生/图生视频适配器。约定：
  *  - POST {baseUrl}{submitPath}  JSON {model, prompt, duration_sec, aspect_ratio}
+ *    图生视频时额外携带 image（首帧/主参考图，data URL）与
+ *    reference_images（[{role, name, image}]，角色/道具参考图），
  *    → 立即返回 video_url，或返回 {id}/{task_id} 供轮询；
  *  - GET {baseUrl}{pollPath}（{id} 替换为任务 ID）
  *    → {status, video_url}，状态 succeeded/failed 等；
@@ -305,7 +350,32 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   ): Promise<GeneratedClip> {
     const composed = this.withTimeout(signal);
     if (composed.aborted) throw abortReason(composed);
-    this.logger.info(`AI 画面生成：${this.model}，${request.durationSec.toFixed(1)}s`);
+    const references = request.references ?? [];
+    const cache = new Map<string, string>();
+    const dataUrlFor = async (file: string): Promise<string> => {
+      const cached = cache.get(file);
+      if (cached) return cached;
+      const dataUrl = await readImageDataUrl(file);
+      cache.set(file, dataUrl);
+      return dataUrl;
+    };
+
+    const image = request.image ? await dataUrlFor(request.image) : undefined;
+    const referenceImages =
+      references.length > 0
+        ? await Promise.all(
+            references.map(async (reference) => ({
+              role: reference.role,
+              name: reference.name,
+              image: await dataUrlFor(reference.file),
+            })),
+          )
+        : [];
+    this.logger.info(
+      `AI 画面生成${image ? "（图生视频）" : ""}：${this.model}，${request.durationSec.toFixed(1)}s${
+        referenceImages.length > 0 ? `，${referenceImages.length} 张参考图` : ""
+      }`,
+    );
     const submitUrl = `${this.baseUrl}${this.settings.submitPath}`;
     let taskId: string | undefined;
     let submitted = false;
@@ -320,6 +390,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
             prompt: request.prompt,
             duration_sec: request.durationSec,
             aspect_ratio: "9:16",
+            ...(image ? { image } : {}),
+            ...(referenceImages.length > 0 ? { reference_images: referenceImages } : {}),
           }),
         },
         composed,
