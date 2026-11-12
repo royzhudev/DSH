@@ -295,6 +295,10 @@ test("HTTP 视频：识别聚合平台常见的嵌套与数组返回结构", asy
     const custom = await run({ data: { weird: { addr: "/files/clip.mp4" } } }, "data.weird.addr");
     assert.equal(custom.generated.durationSec > 0.5, true);
 
+    // 通用字段里带视频扩展名的链接也能识别（{urls: ["...mp4"]}）
+    const genericUrlArray = await run({ data: { urls: ["/files/clip.mp4"] } });
+    assert.equal(genericUrlArray.generated.durationSec > 0.5, true);
+
     // 点号路径支持数组下标
     const indexed = await run(
       { content: { clips: [{ file: { link: "/files/clip.mp4" } }] } },
@@ -328,7 +332,7 @@ test("HTTP 视频：任务完成却没解析到地址时，提示可配置视频
       const url = String(input);
       if (init?.method === "POST") return json({ task_id: "task-nourl" });
       if (url.includes("/v1/videos/generations/task-nourl")) {
-        return json({ data: { status: "completed", weird: { somewhere: "/files/clip.mp4" } } });
+        return json({ data: { status: "completed", weird: { somewhere: "/files/opaque-clip" } } });
       }
       return new Response("{}", { status: 404 });
     };

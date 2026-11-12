@@ -99,9 +99,12 @@ function findVideoUrl(json: unknown): string | undefined {
     const url = raw.trim();
     if (!isUrlLike(url)) return;
     const lower = key.toLowerCase();
+    // 链接本身带视频扩展名时也算候选，兼容 {urls: ["...mp4"]} 这类通用字段。
+    const looksLikeVideo = /\.(mp4|mov|webm|mkv|m4v)(\?|$)/i.test(url);
     let score = 0;
-    if (VIDEO_URL_KEYS.has(lower)) score = 3;
-    else if (GENERIC_URL_KEYS.has(lower) || CONTAINER_KEYS.has(lower)) score = 2;
+    if (VIDEO_URL_KEYS.has(lower)) score = 4;
+    else if (GENERIC_URL_KEYS.has(lower) || CONTAINER_KEYS.has(lower)) score = 3;
+    else if (looksLikeVideo) score = 2;
     else return;
     if (!best || score > best.score) best = { url, score };
   };
@@ -117,6 +120,14 @@ function findVideoUrl(json: unknown): string | undefined {
       if (NON_VIDEO_KEY.test(key)) continue;
       if (typeof child === "string") {
         consider(key, child);
+        continue;
+      }
+      if (Array.isArray(child)) {
+        // 兼容 {urls: ["...mp4"]}：数组里的字符串沿用父级字段名参与判断
+        for (const item of child) {
+          if (typeof item === "string") consider(key, item);
+          else walk(item, depth + 1);
+        }
         continue;
       }
       walk(child, depth + 1);
