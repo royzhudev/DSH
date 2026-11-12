@@ -38,47 +38,78 @@ function isUrlLike(value: string): boolean {
   return /^https?:\/\//i.test(value) || value.startsWith("/") || value.startsWith("./") || value.startsWith("../");
 }
 
-function pickVideoUrl(json: unknown): string | undefined {
-  if (!isRecord(json)) return undefined;
-  const direct = pickString(json, ["video_url", "videoUrl", "url", "output", "video"]);
-  if (direct && isUrlLike(direct)) return direct;
-  const data = json.data;
-  if (isRecord(data)) {
-    const nested = pickString(data, ["video_url", "videoUrl", "url", "output"]);
-    if (nested && isUrlLike(nested)) return nested;
-    if (isRecord(data.video)) {
-      const inVideo = pickString(data.video, ["url", "video_url", "download_url"]);
-      if (inVideo && isUrlLike(inVideo)) return inVideo;
+const MAX_SCAN_DEPTH = 6;
+const IMAGE_HINTS = /thumb|poster|cover|image|img|pic|avatar|icon|qrcode/i;
+const VIDEO_HINTS = /video|mp4|download|play|file|asset|output|media|result/i;
+
+/** 广度优先遍历响应中的所有对象（含数组元素），兼容聚合平台的各种包装与嵌套。 */
+function scanRecords(json: unknown, maxLevel = MAX_SCAN_DEPTH): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  const queue: Array<{ node: unknown; level: number }> = [{ node: json, level: 0 }];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.level > maxLevel) continue;
+    const node = current.node;
+    if (Array.isArray(node)) {
+      for (const item of node.slice(0, 20)) queue.push({ node: item, level: current.level + 1 });
+      continue;
     }
-    if (isRecord(data.result)) {
-      const inResult = pickString(data.result, ["video_url", "url", "output"]);
-      if (inResult && isUrlLike(inResult)) return inResult;
+    if (!isRecord(node)) continue;
+    records.push(node);
+    for (const value of Object.values(node)) {
+      if (typeof value === "object" && value !== null) {
+        queue.push({ node: value, level: current.level + 1 });
+      }
     }
   }
-  return undefined;
+  return records;
+}
+
+/**
+ * 找成片地址。不同聚合平台把链接放在 video_url、data[0].url、output.video_url、
+ * result.videos[].url 等位置，这里统一扫描并按“像不像视频链接”打分，避免字段名不兼容。
+ */
+function pickVideoUrl(json: unknown): string | undefined {
+  let best: { url: string; score: number } | undefined;
+  for (const record of scanRecords(json)) {
+    for (const [key, value] of Object.entries(record)) {
+      if (typeof value !== "string" || !isUrlLike(value)) continue;
+      const lowerKey = key.toLowerCase();
+      const lowerValue = value.toLowerCase();
+      let score = 0;
+      if (VIDEO_HINTS.test(lowerKey)) score += 6;
+      if (/\.(mp4|mov|webm|mkv|m4v)(\?|$)/.test(lowerValue)) score += 5;
+      if (/^(url|uri|link|src|href|path|output|file|download_url|video_url|videoUrl)$/.test(lowerKey)) score += 3;
+      if (IMAGE_HINTS.test(lowerKey)) score -= 12;
+      if (/\.(jpg|jpeg|png|webp|gif|bmp|svg)(\?|$)/.test(lowerValue)) score -= 12;
+      if (score > 0 && (!best || score > best.score)) best = { url: value, score };
+    }
+  }
+  return best?.url;
 }
 
 function pickTaskId(json: unknown): string | undefined {
-  if (!isRecord(json)) return undefined;
   const flat = unwrap(json);
   return pickString(flat, ["id", "task_id", "taskId", "job_id", "jobId", "request_id"]);
 }
 
+/** 状态字段同样可能出现在 data、数组元素或更深层的包装里。 */
 function pickStatus(json: unknown): string {
-  if (!isRecord(json)) return "";
-  const flat = unwrap(json);
-  const value = flat.status ?? flat.state ?? flat.task_status;
-  return typeof value === "string" ? value.toLowerCase() : "";
+  for (const record of scanRecords(json, 3)) {
+    const value = record.status ?? record.state ?? record.task_status;
+    if (typeof value === "string" && value.trim()) return value.trim().toLowerCase();
+  }
+  return "";
 }
 
 function pickError(json: unknown): string | undefined {
-  if (!isRecord(json)) return undefined;
-  const flat = unwrap(json);
-  const message = flat.error ?? flat.message ?? flat.error_message ?? flat.fail_reason;
-  if (typeof message === "string" && message.trim()) return message.trim();
-  if (isRecord(message)) {
-    const nested = pickString(message, ["message", "detail", "reason"]);
-    if (nested) return nested;
+  for (const record of scanRecords(json, 3)) {
+    const message = record.error ?? record.message ?? record.error_message ?? record.fail_reason;
+    if (typeof message === "string" && message.trim()) return message.trim();
+    if (isRecord(message)) {
+      const nested = pickString(message, ["message", "detail", "reason"]);
+      if (nested) return nested;
+    }
   }
   return undefined;
 }
@@ -248,10 +279,10 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         });
       }
       if (SUCCESS_STATES.has(status)) {
-        throw new AppError("画面生成任务已完成，但响应中没有视频地址", {
-          code: "VIDEOGEN_INVALID_RESPONSE",
-          status: 502,
-        });
+        throw new AppError(
+          `画面生成任务已完成，但响应里没有可用的视频地址：${JSON.stringify(json).slice(0, 300)}`,
+          { code: "VIDEOGEN_INVALID_RESPONSE", status: 502 },
+        );
       }
       await sleep(this.settings.pollIntervalMs);
     }
@@ -325,6 +356,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     if (error instanceof AppError && error.status < 500) return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_TASK_FAILED") return error;
     if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
+    // 任务已完成却找不到成片地址：属于确定的解析失败，再次轮询也不会变好。
+    if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE") return error;
     if (!options.submitted) {
       return new VideoGenPendingError({
         message:
