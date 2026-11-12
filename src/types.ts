@@ -1,5 +1,7 @@
 export type ScriptProviderName = "auto" | "openai" | "offline";
 export type TtsProviderName = "edge" | "openai" | "silent";
+/** 画面来源：none 只使用素材库；http 调用可配置的 AI 视频生成接口。 */
+export type VideoGenProviderName = "none" | "http";
 
 /** 一个分镜：口播文案 + 画面检索关键词。 */
 export interface ScriptSegment {
@@ -60,6 +62,8 @@ export interface SegmentPlan {
   index: number;
   segment: ScriptSegment;
   material: Material | null;
+  /** AI 生成的分镜画面；存在时优先于素材。 */
+  generated?: GeneratedClip;
   tts: TtsResult;
   durationSec: number;
   /** 相对当前分镜的本地时间轴。 */
@@ -84,6 +88,12 @@ export interface SegmentResult {
   durationSec: number;
   startSec: number;
   subtitleCues: number;
+  /** 该分镜画面来源：素材库命中、AI 生成或渐变背景。 */
+  source: "material" | "generated" | "background";
+  generated?: {
+    provider: string;
+    model: string;
+  };
 }
 
 export interface PipelineResult {
@@ -93,6 +103,7 @@ export interface PipelineResult {
   finishedAt: string;
   durationSec: number;
   videoPath: string;
+  posterPath?: string;
   srtPath: string;
   scriptPath: string;
   resultPath: string;
@@ -106,6 +117,7 @@ export type JobStage =
   | "script"
   | "materials"
   | "tts"
+  | "videogen"
   | "render"
   | "concat"
   | "done";
@@ -172,6 +184,37 @@ export interface MaterialSettings {
   allowUnmatched: boolean;
 }
 
+/**
+ * 可选的 AI 画面生成。provider 为 http 时，按下方约定调用用户配置的
+ * 文生视频 / 图生视频服务，生成的分镜画面会替代素材匹配结果。
+ */
+export interface VideoGenSettings {
+  provider: VideoGenProviderName;
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  /** 提交任务路径，默认 /v1/videos/generations。 */
+  submitPath: string;
+  /** 查询任务路径模板，{id} 会替换为任务 ID。 */
+  pollPath: string;
+  pollIntervalMs: number;
+  timeoutMs: number;
+  /** 每个分镜请求生成的视频时长。 */
+  clipDurationSec: number;
+  /** 生成失败时是否回退到素材库/渐变背景。 */
+  fallbackToMaterials: boolean;
+}
+
+/** 抖音开放平台应用配置；clientKey/clientSecret 需在开放平台申请。 */
+export interface DouyinSettings {
+  clientKey: string;
+  clientSecret?: string;
+  /** 为空时使用 http://<host>:<port>/api/douyin/callback。 */
+  redirectUri: string;
+  scope: string;
+  apiBaseUrl: string;
+}
+
 export interface ServerSettings {
   host: string;
   port: number;
@@ -183,12 +226,27 @@ export interface AppConfig {
   workDir: string;
   libraryDir: string;
   cacheDir: string;
+  /** 网页设置持久化文件；由 loadConfig 解析为绝对路径。 */
+  settingsFile: string;
   video: VideoSettings;
   script: ScriptSettings;
   tts: TtsSettings;
   subtitles: SubtitleStyle;
   materials: MaterialSettings;
+  videoGen: VideoGenSettings;
+  douyin: DouyinSettings;
   server: ServerSettings;
+}
+
+/** 单次任务可覆盖的创作参数，不影响全局设置。 */
+export interface JobOptions {
+  targetDurationSec?: number;
+  maxSegments?: number;
+  ttsProvider?: TtsProviderName;
+  voice?: string;
+  subtitlesEnabled?: boolean;
+  videoGenEnabled?: boolean;
+  allowUnmatched?: boolean;
 }
 
 export interface ScriptRequest {
@@ -212,4 +270,46 @@ export interface TtsProvider {
   readonly name: TtsProviderName;
   readonly voice: string;
   synthesize(request: TtsRequest, signal?: AbortSignal): Promise<TtsResult>;
+}
+export interface VideoGenRequest {
+  prompt: string;
+  durationSec: number;
+}
+
+export interface GeneratedClip {
+  /** 生成视频的本地绝对路径。 */
+  file: string;
+  durationSec: number;
+  provider: string;
+  model: string;
+}
+
+export interface VideoGenProvider {
+  readonly name: string;
+  readonly model: string;
+  generate(request: VideoGenRequest, outputDir: string, signal?: AbortSignal): Promise<GeneratedClip>;
+}
+
+/** 抖音授权令牌；持久化在 .cache/douyin-token.json，权限 0600。 */
+export interface DouyinToken {
+  accessToken: string;
+  refreshToken: string;
+  openId: string;
+  scope: string;
+  expiresAt: string;
+  refreshExpiresAt?: string;
+  nickname?: string;
+  avatar?: string;
+  updatedAt: string;
+}
+
+export interface PublishRecord {
+  id: string;
+  jobId: string;
+  topic: string;
+  text: string;
+  itemId: string;
+  videoId: string;
+  coverTsp?: number;
+  createdAt: string;
 }

@@ -1,12 +1,17 @@
 export type {
   AppConfig,
+  DouyinToken,
+  GeneratedClip,
+  JobOptions,
   JobProgress,
   Material,
   PipelineResult,
+  PublishRecord,
   Script,
   ScriptSegment,
   SegmentResult,
   TtsResult,
+  VideoGenProvider,
   VideoInfo,
 } from "./types.js";
 export { loadConfig, summarizeConfig, DEFAULT_CONFIG } from "./config.js";
@@ -15,5 +20,8 @@ export { MaterialLibrary } from "./materials/library.js";
 export { matchMaterial } from "./materials/match.js";
 export { buildSubtitleCues, renderAss, renderSrt } from "./subtitles/ass.js";
 export { createVideoServer, startServer } from "./server/server.js";
+export { SettingsStore } from "./server/settings.js";
+export { DouyinClient } from "./publish/douyin.js";
+export { createVideoGenProvider } from "./videogen/index.js";
 export { createLogger, silentLogger } from "./logger.js";
 export { AppError } from "./errors.js";

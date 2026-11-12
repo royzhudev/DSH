@@ -11,6 +11,8 @@ export interface RenderSegmentOptions {
   index: number;
   segment: ScriptSegment;
   material: Material | null;
+  /** 直接指定画面文件（AI 生成的视频），优先于 material。 */
+  materialPath?: string;
   tts: TtsResult;
   durationSec: number;
   cues: SubtitleCue[];
@@ -45,10 +47,10 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
   let inputArgs: string[];
   let videoFilter: string;
 
-  if (material) {
-    const materialPath = path.join(config.libraryDir, material.file);
-    if (material.type === "image") {
-      inputArgs = ["-i", materialPath];
+  const visualPath = options.materialPath ?? (material ? path.join(config.libraryDir, material.file) : null);
+  if (visualPath) {
+    if (material?.type === "image") {
+      inputArgs = ["-i", visualPath];
       videoFilter = [
         `scale=${config.video.width * 2}:${config.video.height * 2}:force_original_aspect_ratio=increase`,
         `crop=${config.video.width * 2}:${config.video.height * 2}`,
@@ -56,7 +58,7 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
         "setsar=1",
       ].join(",");
     } else {
-      inputArgs = ["-stream_loop", "-1", "-i", materialPath];
+      inputArgs = ["-stream_loop", "-1", "-i", visualPath];
       videoFilter = [
         `scale=${config.video.width}:${config.video.height}:force_original_aspect_ratio=increase`,
         `crop=${config.video.width}:${config.video.height}`,
@@ -143,7 +145,9 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
     outputFile,
   ];
 
-  logger.debug(`渲染分镜 ${index}：${material ? material.file : "渐变背景"}，${durationSec.toFixed(2)}s`);
+  logger.debug(
+    `渲染分镜 ${index}：${options.materialPath ? "AI 生成画面" : material ? material.file : "渐变背景"}，${durationSec.toFixed(2)}s`,
+  );
   await runFfmpeg(args, { cwd: segDir, timeoutMs: 10 * 60 * 1000 });
   return { index, file: outputFile, durationSec };
 }

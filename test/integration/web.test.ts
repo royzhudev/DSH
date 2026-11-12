@@ -1,0 +1,292 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import http from "node:http";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { startServer } from "../../src/server/server.js";
+import { silentLogger } from "../../src/logger.js";
+import { generateTestClip, generateTestImage, makeTempDir, makeTestConfig } from "../helpers.js";
+
+const WEB_DIR = path.resolve(fileURLToPath(new URL("../../web", import.meta.url)));
+
+interface DouyinMock {
+  url: string;
+  calls: Array<{ path: string; query: URLSearchParams; contentType: string }>;
+  close(): Promise<void>;
+}
+
+async function startDouyinMock(): Promise<DouyinMock> {
+  const calls: DouyinMock["calls"] = [];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    calls.push({
+      path: url.pathname,
+      query: url.searchParams,
+      contentType: String(req.headers["content-type"] ?? ""),
+    });
+    const send = (value: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (url.pathname === "/oauth/access_token/" || url.pathname === "/oauth/refresh_token/") {
+      send({
+        data: {
+          access_token: "access-1",
+          refresh_token: "refresh-1",
+          open_id: "open-1",
+          scope: "user_info,video.create",
+          expires_in: 3600,
+          refresh_expires_in: 7200,
+          error_code: 0,
+        },
+      });
+      return;
+    }
+    if (url.pathname === "/oauth/userinfo/") {
+      send({ data: { nickname: "测试抖音号", avatar: "", error_code: 0 } });
+      return;
+    }
+    if (url.pathname === "/api/douyin/v1/video/upload_video/") {
+      send({ data: { error_code: 0, video: { video_id: "video-1" } } });
+      return;
+    }
+    if (url.pathname === "/api/douyin/v1/video/create_video/") {
+      send({ data: { error_code: 0, item_id: "item-1" } });
+      return;
+    }
+    send({ data: { error_code: 404, description: "not found" } });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    calls,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.();
+      }),
+  };
+}
+
+function jsonRequest(url: string, body: unknown, method = "POST"): Promise<Response> {
+  return fetch(url, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+test(
+  "网页与 API：静态资源、设置、素材、脚本预览、任务与抖音发布",
+  { timeout: 240_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const douyin = await startDouyinMock();
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      douyin: {
+        clientKey: "client-key",
+        clientSecret: "client-secret",
+        redirectUri: "http://127.0.0.1:8787/api/douyin/callback",
+        scope: "user_info,video.create",
+        apiBaseUrl: douyin.url,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      await douyin.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    const home = await fetch(`${app.url}/`);
+    assert.equal(home.status, 200);
+    assert.match(home.headers.get("content-type") ?? "", /text\/html/);
+    assert.match(await home.text(), /视频创作智能体/);
+
+    const css = await fetch(`${app.url}/styles.css`);
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get("content-type") ?? "", /text\/css/);
+    const script = await fetch(`${app.url}/js/app.js`);
+    assert.equal(script.status, 200);
+    assert.match(await script.text(), /renderCreate/);
+
+    const apiIndex = (await (await fetch(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
+    assert.equal(apiIndex.name, "video-agent");
+    assert.ok(apiIndex.endpoints);
+
+    const settingsResponse = await fetch(`${app.url}/api/settings`);
+    const initial = (await settingsResponse.json()) as {
+      settings: { script: { apiKeySet: boolean; provider: string; model: string } };
+    };
+    assert.equal(initial.settings.script.apiKeySet, false);
+    assert.equal(initial.settings.script.provider, "offline");
+
+    const putResponse = await jsonRequest(`${app.url}/api/settings`, {
+      script: { provider: "offline", model: "ui-model" },
+      tts: { provider: "silent" },
+    }, "PUT");
+    assert.equal(putResponse.status, 200, await putResponse.clone().text());
+    const updated = (await putResponse.json()) as {
+      settings: { script: { model: string }; tts: { provider: string } };
+    };
+    assert.equal(updated.settings.script.model, "ui-model");
+    assert.equal(updated.settings.tts.provider, "silent");
+    assert.equal(config.script.model, "ui-model");
+
+    const secretPut = await jsonRequest(`${app.url}/api/settings`, {
+      script: { apiKey: "sk-test-abcdef" },
+    }, "PUT");
+    assert.equal(secretPut.status, 200);
+    const settingsText = await (await fetch(`${app.url}/api/settings`)).text();
+    assert.equal(settingsText.includes("sk-test-abcdef"), false);
+    assert.equal(settingsText.includes('"apiKeySet": true'), true);
+
+    const invalid = await jsonRequest(`${app.url}/api/settings`, {
+      videoGen: { provider: "http" },
+    }, "PUT");
+    assert.equal(invalid.status, 400);
+
+    const scriptTest = await jsonRequest(`${app.url}/api/settings/test`, { kind: "script" });
+    assert.equal(scriptTest.status, 200);
+    assert.equal(((await scriptTest.json()) as { provider: string }).provider, "offline");
+    const ttsTest = await jsonRequest(`${app.url}/api/settings/test`, { kind: "tts" });
+    assert.equal(ttsTest.status, 200);
+    const ttsResult = (await ttsTest.json()) as { provider: string; durationSec: number };
+    assert.equal(ttsResult.provider, "silent");
+    assert.equal(ttsResult.durationSec >= 0, true);
+
+    const clip = path.join(dir, "source", "city-night.mp4");
+    await generateTestClip(clip, { durationSec: 1.5, size: "160x160" });
+    const form = new FormData();
+    form.append("file", new Blob([await fs.readFile(clip)], { type: "video/mp4" }), "city-night.mp4");
+    form.append("tags", "城市,夜景");
+    form.append("title", "城市夜景空镜");
+    const uploadResponse = await fetch(`${app.url}/api/materials`, { method: "POST", body: form });
+    assert.equal(uploadResponse.status, 201, await uploadResponse.clone().text());
+    const uploaded = (await uploadResponse.json()) as {
+      material: { id: string; tags: string[]; url: string };
+    };
+    assert.equal(uploaded.material.tags.includes("城市"), true);
+    assert.equal(uploaded.material.tags.some((tag) => /^[0-9a-f]{6}$/.test(tag)), false);
+
+    const imagePath = path.join(dir, "source", "城市夜景.jpg");
+    await generateTestImage(imagePath);
+    const imageForm = new FormData();
+    imageForm.append("file", new Blob([await fs.readFile(imagePath)], { type: "image/jpeg" }), "城市夜景.jpg");
+    imageForm.append("title", "城市夜景海报");
+    const imageUpload = await fetch(`${app.url}/api/materials`, { method: "POST", body: imageForm });
+    assert.equal(imageUpload.status, 201, await imageUpload.clone().text());
+    const imageMaterial = (await imageUpload.json()) as { material: { tags: string[] } };
+    assert.equal(imageMaterial.material.tags.includes("城市夜景"), true);
+    assert.equal(imageMaterial.material.tags.some((tag) => tag.includes("å")), false);
+
+    const fileResponse = await fetch(`${app.url}${uploaded.material.url}`, {
+      headers: { range: "bytes=0-99" },
+    });
+    assert.equal(fileResponse.status, 206);
+    assert.equal(fileResponse.headers.get("content-type"), "video/mp4");
+    assert.equal((await fileResponse.arrayBuffer()).byteLength, 100);
+
+    const previewResponse = await jsonRequest(`${app.url}/api/scripts/generate`, {
+      topic: "城市夜景",
+      targetDurationSec: 10,
+      maxSegments: 2,
+    });
+    assert.equal(previewResponse.status, 200);
+    const preview = (await previewResponse.json()) as {
+      script: { segments: Array<{ narration: string; keywords: string[] }> };
+      provider: string;
+    };
+    assert.equal(preview.provider, "offline");
+    assert.equal(preview.script.segments.length, 2);
+
+    const createResponse = await jsonRequest(`${app.url}/api/videos`, {
+      topic: "城市夜景",
+      targetDurationSec: 10,
+      maxSegments: 2,
+      ttsProvider: "silent",
+      subtitlesEnabled: true,
+    });
+    assert.equal(createResponse.status, 202, await createResponse.clone().text());
+    const created = (await createResponse.json()) as { id: string };
+    let job: {
+      id: string;
+      state: string;
+      error?: string;
+      videoUrl?: string;
+      posterUrl?: string;
+      script?: { title: string };
+      segments?: Array<{ source: string; material: unknown }>;
+    } = created as never;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      job = (await (await fetch(`${app.url}/api/videos/${created.id}`)).json()) as typeof job;
+      if (job.state === "succeeded" || job.state === "failed") break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    assert.equal(job.state, "succeeded", job.error);
+    assert.ok(job.script?.title);
+    assert.equal(job.segments?.length, 2);
+    assert.equal(job.segments?.[0]?.source, "material");
+    assert.ok(job.segments?.[0]?.material);
+
+    const videoRange = await fetch(`${app.url}${job.videoUrl}`, { headers: { range: "bytes=0-99" } });
+    assert.equal(videoRange.status, 206);
+    assert.equal((await videoRange.arrayBuffer()).byteLength, 100);
+
+    assert.ok(job.posterUrl);
+    const poster = await fetch(`${app.url}${job.posterUrl}`);
+    assert.equal(poster.status, 200);
+    assert.equal(poster.headers.get("content-type"), "image/jpeg");
+    assert.equal((await poster.arrayBuffer()).byteLength > 500, true);
+
+    const douyinStatus = (await (await fetch(`${app.url}/api/douyin/status`)).json()) as {
+      configured: boolean;
+      authorized: boolean;
+    };
+    assert.equal(douyinStatus.configured, true);
+    assert.equal(douyinStatus.authorized, false);
+
+    const authorize = (await (await fetch(`${app.url}/api/douyin/authorize`)).json()) as { url: string };
+    const state = new URL(authorize.url).searchParams.get("state");
+    assert.ok(state);
+    const callback = await fetch(`${app.url}/api/douyin/callback?code=code-1&state=${state}`, {
+      redirect: "manual",
+    });
+    assert.equal(callback.status, 302);
+    assert.match(callback.headers.get("location") ?? "", /douyin=connected/);
+
+    const authorized = (await (await fetch(`${app.url}/api/douyin/status`)).json()) as {
+      authorized: boolean;
+      token?: { nickname?: string };
+    };
+    assert.equal(authorized.authorized, true);
+    assert.equal(authorized.token?.nickname, "测试抖音号");
+
+    const publishResponse = await jsonRequest(`${app.url}/api/videos/${job.id}/publish`, {
+      text: "城市夜景测试",
+      coverTsp: 1000,
+    });
+    assert.equal(publishResponse.status, 201, await publishResponse.clone().text());
+    const published = (await publishResponse.json()) as { publish: { itemId: string; videoId: string } };
+    assert.equal(published.publish.itemId, "item-1");
+    assert.equal(published.publish.videoId, "video-1");
+
+    const publishes = (await (await fetch(`${app.url}/api/publishes`)).json()) as {
+      publishes: Array<{ itemId: string }>;
+    };
+    assert.equal(publishes.publishes.length, 1);
+    assert.equal(publishes.publishes[0]!.itemId, "item-1");
+
+    await fetch(`${app.url}/api/douyin/disconnect`, { method: "POST" });
+    const publishAgain = await jsonRequest(`${app.url}/api/videos/${job.id}/publish`, {
+      text: "再次发布",
+    });
+    assert.equal(publishAgain.status, 401);
+  },
+);
