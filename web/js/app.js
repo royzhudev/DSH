@@ -67,6 +67,9 @@ const STATUS_CLASS = {
   failed: "pill-danger",
 };
 
+/** 上一次未出片的 AI 画面测试任务；再次点击时复用它，避免重复扣费。 */
+let pendingVideoTest = null;
+
 const state = {
   user: null,
   permissions: [],
@@ -1894,7 +1897,7 @@ async function renderSettings() {
             </div>
             <div class="test-row">
               <button class="btn btn-ghost btn-sm" type="button" data-test="videogen">生成测试视频</button>
-              <span class="test-result" id="test-videogen-result">测试使用已保存的配置，会真实生成视频并可能消耗额度</span>
+              <span class="test-result" id="test-videogen-result">测试使用已保存的配置，会真实生成视频并可能消耗额度；未完成时会复用同一任务继续查询</span>
             </div>
             <div id="test-videogen-preview"></div>
           </div>
@@ -2126,9 +2129,23 @@ async function testProvider(kind, button) {
   try {
     const body = { kind };
     if (kind === "videogen") {
-      body.prompt = document.getElementById("videogen-test-prompt")?.value ?? "";
-      body.durationSec = Number(document.getElementById("videogen-test-duration")?.value ?? 5);
-      if (result) result.textContent = "生成中…（可能需要 1–2 分钟）";
+      const prompt = document.getElementById("videogen-test-prompt")?.value ?? "";
+      const durationSec = Number(document.getElementById("videogen-test-duration")?.value ?? 5);
+      body.prompt = prompt;
+      body.durationSec = durationSec;
+      const reusable =
+        pendingVideoTest &&
+        pendingVideoTest.taskId &&
+        pendingVideoTest.prompt === prompt.trim() &&
+        pendingVideoTest.durationSec === durationSec;
+      if (reusable) {
+        body.resumeTaskId = pendingVideoTest.taskId;
+        if (result) {
+          result.textContent = `继续查询上次已提交的任务（${pendingVideoTest.taskId}），不会重复提交…`;
+        }
+      } else if (result) {
+        result.textContent = "生成中…（可能需要 1–2 分钟）";
+      }
     }
     const data = await api("/api/settings/test", { method: "POST", body });
     if (result) {
@@ -2137,10 +2154,31 @@ async function testProvider(kind, button) {
       } else if (kind === "tts") {
         result.textContent = `连接成功：${data.provider} / ${data.voice}，${Number(data.durationSec).toFixed(1)} 秒`;
       } else if (kind === "videogen") {
-        result.textContent = `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒`;
-        if (preview && data.videoUrl) {
-          preview.innerHTML = `<video class="test-video" controls playsinline preload="metadata" src="${attr(data.videoUrl)}"></video>`;
+        // 已提交但还没出片：不要显示成“失败”，也不能让用户误以为需要重新提交。
+        if (data.pending) {
+          pendingVideoTest = data.taskId
+            ? {
+                taskId: data.taskId,
+                prompt: String(data.prompt ?? "").trim(),
+                durationSec: Number(data.durationSec),
+              }
+            : null;
+          button.textContent = data.taskId ? "继续等待这个任务" : "重新生成测试视频";
+          result.textContent = data.submitted
+            ? `${data.message} 再次点击“继续等待这个任务”会接着查询，不会重复扣费。`
+            : data.message;
+        } else {
+          pendingVideoTest = null;
+          button.textContent = "生成测试视频";
+          result.textContent = data.reused
+            ? `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒（复用之前已提交的任务，未重复扣费）`
+            : `生成成功：${data.model}，${Number(data.durationSec).toFixed(1)} 秒`;
+          if (preview && data.videoUrl) {
+            preview.innerHTML = `<video class="test-video" controls playsinline preload="metadata" src="${attr(data.videoUrl)}"></video>`;
+          }
         }
+        result.className = data.pending ? "test-result warn" : "test-result ok";
+        return;
       } else if (kind === "douyin") {
         result.textContent = `连接成功：应用凭证有效，client_token 有效期 ${Number(data.expiresInSec) || 0} 秒`;
       } else {

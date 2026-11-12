@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
-import { HttpVideoGenProvider } from "../../src/videogen/http.js";
+import { HttpVideoGenProvider, VideoGenPendingError } from "../../src/videogen/http.js";
 import { createVideoGenProvider } from "../../src/videogen/index.js";
 import { AppError } from "../../src/errors.js";
 import { silentLogger } from "../../src/logger.js";
@@ -35,11 +35,23 @@ async function startVideoMock(): Promise<MockVideoServer> {
         send({ data: { video_url: "/files/clip.mp4" } });
         return;
       }
+      if (parsed.prompt.includes("slow")) {
+        send({ task_id: "task-slow" });
+        return;
+      }
       send({ task_id: "task-1" });
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-1") {
       send({ data: { status: "succeeded", video_url: "/files/clip.mp4" } });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-slow") {
+      send(
+        process.env.VIDEOGEN_SLOW_DONE === "1"
+          ? { data: { status: "succeeded", video_url: "/files/clip.mp4" } }
+          : { data: { status: "running" } },
+      );
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-fail") {
@@ -113,6 +125,26 @@ test("HTTP 文生视频：提交、轮询、下载与 ffprobe 校验", async () 
       provider.generate({ prompt: "fail 城市夜景", durationSec: 3 }, path.join(dir, "gen")),
       (error: unknown) => error instanceof AppError && error.code === "VIDEOGEN_TASK_FAILED",
     );
+
+    // 超时后必须给出任务 ID 让调用方复用，而不是当成生成失败。
+    const impatient = new HttpVideoGenProvider(
+      { ...config.videoGen, timeoutMs: 700, pollIntervalMs: 100 },
+      silentLogger,
+    );
+    await assert.rejects(
+      impatient.generate({ prompt: "slow 城市夜景", durationSec: 3 }, path.join(dir, "gen")),
+      (error: unknown) =>
+        error instanceof VideoGenPendingError &&
+        error.submitted === true &&
+        error.taskId === "task-slow",
+    );
+
+    // 复用同一个任务继续查询，不再提交新的（付费）生成请求。
+    process.env.VIDEOGEN_SLOW_DONE = "1";
+    const resumed = await impatient.resume("task-slow", path.join(dir, "gen"));
+    assert.equal(resumed.provider, "http");
+    assert.equal(resumed.durationSec > 0.5, true);
+    delete process.env.VIDEOGEN_SLOW_DONE;
 
     const disabled = makeTestConfig(dir);
     assert.equal(createVideoGenProvider(disabled, silentLogger), null);

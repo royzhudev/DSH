@@ -1675,6 +1675,10 @@ svg {
   color: var(--danger);
 }
 
+.test-result.warn {
+  color: var(--warning);
+}
+
 .test-generator {
   margin-top: 14px;
   padding-top: 14px;

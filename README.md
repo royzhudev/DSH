@@ -76,6 +76,11 @@ node dist/cli.js create --topic "城市夜景"
 
 脚本模型、配音、AI 画面生成和抖音开放平台四个分组都有“测试”按钮，使用**已保存**的配置验证连通性：脚本/配音会实际生成一次内容；AI 画面可输入测试描述并选择 3 秒或 5 秒，实际生成并预览一段测试视频（会消耗额度，测试视频缓存在 `.cache/settings-test`，只保留最近 20 条）；抖音会用应用凭证换取 `client_token`。
 
+画面生成是付费操作，因此测试的超时处理遵守两条规则：
+
+- **超时不算失败**：一次测试请求最多等待 3 分钟，超过后接口仍返回 `200` 并带 `pending: true` 与任务 ID，提示“已提交、平台可能已扣费”，而不是报错；
+- **不重复提交**：任务没出片时，服务端会记住它（30 分钟内有效），同一配置、描述与时长再次点击测试会复用该任务继续查询；也可以显式传 `resumeTaskId`。只有拿到成片或任务真正失败后才清除记录。
+
 ## 用户与权限
 
 - **首次初始化**：没有 `data/users.json` 时，网页会显示“创建管理员账号”。创建后需要登录才能使用工作台。
@@ -222,7 +227,7 @@ pnpm dev serve --port 8787
 | `GET/POST` | `/api/users` | 用户列表 / 添加用户（仅管理员） |
 | `PATCH/DELETE` | `/api/users/:id` | 修改（密码/角色/权限/禁用）/ 删除用户（仅管理员） |
 | `GET/PUT` | `/api/settings` | 读取/保存设置（密钥只返回是否已配置；保存需要 `settings` 权限） |
-| `POST` | `/api/settings/test` | 测试设置配置，`{"kind":"script"\|"tts"\|"videogen"\|"douyin"}`；`videogen` 可带 `prompt` 与 `durationSec`（3 或 5），返回测试视频地址 |
+| `POST` | `/api/settings/test` | 测试设置配置，`{"kind":"script"\|"tts"\|"videogen"\|"douyin"}`；`videogen` 可带 `prompt`、`durationSec`（3 或 5）与 `resumeTaskId`，返回测试视频地址，或在未出片时返回 `pending` 与 `taskId` |
 | `GET` | `/api/settings/test/video/:name` | 读取最近生成的 AI 画面测试视频（需要 `settings` 权限） |
 | `GET/POST` | `/api/materials` | 素材列表 / 上传（multipart：`file`、`title`、`tags`） |
 | `GET/DELETE` | `/api/materials/:id` | 素材详情 / 删除 |

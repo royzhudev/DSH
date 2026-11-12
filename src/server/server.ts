@@ -21,7 +21,7 @@ import { materialTagPool } from "../materials/match.js";
 import { ensureDir, isInside, sanitizeFilename, sha256 } from "../util/fs.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
-import { HttpVideoGenProvider } from "../videogen/http.js";
+import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
 import { JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
 import {
@@ -627,6 +627,40 @@ async function handleDeleteUser(
 const SETTINGS_TEST_VIDEO_KEEP = 20;
 const DEFAULT_VIDEOGEN_TEST_PROMPT = "一只橘猫在窗台上看雨，电影感，近景";
 
+const SETTINGS_TEST_PENDING_TTL_MS = 30 * 60_000;
+
+interface PendingVideoTest {
+  taskId: string;
+  prompt: string;
+  durationSec: number;
+  model: string;
+  at: number;
+}
+
+/**
+ * 已提交但没在本轮请求内出片的测试任务。
+ * 再次点击测试时复用这些任务继续查询，避免对同一段测试视频重复付费。
+ */
+const pendingVideoTests = new Map<string, PendingVideoTest>();
+
+function settingsTestKey(
+  config: { videoGen: { baseUrl: string; model: string } },
+  prompt: string,
+  durationSec: number,
+): string {
+  return [config.videoGen.baseUrl, config.videoGen.model, durationSec, prompt].join("|");
+}
+
+function takePendingVideoTest(key: string): PendingVideoTest | undefined {
+  const pending = pendingVideoTests.get(key);
+  if (!pending) return undefined;
+  if (Date.now() - pending.at > SETTINGS_TEST_PENDING_TTL_MS) {
+    pendingVideoTests.delete(key);
+    return undefined;
+  }
+  return pending;
+}
+
 /** 测试视频只保留最近若干条，避免长期占用缓存目录。 */
 async function pruneSettingsTestVideos(dir: string): Promise<void> {
   try {
@@ -714,22 +748,61 @@ async function handleSettingsTest(
     const outputDir = path.join(config.cacheDir, "settings-test");
     await ensureDir(outputDir);
     const provider = new HttpVideoGenProvider(config.videoGen, ctx.logger);
-    const generated = await provider.generate(
-      { prompt, durationSec },
-      outputDir,
-      AbortSignal.timeout(Math.min(config.videoGen.timeoutMs, 180_000)),
-    );
-    await pruneSettingsTestVideos(outputDir);
-    sendJson(res, 200, {
-      ok: true,
-      kind,
-      provider: generated.provider,
-      model: generated.model,
-      prompt,
-      durationSec: generated.durationSec,
-      videoUrl: `/api/settings/test/video/${encodeURIComponent(path.basename(generated.file))}`,
-    });
-    return;
+    const key = settingsTestKey(config, prompt, durationSec);
+    // 一次请求内最多等待 3 分钟；超时后任务通常仍在平台侧生成，继续复用而不是重新提交。
+    const budgetMs = Math.min(config.videoGen.timeoutMs, 180_000);
+    const explicitTaskId = (optionalString(body.resumeTaskId) ?? "").trim();
+    const pending = explicitTaskId ? undefined : takePendingVideoTest(key);
+    const resumeTaskId = explicitTaskId || pending?.taskId;
+    try {
+      const generated = resumeTaskId
+        ? await provider.resume(resumeTaskId, outputDir, AbortSignal.timeout(budgetMs))
+        : await provider.generate({ prompt, durationSec }, outputDir, AbortSignal.timeout(budgetMs));
+      pendingVideoTests.delete(key);
+      await pruneSettingsTestVideos(outputDir);
+      sendJson(res, 200, {
+        ok: true,
+        kind,
+        provider: generated.provider,
+        model: generated.model,
+        prompt,
+        durationSec: generated.durationSec,
+        reused: Boolean(resumeTaskId),
+        videoUrl: `/api/settings/test/video/${encodeURIComponent(path.basename(generated.file))}`,
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof VideoGenPendingError)) {
+        pendingVideoTests.delete(key);
+        throw error;
+      }
+      // 已提交但还没出片：不算失败，如实告诉用户并记住任务，避免重复扣费。
+      if (error.taskId) {
+        pendingVideoTests.set(key, {
+          taskId: error.taskId,
+          prompt,
+          durationSec,
+          model: config.videoGen.model,
+          at: Date.now(),
+        });
+      } else {
+        pendingVideoTests.delete(key);
+      }
+      sendJson(res, 200, {
+        ok: true,
+        kind,
+        pending: true,
+        submitted: error.submitted,
+        reused: Boolean(resumeTaskId),
+        taskId: error.taskId ?? null,
+        provider: provider.name,
+        model: config.videoGen.model,
+        prompt,
+        durationSec,
+        message: error.message,
+      });
+      return;
+    }
   }
   if (kind === "douyin") {
     const result = await ctx.douyin.verifyCredentials(AbortSignal.timeout(20_000));

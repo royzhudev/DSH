@@ -439,3 +439,136 @@ test(
     assert.equal(publishAgain.status, 401);
   },
 );
+
+interface SlowVideoGenMock {
+  url: string;
+  state: { done: boolean; submits: number; polls: number };
+  close(): Promise<void>;
+}
+
+/** 第一次查询一直“生成中”，用于验证超时后复用任务而不是重新提交。 */
+async function startSlowVideoGenMock(clipPath: string): Promise<SlowVideoGenMock> {
+  const state = { done: false, submits: 0, polls: 0 };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const send = (value: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.method === "POST" && url.pathname === "/v1/videos/generations") {
+      state.submits += 1;
+      send({ task_id: "task-slow" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-slow") {
+      state.polls += 1;
+      send(
+        state.done
+          ? { data: { status: "succeeded", video_url: "/files/clip.mp4" } }
+          : { data: { status: "running" } },
+      );
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clipPath);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    state,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.();
+      }),
+  };
+}
+
+test(
+  "网页与 API：AI 画面测试超时后复用已提交任务，不重复扣费",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const clip = path.join(dir, "source", "slow-source.mp4");
+    await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+    const mock = await startSlowVideoGenMock(clip);
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      videoGen: {
+        provider: "http",
+        baseUrl: mock.url,
+        model: "slow-model",
+        apiKey: "slow-key",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5_000,
+        clipDurationSec: 3,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      await mock.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+    const payload = { kind: "videogen", prompt: "一只慢动作的猫", durationSec: 3 };
+
+    const first = await jsonRequest(request, `${app.url}/api/settings/test`, payload);
+    assert.equal(first.status, 200, await first.clone().text());
+    const firstResult = (await first.json()) as {
+      ok: boolean;
+      pending: boolean;
+      submitted: boolean;
+      taskId: string | null;
+      message: string;
+    };
+    assert.equal(firstResult.ok, true);
+    assert.equal(firstResult.pending, true);
+    assert.equal(firstResult.submitted, true);
+    assert.equal(firstResult.taskId, "task-slow");
+    assert.match(firstResult.message, /已提交/);
+    assert.equal(mock.state.submits, 1);
+
+    // 同样的描述与时长再点一次：复用原任务，不产生第二次提交（也就不会重复扣费）。
+    const resumed = await jsonRequest(request, `${app.url}/api/settings/test`, payload);
+    assert.equal(resumed.status, 200, await resumed.clone().text());
+    const resumedPending = (await resumed.json()) as { pending: boolean; reused: boolean; taskId: string };
+    assert.equal(resumedPending.pending, true);
+    assert.equal(resumedPending.reused, true);
+    assert.equal(mock.state.submits, 1);
+
+    // 任务在平台侧完成后再点一次：返回同一条任务的成片。
+    mock.state.done = true;
+    const done = await jsonRequest(request, `${app.url}/api/settings/test`, payload);
+    assert.equal(done.status, 200, await done.clone().text());
+    const doneResult = (await done.json()) as {
+      pending?: boolean;
+      reused: boolean;
+      videoUrl: string;
+      durationSec: number;
+    };
+    assert.equal(doneResult.pending, undefined);
+    assert.equal(doneResult.reused, true);
+    assert.match(doneResult.videoUrl, /^\/api\/settings\/test\/video\//);
+    assert.equal(doneResult.durationSec > 0.5, true);
+    assert.equal(mock.state.submits, 1);
+
+    const video = await request(`${app.url}${doneResult.videoUrl}`);
+    assert.equal(video.status, 200);
+    assert.equal(video.headers.get("content-type"), "video/mp4");
+  },
+);

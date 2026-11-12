@@ -89,6 +89,31 @@ export interface HttpVideoGenDeps {
 }
 
 /**
+ * 画面生成已提交（可能已计费）但本次没等到成片。
+ *
+ * 超时、轮询用尽或提交响应丢失都不等于生成失败：平台通常已经受理并可能已扣费。
+ * 调用方应把任务 ID 交给用户，并复用该任务继续查询，而不是重新提交一次付费请求。
+ */
+export class VideoGenPendingError extends AppError {
+  readonly taskId?: string;
+  readonly submitted: boolean;
+  readonly lastStatus: string;
+
+  constructor(options: {
+    message: string;
+    taskId?: string;
+    submitted: boolean;
+    lastStatus?: string;
+  }) {
+    super(options.message, { code: "VIDEOGEN_PENDING", status: 504 });
+    this.name = "VideoGenPendingError";
+    this.taskId = options.taskId;
+    this.submitted = options.submitted;
+    this.lastStatus = options.lastStatus ?? "";
+  }
+}
+
+/**
  * 通用 HTTP 文生视频适配器。约定：
  *  - POST {baseUrl}{submitPath}  JSON {model, prompt, duration_sec, aspect_ratio}
  *    → 立即返回 video_url，或返回 {id}/{task_id} 供轮询；
@@ -185,9 +210,11 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       }
       await sleep(this.settings.pollIntervalMs);
     }
-    throw new AppError(`画面生成超时（最后状态：${lastStatus || "未知"}）`, {
-      code: "VIDEOGEN_TIMEOUT",
-      status: 504,
+    throw new VideoGenPendingError({
+      message: `画面生成任务 ${taskId} 已提交，但 ${Math.round(this.settings.timeoutMs / 1000)} 秒内没有完成（最后状态：${lastStatus || "未知"}），平台可能已经扣费。`,
+      taskId,
+      submitted: true,
+      lastStatus,
     });
   }
 
@@ -219,43 +246,9 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     return file;
   }
 
-  async generate(
-    request: VideoGenRequest,
-    outputDir: string,
-    signal?: AbortSignal,
-  ): Promise<GeneratedClip> {
-    const composed = this.withTimeout(signal);
-    if (composed.aborted) throw abortReason(composed);
-    this.logger.info(`AI 画面生成：${this.model}，${request.durationSec.toFixed(1)}s`);
-    const submitUrl = `${this.baseUrl}${this.settings.submitPath}`;
-    const json = await this.requestJson(
-      submitUrl,
-      {
-        method: "POST",
-        headers: this.headers(),
-        body: JSON.stringify({
-          model: this.settings.model,
-          prompt: request.prompt,
-          duration_sec: request.durationSec,
-          aspect_ratio: "9:16",
-        }),
-      },
-      composed,
-    );
-
-    let videoUrl = pickVideoUrl(json);
-    if (!videoUrl) {
-      const taskId = pickTaskId(json);
-      if (!taskId) {
-        throw new AppError(`画面生成服务响应缺少任务 ID 或视频地址：${JSON.stringify(json).slice(0, 300)}`, {
-          code: "VIDEOGEN_INVALID_RESPONSE",
-          status: 502,
-        });
-      }
-      videoUrl = await this.waitForVideoUrl(taskId, composed);
-    }
-
-    const file = await this.download(videoUrl, outputDir, composed);
+  /** 下载成片并校验时长；这一步失败时任务本身可能已成功，不影响已扣费的事实。 */
+  private async collect(videoUrl: string, outputDir: string, signal: AbortSignal): Promise<GeneratedClip> {
+    const file = await this.download(videoUrl, outputDir, signal);
     const probe = await probeMedia(file);
     if (!probe.durationSec || probe.durationSec <= 0) {
       await fsp.rm(file, { force: true });
@@ -268,5 +261,96 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       provider: this.name,
       model: this.settings.model,
     };
+  }
+
+  /**
+   * 把“已提交但没等到结果”和真正的失败区分开：只有前者会在平台侧扣费，
+   * 调用方需要拿到任务 ID 复用，而不是重新提交一次付费请求。
+   */
+  private pendingFrom(
+    error: unknown,
+    options: { taskId?: string; submitted: boolean; callerSignal?: AbortSignal },
+  ): unknown {
+    // 只有“人主动取消”才算取消；调用方传入的超时同样属于“已扣费但没出片”。
+    const callerReason = options.callerSignal?.reason as { name?: string } | undefined;
+    if (options.callerSignal?.aborted && callerReason?.name !== "TimeoutError") {
+      return abortReason(options.callerSignal);
+    }
+    if (error instanceof VideoGenPendingError) return error;
+    if (error instanceof AppError && error.status < 500) return error;
+    if (error instanceof AppError && error.code === "VIDEOGEN_TASK_FAILED") return error;
+    if (error instanceof AppError && error.code === "VIDEOGEN_INVALID_VIDEO") return error;
+    if (!options.submitted) {
+      return new VideoGenPendingError({
+        message:
+          "提交画面生成请求时超时或连接中断，无法确认平台是否已受理。" +
+          "为避免重复扣费，本次不会自动重试；请先在服务商控制台确认是否有新任务，再决定是否重新测试。",
+        taskId: options.taskId,
+        submitted: false,
+      });
+    }
+    return new VideoGenPendingError({
+      message:
+        `画面生成已提交（任务 ${options.taskId ?? "未知"}），但在超时前没有拿到成片。` +
+        "平台可能已经扣费，重新测试会复用该任务继续查询，不会重复提交。",
+      taskId: options.taskId,
+      submitted: true,
+    });
+  }
+
+  async generate(
+    request: VideoGenRequest,
+    outputDir: string,
+    signal?: AbortSignal,
+  ): Promise<GeneratedClip> {
+    const composed = this.withTimeout(signal);
+    if (composed.aborted) throw abortReason(composed);
+    this.logger.info(`AI 画面生成：${this.model}，${request.durationSec.toFixed(1)}s`);
+    const submitUrl = `${this.baseUrl}${this.settings.submitPath}`;
+    let taskId: string | undefined;
+    let submitted = false;
+    try {
+      const json = await this.requestJson(
+        submitUrl,
+        {
+          method: "POST",
+          headers: this.headers(),
+          body: JSON.stringify({
+            model: this.settings.model,
+            prompt: request.prompt,
+            duration_sec: request.durationSec,
+            aspect_ratio: "9:16",
+          }),
+        },
+        composed,
+      );
+      submitted = true;
+      const directUrl = pickVideoUrl(json);
+      if (directUrl) return await this.collect(directUrl, outputDir, composed);
+      taskId = pickTaskId(json);
+      if (!taskId) {
+        throw new AppError(`画面生成服务响应缺少任务 ID 或视频地址：${JSON.stringify(json).slice(0, 300)}`, {
+          code: "VIDEOGEN_INVALID_RESPONSE",
+          status: 502,
+        });
+      }
+      const videoUrl = await this.waitForVideoUrl(taskId, composed);
+      return await this.collect(videoUrl, outputDir, composed);
+    } catch (error) {
+      throw this.pendingFrom(error, { taskId, submitted, callerSignal: signal });
+    }
+  }
+
+  /** 复用已提交的任务继续查询成片，不再提交新的生成请求（因此不会重复扣费）。 */
+  async resume(taskId: string, outputDir: string, signal?: AbortSignal): Promise<GeneratedClip> {
+    const composed = this.withTimeout(signal);
+    if (composed.aborted) throw abortReason(composed);
+    this.logger.info(`复用已提交的 AI 画面任务：${taskId}`);
+    try {
+      const videoUrl = await this.waitForVideoUrl(taskId, composed);
+      return await this.collect(videoUrl, outputDir, composed);
+    } catch (error) {
+      throw this.pendingFrom(error, { taskId, submitted: true, callerSignal: signal });
+    }
   }
 }
