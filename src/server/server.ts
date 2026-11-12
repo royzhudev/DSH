@@ -806,6 +806,22 @@ function settingsTestKey(
   return [config.videoGen.baseUrl, config.videoGen.model, durationSec, prompt].join("|");
 }
 
+/** 同一配置的并发测试请求共用一次执行结果，避免重复提交生成任务。 */
+const inflightVideoTests = new Map<string, Promise<Record<string, unknown>>>();
+
+async function runVideoTestOnce(
+  key: string,
+  run: () => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const existing = inflightVideoTests.get(key);
+  if (existing) return existing;
+  const task = run().finally(() => {
+    inflightVideoTests.delete(key);
+  });
+  inflightVideoTests.set(key, task);
+  return task;
+}
+
 function takePendingVideoTest(key: string): PendingVideoTest | undefined {
   const pending = pendingVideoTests.get(key);
   if (!pending) return undefined;
@@ -908,14 +924,17 @@ async function handleSettingsTest(
     }
     const outputDir = path.join(config.cacheDir, "settings-test");
     await ensureDir(outputDir);
-    const provider = new HttpVideoGenProvider(config.videoGen, ctx.logger);
     const key = settingsTestKey(config, prompt, durationSec);
     // 一次请求内最多等待 3 分钟；超时后任务通常仍在平台侧生成，继续复用而不是重新提交。
     const budgetMs = Math.min(config.videoGen.timeoutMs, 180_000);
     const explicitTaskId = (optionalString(body.resumeTaskId) ?? "").trim();
-    const pending = explicitTaskId ? undefined : takePendingVideoTest(key);
-    const resumeTaskId = explicitTaskId || pending?.taskId;
     const runTest = async (): Promise<Record<string, unknown>> => {
+      const provider = new HttpVideoGenProvider(config.videoGen, ctx.logger);
+      const pending = explicitTaskId ? undefined : takePendingVideoTest(key);
+      const resumeTaskId = explicitTaskId || pending?.taskId;
+      if (!resumeTaskId) {
+        ctx.logger.info(`设置页测试提交画面生成任务：${config.videoGen.model}（${prompt.slice(0, 20)}…）`);
+      }
       try {
         const generated = resumeTaskId
           ? await provider.resume(resumeTaskId, outputDir, AbortSignal.timeout(budgetMs))
@@ -930,6 +949,7 @@ async function handleSettingsTest(
           prompt,
           durationSec: generated.durationSec,
           reused: Boolean(resumeTaskId),
+          submitted: !resumeTaskId,
           videoUrl: `/api/settings/test/video/${encodeURIComponent(path.basename(generated.file))}`,
         };
       } catch (error) {
@@ -965,16 +985,11 @@ async function handleSettingsTest(
         };
       }
     };
-
-    // 同一任务（同 key + 同续查任务号）的并发请求复用同一个 Promise，只提交一次。
-    const flightKey = `${key}|${resumeTaskId ?? ""}`;
-    let work = inflightVideoTests.get(flightKey);
-    if (!work) {
-      work = runTest();
-      inflightVideoTests.set(flightKey, work);
-      void work.finally(() => inflightVideoTests.delete(flightKey)).catch(() => {});
-    }
-    sendJson(res, 200, await work);
+    // 同一个 key 的并发请求（双击、两个标签页、自动续查同时触发）只提交一次：
+    // 后来的请求直接等同一个结果，避免重复提交、重复扣费。
+    const flightKey = `${key}|${explicitTaskId}`;
+    const payload = await runVideoTestOnce(flightKey, runTest);
+    sendJson(res, 200, payload);
     return;
   }
   if (kind === "douyin") {
