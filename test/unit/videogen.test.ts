@@ -537,3 +537,108 @@ test("HTTP 视频：平台报错时给出可执行的提示", async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("HTTP 视频：百炼地址即使协议误设为通用，也按异步接口发送", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const bytes = await fs.readFile(clip);
+  try {
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+    const runCase = async (overrides: Record<string, string>) => {
+      const config = makeTestConfig(dir, {
+        videoGen: {
+          provider: "http",
+          protocol: "generic",
+          baseUrl: "https://dashscope.aliyuncs.com",
+          model: "wan3.0-video",
+          apiKey: "sk-test",
+          submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+          pollPath: "/api/v1/tasks/{id}",
+          pollIntervalMs: 200,
+          timeoutMs: 5_000,
+          ...overrides,
+        },
+      });
+      const seen: Array<{ headers: Record<string, string>; body: string }> = [];
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          seen.push({
+            headers: (init?.headers ?? {}) as Record<string, string>,
+            body: String(init?.body ?? ""),
+          });
+          return json({ output: { task_id: "task-sync-check", task_status: "PENDING" } });
+        }
+        if (url.includes("/api/v1/tasks/task-sync-check")) {
+          return json({
+            output: { task_status: "SUCCEEDED", video_url: "https://dashscope.aliyuncs.com/files/clip.mp4" },
+          });
+        }
+        if (url.endsWith("/files/clip.mp4")) return new Response(bytes, { status: 200 });
+        return new Response("{}", { status: 404 });
+      };
+      const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+      await provider.generate({ prompt: "城市夜景", durationSec: 5 }, path.join(dir, "gen"));
+      return seen[0];
+    };
+
+    // 协议写错成“通用”，但地址是百炼：仍要带 X-DashScope-Async 与 {model,input,parameters}
+    const byHost = await runCase({});
+    assert.equal(byHost.headers["X-DashScope-Async"], "enable");
+    const hostBody = JSON.parse(byHost.body) as { input?: { prompt?: string } };
+    assert.equal(hostBody.input?.prompt, "城市夜景");
+
+    // 自定义域名 + 百炼提交路径：同样按异步发送
+    const byPath = await runCase({
+      baseUrl: "https://video-gateway.example.com",
+      submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+    });
+    assert.equal(byPath.headers["X-DashScope-Async"], "enable");
+    const pathBody = JSON.parse(byPath.body) as { input?: { prompt?: string } };
+    assert.equal(pathBody.input?.prompt, "城市夜景");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("HTTP 视频：同步调用被拒时提示需要异步头", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        timeoutMs: 5_000,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            code: "AccessDenied",
+            message: "current user api does not support synchronous calls",
+          }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        ),
+    });
+    await assert.rejects(
+      provider.generate({ prompt: "城市夜景", durationSec: 5 }, path.join(dir, "gen")),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.match(error.message, /X-DashScope-Async/);
+        assert.match(error.message, /异步/);
+        // 同步调用被拒不是密钥问题，不该给“API Key 无效”的错误建议
+        assert.doesNotMatch(error.message, /API Key 无效/);
+        return true;
+      },
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
