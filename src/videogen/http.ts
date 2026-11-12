@@ -165,7 +165,7 @@ function describeJson(json: unknown): string {
  * 把平台返回的 HTTP 错误整理成可执行的提示：优先取 {code, message}，
  * 再按常见原因（密钥、限流、时长/尺寸/模型参数）补一句该怎么改。
  */
-function httpFailureMessage(status: number, text: string): string {
+function httpFailureMessage(status: number, text: string, requestUrl = ""): string {
   let detail = "";
   let code = "";
   if (text) {
@@ -180,10 +180,17 @@ function httpFailureMessage(status: number, text: string): string {
       detail = text.slice(0, 300);
     }
   }
-  const head = `画面生成服务返回 HTTP ${status}${code ? `（${code}）` : ""}${detail ? `：${detail}` : ""}`;
+  const where =
+    requestUrl && (status === 403 || status === 404) ? `（请求地址：${requestUrl}）` : "";
+  const head = `画面生成服务返回 HTTP ${status}${code ? `（${code}）` : ""}${detail ? `：${detail}` : ""}${where}`;
   const lower = `${code} ${detail}`.toLowerCase();
   const hints: string[] = [];
-  const syncCallIssue = /synchronous|同步/.test(lower);
+  const syncCallIssue = /does not support synchronous calls|不支持同步调用/i.test(`${code} ${detail}`);
+  const asyncCallIssue = /does not support asynchronous calls|不支持异步调用/i.test(`${code} ${detail}`);
+  const syncHint =
+    "该接口只支持异步调用，需要请求头 X-DashScope-Async: enable；把接口协议设为「自动」或「阿里百炼 DashScope」即可（百炼地址会自动加上）";
+  const asyncHint =
+    "该接口只支持同步调用，请求里不能带 X-DashScope-Async；程序已自动去掉请求头重试一次，若仍失败请核对模型名与提交路径是否属于同一个接口";
   if ((status === 401 || status === 403) && !syncCallIssue) {
     hints.push("API Key 无效、过期或没有该模型的权限");
   }
@@ -194,11 +201,8 @@ function httpFailureMessage(status: number, text: string): string {
   if (/size|resolution|分辨率|像素|aspect/.test(lower)) hints.push("画面尺寸不被接受，可填 720*1280 或 1280*720");
   if (/model/.test(lower)) hints.push("模型名称不被平台接受，核对模型名是否与服务商一致");
   if (/prompt|描述/.test(lower)) hints.push("描述可能触发了内容审核，换个说法再试");
-  if (syncCallIssue) {
-    hints.push(
-      "该接口只支持异步调用，需要请求头 X-DashScope-Async: enable；把接口协议设为「自动」或「阿里百炼 DashScope」即可（百炼地址会自动加上）",
-    );
-  }
+  if (syncCallIssue) hints.push(syncHint);
+  if (asyncCallIssue) hints.push(asyncHint);
   return hints.length > 0 ? `${head}。提示：${hints.join("；")}` : head;
 }
 
@@ -301,11 +305,25 @@ export class VideoGenPendingError extends AppError {
  *  - 生成完成后下载视频并使用 ffprobe 校验。
  * 返回字段兼容 {data: {...}} 包裹，方便对接各类 OpenAI 兼容网关。
  */
+/**
+ * 平台明确表态过的异步/同步模式，按“地址+路径+模型”记在进程里。
+ * 百炼不同模型对 X-DashScope-Async 的要求不一样，记住后就不必每次先被 403 拒一次。
+ */
+const negotiatedAsyncMode = new Map<string, "enable" | null>();
+
 export class HttpVideoGenProvider implements VideoGenProvider {
   readonly name = "http";
   readonly model: string;
   private readonly fetchImpl: typeof fetch;
   private warnedDashScopeProtocol = false;
+  /**
+   * 提交/查询时要不要带 X-DashScope-Async。
+   * 百炼不同接口对异步支持不一样：视频合成只支持异步，图片类等只支持同步。
+   * 平台用 403 AccessDenied 明确告诉我们方向时，自动切换一次并记住，
+   * 用户就不用去猜“到底该不该带这个头”。
+   */
+  private asyncHeader: "enable" | null = null;
+  private readonly asyncModeKey: string;
   private readonly baseUrl: string;
 
   constructor(
@@ -316,6 +334,13 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     this.model = settings.model;
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.baseUrl = settings.baseUrl.replace(/\/+$/, "");
+    const cacheKey = `${this.baseUrl}|${settings.submitPath}|${settings.model}`;
+    this.asyncModeKey = cacheKey;
+    this.asyncHeader = negotiatedAsyncMode.has(cacheKey)
+      ? (negotiatedAsyncMode.get(cacheKey) ?? null)
+      : this.protocol() === "dashscope"
+        ? "enable"
+        : null;
   }
 
   /** 接口协议：显式配置优先，auto 时按服务地址判断（DashScope 用异步任务接口）。 */
@@ -340,7 +365,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       accept: "application/json",
     };
     if (this.settings.apiKey) headers.authorization = `Bearer ${this.settings.apiKey}`;
-    if (this.protocol() === "dashscope") headers["X-DashScope-Async"] = "enable";
+    if (this.asyncHeader) headers["X-DashScope-Async"] = this.asyncHeader;
     return headers;
   }
 
@@ -394,6 +419,30 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     return AbortSignal.any([signal, timeout]);
   }
 
+  /**
+   * 平台说“不支持异步调用”时去掉异步头，说“不支持同步调用”时改成 enable。
+   * 返回是否值得重试一次；同一实例只翻转一次，避免来回打乒乓。
+   */
+  private adaptAsyncMode(error: unknown): boolean {
+    if (!(error instanceof AppError)) return false;
+    const message = error.message;
+    if (/does not support asynchronous calls/i.test(message)) {
+      if (this.asyncHeader === null) return false;
+      this.logger.warn("平台不支持异步调用，改为同步请求重试一次（不带 X-DashScope-Async）");
+      this.asyncHeader = null;
+      negotiatedAsyncMode.set(this.asyncModeKey, null);
+      return true;
+    }
+    if (/does not support synchronous calls/i.test(message)) {
+      if (this.asyncHeader === "enable") return false;
+      this.logger.warn("平台要求异步调用，改为 X-DashScope-Async: enable 重试一次");
+      this.asyncHeader = "enable";
+      negotiatedAsyncMode.set(this.asyncModeKey, "enable");
+      return true;
+    }
+    return false;
+  }
+
   private async requestJson(
     url: string,
     init: RequestInit,
@@ -411,7 +460,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     }
     const text = await response.text();
     if (!response.ok) {
-      throw new AppError(httpFailureMessage(response.status, text), {
+      throw new AppError(httpFailureMessage(response.status, text, url), {
         code: "VIDEOGEN_REQUEST_FAILED",
         // 4xx 是平台明确拒绝（参数、密钥、限流），原样透出，不能被当成“提交后没等到结果”。
         status: response.status >= 500 ? 502 : response.status,
@@ -582,15 +631,17 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     let taskId: string | undefined;
     let submitted = false;
     try {
-      const json = await this.requestJson(
-        submitUrl,
-        {
-          method: "POST",
-          headers: this.headers(),
-          body: JSON.stringify(this.submitBody(request, image, referenceImages)),
-        },
-        composed,
-      );
+      const body = JSON.stringify(this.submitBody(request, image, referenceImages));
+      const submit = () =>
+        this.requestJson(submitUrl, { method: "POST", headers: this.headers(), body }, composed);
+      let json: unknown;
+      try {
+        json = await submit();
+      } catch (error) {
+        // 平台可能用 403 告诉我们“异步/同步用错了”，自动纠正后重发一次。
+        if (!this.adaptAsyncMode(error)) throw error;
+        json = await submit();
+      }
       submitted = true;
       const directUrl = this.videoUrlOf(json);
       if (directUrl) return await this.collect(directUrl, outputDir, composed);
