@@ -1515,6 +1515,14 @@ function userDialogHtml() {
           </select>
         </div>
         <div class="field">
+          <label class="switch">
+            <input type="checkbox" id="user-disabled" />
+            <span class="track"></span>
+            <span>禁用账号</span>
+          </label>
+          <span class="hint">禁用后立即注销该用户的登录会话，可随时重新启用。</span>
+        </div>
+        <div class="field">
           <span class="field-label">可见菜单</span>
           <div class="permission-grid" id="permission-grid">
             ${MENU_META.map(
@@ -1593,6 +1601,10 @@ function openUserDialog(id) {
   const roleSelect = document.getElementById("user-role-select");
   roleSelect.disabled = Boolean(user && state.user?.id === user.id);
   roleSelect.title = roleSelect.disabled ? "不能修改自己的角色" : "";
+  const disabledToggle = document.getElementById("user-disabled");
+  disabledToggle.checked = Boolean(user?.disabled);
+  disabledToggle.disabled = Boolean(user && state.user?.id === user.id);
+  disabledToggle.title = disabledToggle.disabled ? "不能禁用自己的账号" : "";
   const selected = new Set(
     user ? (user.role === "admin" ? MENU_KEYS : user.permissions) : ["create", "jobs"],
   );
@@ -1654,6 +1666,7 @@ async function saveUser() {
   const displayName = document.getElementById("user-display")?.value.trim() ?? "";
   const password = document.getElementById("user-password")?.value ?? "";
   const role = document.getElementById("user-role-select")?.value ?? "member";
+  const disabled = document.getElementById("user-disabled")?.checked ?? false;
   const permissions =
     role === "admin"
       ? MENU_KEYS
@@ -1679,7 +1692,7 @@ async function saveUser() {
     button.innerHTML = `<span class="spinner"></span> 保存中…`;
   }
   try {
-    const body = { displayName, role, permissions };
+    const body = { displayName, role, permissions, disabled };
     if (password) body.password = password;
     let data;
     if (id) {
