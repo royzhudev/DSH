@@ -111,7 +111,8 @@ async function startVideoGenMock(clipPath: string): Promise<VideoGenMock> {
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/videos/generations/task-1") {
-      send({ data: { status: "succeeded", video_url: "/files/clip.mp4" } });
+      // 聚合平台常见的嵌套结构：状态与成片地址都在 data.output 下。
+      send({ code: 0, message: "ok", data: { task_id: "task-1", status: "completed", output: { video_url: "/files/clip.mp4" } } });
       return;
     }
     if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
@@ -231,7 +232,7 @@ test(
     assert.equal(settingsText.includes('"apiKeySet": true'), true);
 
     const invalid = await jsonRequest(request, `${app.url}/api/settings`, {
-      videoGen: { provider: "http" },
+      videoGen: { provider: "http", pollPath: "/api/v1/tasks" },
     }, "PUT");
     assert.equal(invalid.status, 400);
 

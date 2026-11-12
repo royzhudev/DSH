@@ -24,6 +24,7 @@ import { MaterialLibrary } from "./materials/library.js";
 import { matchMaterial, materialTagPool } from "./materials/match.js";
 import { CastLibrary, castSummary, resolveCastNames, selectCastAssets } from "./cast/library.js";
 import { buildShotPrompt } from "./cast/prompt.js";
+import { isAiVideoEnabled } from "./config.js";
 import { preflightVideoJob } from "./preflight.js";
 import { renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
@@ -127,6 +128,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   const scriptPath = path.join(jobDir, "script.json");
   const resultPath = path.join(jobDir, "result.json");
   const warnings: string[] = [];
+  if (config.videoGen.provider === "http" && !config.videoGen.apiKey) {
+    warnings.push(
+      "AI 画面生成还没有填写 API Key（默认接阿里百炼 Wan），本次已回退素材库；在设置页填写 Key 后才会调用模型。",
+    );
+  }
 
   try {
     await ensureDir(jobDir);
@@ -145,7 +151,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       topic: normalizedTopic,
       story,
       castAssets: cast,
-      options: { castIds: options.castIds, videoGenEnabled: config.videoGen.provider !== "none" },
+      options: { castIds: options.castIds, videoGenEnabled: isAiVideoEnabled(config.videoGen) },
       logger,
     });
     throwIfAborted(signal);

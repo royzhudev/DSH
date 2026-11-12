@@ -17,6 +17,7 @@ import type {
 } from "../types.js";
 import type { Logger } from "../logger.js";
 import { AppError, toErrorMessage } from "../errors.js";
+import { isAiVideoEnabled } from "../config.js";
 import { MaterialLibrary, materialType } from "../materials/library.js";
 import { materialTagPool } from "../materials/match.js";
 import { ensureDir, isInside, sanitizeFilename, sha256 } from "../util/fs.js";
@@ -886,6 +887,12 @@ async function handleSettingsTest(
         status: 400,
       });
     }
+    if (!config.videoGen.apiKey) {
+      throw new AppError(
+        "AI 画面生成还没有填写 API Key：请在上面填写后保存，再点击测试；测试会真实生成视频并可能产生费用。",
+        { code: "VIDEOGEN_MISSING_API_KEY", status: 400 },
+      );
+    }
     const prompt = (optionalString(body.prompt) ?? "").trim() || DEFAULT_VIDEOGEN_TEST_PROMPT;
     if (prompt.length > 500) {
       throw new AppError("测试描述最多 500 个字符", { code: "INVALID_OPTIONS", status: 400 });
@@ -1316,7 +1323,10 @@ async function handleRequest(
       config: jobConfig,
       topic,
       story: options.story,
-      options,
+      options: {
+        ...options,
+        videoGenEnabled: options.videoGenEnabled === false ? false : isAiVideoEnabled(jobConfig.videoGen),
+      },
       castAssets: selectedCast,
       logger: ctx.logger,
     });

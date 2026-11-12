@@ -58,14 +58,17 @@ export const DEFAULT_CONFIG: AppConfig = {
     allowUnmatched: false,
   },
   videoGen: {
-    provider: "none",
-    baseUrl: "",
-    model: "video-gen-1",
-    submitPath: "/v1/videos/generations",
-    pollPath: "/v1/videos/generations/{id}",
+    // 默认接阿里百炼（DashScope）的 Wan 视频模型，API Key 由用户在设置页填写。
+    provider: "http",
+    protocol: "auto",
+    baseUrl: "https://dashscope.aliyuncs.com",
+    model: "wan3.0-video",
+    submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+    pollPath: "/api/v1/tasks/{id}",
     pollIntervalMs: 3000,
     timeoutMs: 300_000,
     clipDurationSec: 5,
+    resultPath: "",
     fallbackToMaterials: true,
   },
   douyin: {
@@ -97,6 +100,12 @@ export interface LoadConfigOptions {
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
 const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
 const VIDEO_GEN_PROVIDERS = ["none", "http"] as const;
+
+/** AI 画面是否真的可用：启用了 HTTP 供应商并且填写了 API Key，否则走素材库。 */
+export function isAiVideoEnabled(videoGen: AppConfig["videoGen"]): boolean {
+  return videoGen.provider === "http" && Boolean(videoGen.apiKey);
+}
+const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic"] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -211,6 +220,10 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
 
   const videoGenProvider = envString(env, "VIDEOGEN_PROVIDER") as "none" | "http" | undefined;
   if (videoGenProvider) config.videoGen.provider = videoGenProvider;
+  config.videoGen.protocol = set(
+    config.videoGen.protocol,
+    envString(env, "VIDEOGEN_PROTOCOL") as "auto" | "dashscope" | "generic" | undefined,
+  );
   config.videoGen.baseUrl = set(config.videoGen.baseUrl, envString(env, "VIDEOGEN_BASE_URL"));
   config.videoGen.apiKey = set(config.videoGen.apiKey, envString(env, "VIDEOGEN_API_KEY"));
   config.videoGen.model = set(config.videoGen.model, envString(env, "VIDEOGEN_MODEL"));
@@ -225,6 +238,7 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     config.videoGen.clipDurationSec,
     envNumber(env, "VIDEOGEN_CLIP_DURATION"),
   );
+  config.videoGen.resultPath = set(config.videoGen.resultPath, envString(env, "VIDEOGEN_RESULT_PATH"));
   config.videoGen.fallbackToMaterials = set(
     config.videoGen.fallbackToMaterials,
     envBoolean(env, "VIDEOGEN_FALLBACK_MATERIALS"),
@@ -300,6 +314,9 @@ function validateConfig(config: AppConfig): void {
       { code: "CONFIG_MISSING_API_KEY" },
     );
   }
+  if (!VIDEO_GEN_PROTOCOLS.includes(config.videoGen.protocol)) {
+    throw new AppError("AI 画面生成的协议只能是 auto、dashscope 或 generic", { code: "CONFIG_INVALID" });
+  }
   if (!VIDEO_GEN_PROVIDERS.includes(config.videoGen.provider)) {
     throw new AppError(`不支持的画面生成供应商：${config.videoGen.provider}`, {
       code: "CONFIG_INVALID",
@@ -322,6 +339,16 @@ function validateConfig(config: AppConfig): void {
     }
     if (!config.videoGen.pollPath.includes("{id}")) {
       throw new AppError("AI 画面生成的查询路径必须包含 {id} 占位符", { code: "CONFIG_INVALID" });
+    }
+    const resultPath = config.videoGen.resultPath.trim();
+    if (resultPath.length > 200) {
+      throw new AppError("AI 画面生成的视频地址字段不能超过 200 个字符", { code: "CONFIG_INVALID" });
+    }
+    if (resultPath && !/^[A-Za-z0-9_.[\]-]+$/.test(resultPath)) {
+      throw new AppError(
+        "AI 画面生成的视频地址字段只能是点号路径，例如 data.output.video_url",
+        { code: "CONFIG_INVALID" },
+      );
     }
   }
   if (!config.douyin.scope.trim()) {

@@ -2328,7 +2328,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? "已启用" : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>接口约定：POST {baseUrl}{submitPath} 提交 <code>{model, prompt, duration_sec, aspect_ratio}</code>，返回 video_url 或任务 id；GET {baseUrl}{pollPath}（{id} 替换为任务 ID）查询状态与 video_url。图生视频时额外携带 <code>image</code>（首帧参考图）与 <code>reference_images</code>（角色/道具参考图），都是 data URL。返回字段兼容 <code>{data: {...}}</code> 包裹。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼</strong>的 Wan 视频模型（<code>wan3.0-video</code>），API Key 需要自己填写；没有 Key 时任务会在本地预检阶段报错，不会产生费用。百炼模式使用异步任务接口：提交带 <code>X-DashScope-Async</code>，返回 <code>output.task_id</code>，查询 <code>/api/v1/tasks/{id}</code> 得到 <code>output.video_url</code>。通用 HTTP 契约则提交 <code>{model, prompt, duration_sec, aspect_ratio}</code> 并返回 video_url 或任务 id，图生视频额外携带 <code>image</code> 与 <code>reference_images</code>；返回字段兼容嵌套与数组形式。</span></div>
           <div class="field-grid-3">
             <div class="field">
               <label for="videogen-provider">供应商</label>
@@ -2346,7 +2346,7 @@ async function renderSettings() {
             </div>
           </div>
           ${secretField("videogen-api-key", "API Key", { set: s.videoGen.apiKeySet, hint: s.videoGen.apiKeyHint })}
-          <div class="field-grid-2">
+          <div class="field-grid-3">
             <div class="field">
               <label for="videogen-submit-path">提交路径</label>
               <input class="input" id="videogen-submit-path" value="${attr(s.videoGen.submitPath)}" />
@@ -2355,11 +2355,26 @@ async function renderSettings() {
               <label for="videogen-poll-path">查询路径模板</label>
               <input class="input" id="videogen-poll-path" value="${attr(s.videoGen.pollPath)}" />
             </div>
+            <div class="field">
+              <label for="videogen-protocol">接口协议</label>
+              <select class="select" id="videogen-protocol">
+                ${options([
+                  ["auto", "自动（按服务地址）"],
+                  ["dashscope", "阿里百炼 DashScope"],
+                  ["generic", "通用 HTTP 契约"],
+                ], s.videoGen.protocol ?? "auto")}
+              </select>
+            </div>
           </div>
           <div class="field-grid-3">
             ${numberField("videogen-poll-interval", "轮询间隔（毫秒）", s.videoGen.pollIntervalMs, { min: 200, max: 60000, step: 100 })}
             ${numberField("videogen-timeout", "超时（毫秒）", s.videoGen.timeoutMs, { min: 5000, max: 1800000, step: 1000 })}
             ${numberField("videogen-clip-duration", "单段时长（秒）", s.videoGen.clipDurationSec, { min: 2, max: 60 })}
+          </div>
+          <div class="field">
+            <label for="videogen-result-path">视频地址字段 <span class="optional">可选，留空自动识别</span></label>
+            <input class="input" id="videogen-result-path" value="${attr(s.videoGen.resultPath ?? "")}" placeholder="例如 data.output.video_url" />
+            <span class="hint">自动兼容 video_url / url / output / data.* 等常见字段；聚合平台结构特殊时再填点号路径，取不到会自动回退</span>
           </div>
           ${switchField("videogen-fallback", "生成失败时回退素材库", s.videoGen.fallbackToMaterials)}
           <div class="test-generator">
@@ -2556,9 +2571,11 @@ function collectSettings() {
     baseUrl: value("videogen-base-url").trim(),
     submitPath: value("videogen-submit-path").trim(),
     pollPath: value("videogen-poll-path").trim(),
+    protocol: value("videogen-protocol"),
     pollIntervalMs: number("videogen-poll-interval"),
     timeoutMs: number("videogen-timeout"),
     clipDurationSec: number("videogen-clip-duration"),
+    resultPath: value("videogen-result-path").trim(),
     fallbackToMaterials: checked("videogen-fallback"),
   };
   const videoGenKey = secret("videogen-api-key");

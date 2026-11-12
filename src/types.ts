@@ -233,6 +233,11 @@ export interface MaterialSettings {
 export interface VideoGenSettings {
   provider: VideoGenProviderName;
   baseUrl: string;
+  /**
+   * 接口协议：auto 按服务地址判断（DashScope 用 dashscope，其他用 generic）。
+   * dashscope = 阿里百炼异步视频接口（提交带 X-DashScope-Async，任务在 output.task_id）。
+   */
+  protocol: "auto" | "dashscope" | "generic";
   apiKey?: string;
   model: string;
   /** 提交任务路径，默认 /v1/videos/generations。 */
@@ -243,6 +248,11 @@ export interface VideoGenSettings {
   timeoutMs: number;
   /** 每个分镜请求生成的视频时长。 */
   clipDurationSec: number;
+  /**
+   * 成片地址在查询响应里的点号路径（如 data.output.video_url）。
+   * 留空时按常见字段自动识别；配置后没取到地址会回退自动识别。
+   */
+  resultPath: string;
   /** 生成失败时是否回退到素材库/渐变背景。 */
   fallbackToMaterials: boolean;
 }
