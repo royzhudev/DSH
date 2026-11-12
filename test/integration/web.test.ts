@@ -195,6 +195,8 @@ test(
     assert.match(scriptText, /renderAuth/);
     assert.match(scriptText, /usersCardHtml/);
     assert.match(scriptText, /data-test="videogen"/);
+    assert.match(scriptText, /data-resume="videogen"/);
+    assert.match(scriptText, /videogen-test-task/);
     assert.match(scriptText, /data-test="douyin"/);
 
     const apiIndex = (await (await request(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
@@ -570,5 +572,17 @@ test(
     const video = await request(`${app.url}${doneResult.videoUrl}`);
     assert.equal(video.status, 200);
     assert.equal(video.headers.get("content-type"), "video/mp4");
+
+    // 也可以直接按任务 ID 取回（用于平台侧已生成、但本地记录丢失的场景）。
+    const byId = await jsonRequest(request, `${app.url}/api/settings/test`, {
+      kind: "videogen",
+      resumeTaskId: "task-slow",
+    });
+    assert.equal(byId.status, 200, await byId.clone().text());
+    const byIdResult = (await byId.json()) as { reused: boolean; videoUrl: string; pending?: boolean };
+    assert.equal(byIdResult.pending, undefined);
+    assert.equal(byIdResult.reused, true);
+    assert.match(byIdResult.videoUrl, /^\/api\/settings\/test\/video\//);
+    assert.equal(mock.state.submits, 1);
   },
 );

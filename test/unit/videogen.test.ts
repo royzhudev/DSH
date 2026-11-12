@@ -220,3 +220,80 @@ test("HTTP 图生视频：提交首帧与角色参考图 data URL", async () => 
     await mock.close();
   }
 });
+
+
+test("HTTP 文生视频：兼容聚合平台把成片地址放在数组/嵌套字段里", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const shapes: Record<string, unknown> = {
+    "task-array": { data: [{ status: "succeeded", url: "/files/clip.mp4" }] },
+    "task-output": { status: "completed", output: { video_url: "/files/clip.mp4" } },
+    "task-deep": { data: { task: { state: "SUCCESS", result: { videos: [{ url: "/files/clip.mp4" }] } } } },
+    "task-thumb": { data: { status: "succeeded", thumbnail: "https://example.com/cover.jpg" } },
+  };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const send = (value: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.method === "POST" && url.pathname === "/v1/videos/generations") {
+      const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { prompt: string };
+      send({ task_id: parsed.prompt });
+      return;
+    }
+    const pollMatch = /^\/v1\/videos\/generations\/([a-z-]+)$/.exec(url.pathname);
+    if (req.method === "GET" && pollMatch) {
+      send(shapes[pollMatch[1]!] ?? { status: "running" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clip);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: `http://127.0.0.1:${port}`,
+        model: "aggregator-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 5,
+        fallbackToMaterials: true,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    for (const taskId of ["task-array", "task-output", "task-deep"]) {
+      const generated = await provider.generate(
+        { prompt: taskId, durationSec: 5 },
+        path.join(dir, "gen"),
+      );
+      assert.equal(generated.durationSec > 0.5, true, `应能从 ${taskId} 取回成片`);
+    }
+
+    // 只有图片地址时不能把封面当成视频，也不能假装成功。
+    await assert.rejects(
+      provider.generate({ prompt: "task-thumb", durationSec: 5 }, path.join(dir, "gen")),
+      (error: unknown) => error instanceof AppError && error.code === "VIDEOGEN_INVALID_RESPONSE",
+    );
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});

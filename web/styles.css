@@ -1666,6 +1666,17 @@ svg {
   min-height: 64px;
 }
 
+.test-task-row {
+  margin-top: 10px;
+}
+
+.test-task-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
 .test-video {
   display: block;
   width: 100%;
