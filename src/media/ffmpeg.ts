@@ -246,3 +246,25 @@ export async function concatAudio(files: string[], outputFile: string): Promise<
     outputFile,
   ]);
 }
+
+/** 生成一段静音 mp3，用作对白之间的自然停顿。 */
+export async function createSilence(seconds: number, outputFile: string): Promise<void> {
+  const duration = Math.max(0.02, seconds);
+  await runFfmpeg([
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    `anullsrc=r=24000:cl=mono`,
+    "-t",
+    duration.toFixed(3),
+    "-c:a",
+    "libmp3lame",
+    "-b:a",
+    "48k",
+    outputFile,
+  ]);
+}

@@ -174,13 +174,28 @@ export function assignDialogueVoices(
  * 给支持 instructions 的 TTS（OpenAI gpt-4o-mini-tts 等）写表演提示：
  * 用短剧演员的口语感，避免“念稿子”的僵硬感。
  */
-export function voiceStyleFor(description: string): string {
+export function voiceStyleFor(description: string, text = ""): string {
   const age = inferVoiceAge(description);
   const gender = inferVoiceGender(description);
   const parts = ["像短剧演员一样自然地说台词，口语化，停顿和语气有起伏，不要朗读腔。"];
   parts.push(gender === "male" ? "成年男声。" : gender === "female" ? "成年女声。" : "");
   if (age === "old") parts.push("语速偏慢，声音低沉一些。");
   if (age === "young") parts.push("语气轻快，有活力。");
+
+  // 按这一句的内容补表演提示：短剧的对白情绪变化快，逐句给提示比全片一个语气自然。
+  if (/[!！]|喊|吼|嚷|咆哮|住手|闭嘴|滚|放开|不许|凭什么/.test(text)) {
+    parts.push("这一句带情绪，音量提高、语速加快，像真的在争执。");
+  } else if (/[?？]|吗|呢|什么|怎么|为什么/.test(text)) {
+    parts.push("这一句是疑问语气，句尾自然上扬，不要平铺直叙。");
+  } else if (/哭|泪|难受|心疼|对不起|求|别走/.test(text)) {
+    parts.push("这一句放低声音，带一点哽咽和停顿，情绪压着说。");
+  } else if (/耳语|小声|低声|悄悄|别出声/.test(text)) {
+    parts.push("这一句压低声音说，接近气声。");
+  } else if (/笑|哈哈|逗|玩笑/.test(text)) {
+    parts.push("这一句带笑意，语气轻松。");
+  } else {
+    parts.push("这一句像平时说话一样自然，句与句之间留短停顿。");
+  }
   return parts.filter(Boolean).join("");
 }
 

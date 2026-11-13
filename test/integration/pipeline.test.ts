@@ -107,6 +107,11 @@ test(
       const first = result.segments[0]!;
       const expected = first.lines!.reduce((sum, line) => sum + line.durationSec, 0);
       assert.ok(Math.abs(expected - first.durationSec) < 1.5, `时长对不上：${expected} vs ${first.durationSec}`);
+      // 对白之间要有自然停顿，不能一句顶一句。
+      assert.ok(
+        first.durationSec > expected + 0.15,
+        `台词之间的停顿没有进音轨：${first.durationSec} vs ${expected}`,
+      );
       const srt = await fs.readFile(result.srtPath, "utf8");
       assert.match(srt, /我：/);
       assert.match(srt, /：/);
