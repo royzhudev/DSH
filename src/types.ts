@@ -404,6 +404,8 @@ export interface TtsRequest {
   rate?: number;
   volume?: number;
   pitch?: string;
+  /** 表演提示（OpenAI gpt-4o-mini-tts 等支持 instructions 的模型）。 */
+  instructions?: string;
 }
 
 export interface TtsProvider {

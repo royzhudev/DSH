@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   assignDialogueVoices,
+  OPENAI_VOICE_POOL,
+  voiceStyleFor,
   inferVoiceAge,
   inferVoiceGender,
   resolveSpeakerVoice,
@@ -128,4 +130,18 @@ test("对话语气：音高按年龄微调，音量只跟着台词强度变", ()
   assert.equal(voiceVolumeFor("30 岁男性", "你站住！"), 6);
   assert.equal(voiceVolumeFor("30 岁男性", "别出声，跟我来。"), -4);
   assert.equal(voiceVolumeFor("30 岁男性", "我们走吧。"), 0);
+});
+
+test("对话音色：OpenAI 兼容 TTS 用同一套男女声池，并按角色写表演提示", () => {
+  const cast = [
+    { name: "黄乐", description: "45 岁男性，酒吧老板，说话沉稳" },
+    { name: "林小满", description: "20 岁女性，活泼" },
+  ];
+  const voices = assignDialogueVoices(["黄乐", "林小满"], cast, "alloy", "openai");
+  assert.ok(OPENAI_VOICE_POOL.includes(voices.get("黄乐")!));
+  assert.ok(OPENAI_VOICE_POOL.includes(voices.get("林小满")!));
+  assert.notEqual(voices.get("黄乐"), voices.get("林小满"));
+  const style = voiceStyleFor("45 岁男性，说话沉稳");
+  assert.ok(style.includes("自然"), style);
+  assert.ok(style.includes("男声"), style);
 });

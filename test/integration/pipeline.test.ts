@@ -132,9 +132,11 @@ test(
     const calls: Array<{ videoFile: string; audioFile: string }> = [];
     const provider: LipsyncProvider = {
       name: "fake",
-      async sync(request) {
+      // 和真实 VideoRetalk 一样把结果写在任务根目录，而不是分镜目录；
+      // 这样能覆盖“补字幕时所有分镜写同一个文件、互相覆盖”的回归。
+      async sync(request, outputDir) {
         calls.push(request);
-        const target = path.join(path.dirname(request.videoFile), "fake-lipsync.mp4");
+        const target = path.join(outputDir, `fake-lipsync-${calls.length}.mp4`);
         await fs.copyFile(request.videoFile, target);
         return { provider: "fake", model: "fake-lipsync", file: target, durationSec: 1 };
       },
@@ -154,6 +156,23 @@ test(
       assert.ok(
         result.segments.every((segment) => segment.cast?.some((asset) => asset.name === "林小满")),
         "每个分镜都应带上已上传角色",
+      );
+      // 每个分镜都要有自己的补字幕文件，不能共用同一个 segment-subbed.mp4
+      for (let index = 0; index < result.segments.length; index += 1) {
+        const file = path.join(
+          dir,
+          "output",
+          result.jobId,
+          "segments",
+          `seg-${String(index + 1).padStart(2, "0")}`,
+          "segment-subbed.mp4",
+        );
+        assert.equal(await fs.stat(file).then(() => true).catch(() => false), true, `分镜 ${index + 1} 缺少独立补字幕文件`);
+      }
+      const totalSegmentDuration = result.segments.reduce((sum, segment) => sum + segment.durationSec, 0);
+      assert.ok(
+        Math.abs(result.durationSec - totalSegmentDuration) < 2,
+        `成片时长 ${result.durationSec} 与分镜合计 ${totalSegmentDuration} 对不上，可能重复/漏拼`,
       );
       const srt = await fs.readFile(result.srtPath, "utf8");
       assert.match(srt, /：/);

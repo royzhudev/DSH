@@ -62,7 +62,9 @@ export class OpenAiTtsProvider implements TtsProvider {
       input: request.text,
       response_format: "mp3",
     };
-    if (Math.abs(this.settings.rate - 1) > 0.01) baseBody.speed = this.settings.rate;
+    const rate = request.rate ?? this.settings.rate;
+    if (Math.abs(rate - 1) > 0.01) baseBody.speed = rate;
+    if (request.instructions) baseBody.instructions = request.instructions;
 
     let body = baseBody;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -83,9 +85,9 @@ export class OpenAiTtsProvider implements TtsProvider {
 
         if (!response.ok) {
           const text = await response.text().catch(() => "");
-          if (response.status === 400 && "speed" in body) {
-            this.logger.warn("配音接口不接受 speed 参数，去掉后重试");
-            const { speed: _speed, ...rest } = body;
+          if (response.status === 400 && ("speed" in body || "instructions" in body)) {
+            this.logger.warn("配音接口不接受 speed/instructions 参数，去掉后重试");
+            const { speed: _speed, instructions: _instructions, ...rest } = body;
             body = rest;
             continue;
           }

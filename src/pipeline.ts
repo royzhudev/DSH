@@ -36,7 +36,13 @@ import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
 import { createLipsyncProvider } from "./lipsync/dashscope.js";
-import { assignDialogueVoices, voicePitchFor, voiceRateFor, voiceVolumeFor } from "./tts/voices.js";
+import {
+  assignDialogueVoices,
+  voicePitchFor,
+  voiceRateFor,
+  voiceStyleFor,
+  voiceVolumeFor,
+} from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
 /** 相邻分镜描述雷同时轮流使用的机位，保证画面有变化。 */
@@ -143,10 +149,12 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   lines: Array<DialogueLine & { voice: string; durationSec: number }>;
 }> {
   const { lines, cast, config, logger, jobDir, index, ttsProvider, signal } = input;
-  const canSwitchVoice = config.tts.provider === "edge";
+  // Edge 与 OpenAI 兼容 TTS 都支持逐角色换音色；OpenAI 还支持 instructions 表演提示。
+  const voicePool = config.tts.provider === "openai" ? ("openai" as const) : ("edge" as const);
+  const canSwitchVoice = config.tts.provider === "edge" || config.tts.provider === "openai";
   const voices = canSwitchVoice
     ? (input.voices ??
-      assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice))
+      assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice, voicePool))
     : new Map<string, string>();
   const providers = new Map<string, TtsProvider>();
   const audioFiles: string[] = [];
@@ -163,6 +171,7 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
     const rate = voiceRateFor(description, config.tts.rate);
     const pitch = voicePitchFor(description);
     const volume = voiceVolumeFor(description, line.text);
+    const instructions = config.tts.provider === "openai" ? voiceStyleFor(description) : undefined;
     let provider = ttsProvider;
     const providerKey = `${voice}|${rate}`;
     if (canSwitchVoice && (voice !== ttsProvider.voice || rate !== config.tts.rate)) {
@@ -181,6 +190,7 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
         String(rate),
         pitch,
         String(volume),
+        instructions ?? "",
         line.text,
       ].join("|"),
     ).slice(0, 40);
@@ -343,7 +353,12 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     const allSpeakers = [
       ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
     ];
-    const dialogueVoices = assignDialogueVoices(allSpeakers, cast, config.tts.voice);
+    const dialogueVoices = assignDialogueVoices(
+      allSpeakers,
+      cast,
+      config.tts.voice,
+      config.tts.provider === "openai" ? "openai" : "edge",
+    );
     const plans: SegmentPlan[] = [];
     let cursor = 0;
     const totalSegments = script.segments.length;
@@ -630,6 +645,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
             cues: plan.cues,
             config,
             logger,
+            outputDir: path.join(jobDir, "segments", `seg-${String(index + 1).padStart(2, "0")}`),
           });
           logger.info(`分镜 ${index + 1} 口型已同步（${synced.model}）`);
         } catch (error) {
