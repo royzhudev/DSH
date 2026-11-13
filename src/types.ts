@@ -133,6 +133,8 @@ export interface SegmentResult {
   material: Pick<Material, "id" | "title" | "type" | "file"> | null;
   voice: string;
   ttsProvider: TtsProviderName;
+  /** 该分镜是否做过口型同步（仅对话分镜会记录）。 */
+  lipsync?: "synced" | "unsynced" | "skipped";
   /** 对话模式：本分镜的台词、说话人与音色。 */
   lines?: Array<DialogueLine & { voice: string; durationSec: number }>;
   durationSec: number;
@@ -178,6 +180,7 @@ export type JobStage =
   | "tts"
   | "videogen"
   | "render"
+  | "lipsync"
   | "concat"
   | "done";
 
@@ -247,6 +250,38 @@ export interface MaterialSettings {
  * 可选的 AI 画面生成。provider 为 http 时，按下方约定调用用户配置的
  * 文生视频 / 图生视频服务，生成的分镜画面会替代素材匹配结果。
  */
+/** 口型同步（lip-sync）设置：默认接阿里云百炼 VideoRetalk。 */
+export interface LipsyncSettings {
+  provider: "none" | "dashscope";
+  baseUrl: string;
+  apiKey?: string;
+  /** 模型名，百炼为 videoretalk（仅华北 2 北京地域）。 */
+  model: string;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  /** 口型失败时是否保留未对口型的片段继续成片。 */
+  fallbackToUnsynced: boolean;
+}
+
+export interface LipsyncRequest {
+  /** 已渲染的分镜视频（本地路径）。 */
+  videoFile: string;
+  /** 该分镜的配音音轨（本地路径）。 */
+  audioFile: string;
+}
+
+export interface LipsyncResult {
+  provider: string;
+  model: string;
+  file: string;
+  durationSec: number;
+}
+
+export interface LipsyncProvider {
+  readonly name: string;
+  sync(request: LipsyncRequest, outputDir: string, signal?: AbortSignal): Promise<LipsyncResult>;
+}
+
 export interface VideoGenSettings {
   provider: VideoGenProviderName;
   baseUrl: string;
@@ -305,6 +340,7 @@ export interface AppConfig {
   subtitles: SubtitleStyle;
   materials: MaterialSettings;
   videoGen: VideoGenSettings;
+  lipsync: LipsyncSettings;
   douyin: DouyinSettings;
   server: ServerSettings;
 }

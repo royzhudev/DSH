@@ -76,6 +76,18 @@ node dist/cli.js create --topic "城市夜景"
 - 非 Edge 供应商不支持切换音色时，仍逐句合成，字幕保留说话人；静音占位仅用于演示/测试。
 - 命令行为 `video-agent create --dialogue`；API 为 `dialogue: true`（创建任务与 `/api/scripts/generate` 预览都支持）。
 
+## 口型同步（人物对白）
+
+对话模式的台词音轨可以和画面做口型对齐，默认接 **阿里云百炼 VideoRetalk**（`videoretalk`）：
+
+- 设置 → 口型同步：选「阿里百炼 VideoRetalk」，填**北京地域**的 API Key；模型、接口地址、轮询/超时都有默认值。
+- 链路：分镜渲染 → 上传视频与该分镜配音到百炼临时存储 → 提交 `videoretalk` 异步任务 → 轮询 → 下载口型对齐视频 → 替换该分镜后再拼接成片。
+- 只对「对话模式 + 分镜有台词 + 本镜出现角色」的分镜调用；其余分镜跳过。
+- 失败默认回退为未对口型片段并写进 warnings；设置里可改为直接中断。
+- 计费：VideoRetalk 按生成时长 0.08 元/秒；视频/音频需 2–120 秒、视频边长 640–2048、人物正面近景。临时文件 48 小时有效。
+
+相关环境变量：`LIPSYNC_PROVIDER=dashscope`、`LIPSYNC_API_KEY`、`LIPSYNC_BASE_URL`、`LIPSYNC_MODEL`、`LIPSYNC_TIMEOUT_MS`、`LIPSYNC_POLL_INTERVAL_MS`。
+
 ## 创作页的短剧品控
 
 创作页把短剧行业里最容易踩的坑做成可执行检查，都是本地计算，不调用模型、不产生费用：
