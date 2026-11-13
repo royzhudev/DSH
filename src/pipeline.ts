@@ -316,18 +316,36 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     const library = options.library ?? new MaterialLibrary(config.libraryDir, logger);
     const materials = await library.list();
     const scriptProvider = options.scriptProvider ?? createScriptProvider(config, logger);
-    const script = await scriptProvider.generate(
-      {
-        topic: normalizedTopic,
-        targetDurationSec: config.script.targetDurationSec,
-        maxSegments: config.script.maxSegments,
-        availableTags: materialTagPool(materials),
-        ...(story ? { story } : {}),
-        ...(options.dialogue ? { dialogue: true } : {}),
-        ...(cast.length > 0 ? { cast: castPromptInput(cast) } : {}),
-      },
-      signal,
-    );
+    const scriptRequest = {
+      topic: normalizedTopic,
+      targetDurationSec: config.script.targetDurationSec,
+      maxSegments: config.script.maxSegments,
+      availableTags: materialTagPool(materials),
+      ...(story ? { story } : {}),
+      ...(options.dialogue ? { dialogue: true } : {}),
+      ...(cast.length > 0 ? { cast: castPromptInput(cast) } : {}),
+    };
+    let script;
+    try {
+      script = await scriptProvider.generate(scriptRequest, signal);
+    } catch (error) {
+      // 模型把同一句台词复制了好几遍时，去掉重复只剩一镜、没法成片。
+      // 与其让用户重试，这里自动再要一次脚本，并明确要求别再重复台词。
+      if (!(error instanceof AppError) || error.code !== "SCRIPT_DUPLICATED") throw error;
+      logger.warn(`脚本重复度过高，自动重新生成一次：${error.message}`);
+      report({
+        stage: "script",
+        percent: 8,
+        message: "脚本重复度过高，正在重新生成剧本",
+      });
+      script = await scriptProvider.generate(
+        {
+          ...scriptRequest,
+          story: `${story ? `${story}\n\n` : ""}注意：上一次生成把同一句台词/旁白重复写了好几次，这次每个分镜的内容必须互不相同，按剧情推进。`,
+        },
+        signal,
+      );
+    }
     throwIfAborted(signal);
     if (story && script.provider === "offline") {
       warnings.push(

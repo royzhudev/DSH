@@ -7,7 +7,8 @@ import { probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
 import { silentLogger } from "../../src/logger.js";
 import { CastLibrary } from "../../src/cast/library.js";
 import { MaterialLibrary } from "../../src/materials/library.js";
-import type { LipsyncProvider } from "../../src/types.js";
+import type { LipsyncProvider, Script } from "../../src/types.js";
+import { AppError } from "../../src/errors.js";
 import { generateTestImage, makeTempDir, makeTestConfig } from "../helpers.js";
 
 test(
@@ -285,3 +286,46 @@ test(
     }
   },
 );
+
+test(
+  "脚本把同一句旁白写了好几遍时，流水线自动重新生成一次剧本",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir);
+    const good: Script = {
+      title: "重试成功",
+      summary: "",
+      provider: "flaky",
+      segments: [
+        { id: 1, narration: "第一句台词。", keywords: [] },
+        { id: 2, narration: "第二句台词。", keywords: [] },
+      ],
+    };
+    let calls = 0;
+    const scriptProvider = {
+      name: "flaky",
+      generate: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new AppError("同一句台词重复了好几遍", { code: "SCRIPT_DUPLICATED" });
+        }
+        return good;
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "重试",
+        config,
+        logger: silentLogger,
+        scriptProvider: scriptProvider as never,
+        videoGenProvider: null,
+      });
+      assert.equal(calls, 2, "应当自动重新请求一次脚本");
+      assert.equal(result.segments.length, 2);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
