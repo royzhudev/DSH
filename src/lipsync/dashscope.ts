@@ -120,8 +120,9 @@ export class DashScopeLipsyncProvider implements LipsyncProvider {
         body: JSON.stringify({
           model: this.settings.model,
           input: { video_url: videoUrl, audio_url: audioUrl },
-          // 台词比画面略长时，让平台用“倒放-正放”扩展画面，避免台词被截断。
-          parameters: { video_extension: true },
+          // 不要把画面“倒放-正放”去凑音频长度：那会让同一镜头来回播放。
+          // 成片时长由渲染阶段保证（生成片段不足时定格补帧），这里保持不扩展。
+          parameters: { video_extension: false },
         }),
       },
     );

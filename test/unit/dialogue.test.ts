@@ -73,3 +73,41 @@ test("脚本解析：接受 lines 台词并回填 narration 与 cast", () => {
   assert.deepEqual(script.segments[0]!.cast, ["林小满", "客人"]);
   assert.equal(script.segments[1]!.lines, undefined);
 });
+
+test("对话音色：按角色性别自动分配男声/女声", () => {
+  const cast = [
+    { name: "黄乐", description: "28 岁男性，酒吧老板", kind: "character" },
+    { name: "林小满", description: "25 岁女性，齐肩短发", kind: "character" },
+  ];
+  const voices = assignDialogueVoices(["黄乐", "林小满"], cast, "zh-CN-XiaoxiaoNeural");
+  const male = voices.get("黄乐")!;
+  const female = voices.get("林小满")!;
+  assert.ok(["zh-CN-YunxiNeural", "zh-CN-YunjianNeural", "zh-CN-YunyangNeural"].includes(male), `男角色分到女声：${male}`);
+  assert.ok(["zh-CN-XiaoyiNeural", "zh-CN-XiaomoNeural"].includes(female), `女角色分到男声：${female}`);
+  assert.notEqual(male, female);
+});
+
+test("对话音色：同一角色跨分镜保持同一个声音", async () => {
+  const { OfflineScriptProvider } = await import("../../src/script/offline.js");
+  const script = await new OfflineScriptProvider().generate({
+    topic: "酒吧误会",
+    targetDurationSec: 20,
+    maxSegments: 4,
+    availableTags: [],
+    dialogue: true,
+    cast: [
+      { name: "黄乐", kind: "character", description: "28 岁男性" },
+      { name: "林小满", kind: "character", description: "25 岁女性" },
+    ],
+  });
+  const speakers = [
+    ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
+  ];
+  const cast = [
+    { name: "黄乐", description: "28 岁男性" },
+    { name: "林小满", description: "25 岁女性" },
+  ];
+  const voices = assignDialogueVoices(speakers, cast, "zh-CN-XiaoxiaoNeural");
+  assert.ok(voices.has("黄乐") && voices.has("林小满"));
+  assert.notEqual(voices.get("黄乐"), voices.get("林小满"));
+});

@@ -130,7 +130,7 @@ test("口型同步：上传视频与配音、提交任务并下载成片", { tim
     assert.equal(body.model, "videoretalk");
     assert.match(body.input.video_url, /^oss:\/\//);
     assert.match(body.input.audio_url, /^oss:\/\//);
-    assert.equal(body.parameters.video_extension, true);
+    assert.equal(body.parameters.video_extension, false, "不能倒放-正放补时长，否则同一镜头来回播放");
 
     const poll = calls.find((call) => call.url.endsWith("/api/v1/tasks/task-1"));
     assert.ok(poll);

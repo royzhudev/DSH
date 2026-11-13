@@ -59,6 +59,17 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
         `zoompan=z='min(zoom+0.0007,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${config.video.width}x${config.video.height}:fps=${config.video.fps}`,
         "setsar=1",
       ].join(",");
+    } else if (options.materialPath) {
+      // AI 生成的分镜视频：不足时长时定格最后一帧补齐，不要循环播放，
+      // 否则同一镜头会反复出现（口型同步还会倒放-正放，看起来像卡带）。
+      inputArgs = ["-i", visualPath];
+      videoFilter = [
+        `scale=${config.video.width}:${config.video.height}:force_original_aspect_ratio=increase`,
+        `crop=${config.video.width}:${config.video.height}`,
+        "setsar=1",
+        `fps=${config.video.fps}`,
+        `tpad=stop_mode=clone:stop_duration=${durationSec.toFixed(2)}`,
+      ].join(",");
     } else {
       inputArgs = ["-stream_loop", "-1", "-i", visualPath];
       videoFilter = [
