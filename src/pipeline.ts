@@ -11,6 +11,7 @@ import type {
   PipelineResult,
   ProgressReporter,
   ScriptProvider,
+  ScriptSegment,
   SegmentPlan,
   SegmentResult,
   SubtitleCue,
@@ -30,7 +31,7 @@ import { CastLibrary, castSummary, resolveCastNames, selectCastAssets } from "./
 import { buildShotPrompt } from "./cast/prompt.js";
 import { isAiVideoEnabled } from "./config.js";
 import { preflightVideoJob } from "./preflight.js";
-import { renderSegment } from "./render/segment.js";
+import { burnSegmentSubtitles, renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
@@ -192,6 +193,18 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   };
 }
 
+
+/** 脚本没写清分镜出场角色时，用已上传的角色兜底，避免参考图完全没用上。 */
+function inferSegmentCast(segment: ScriptSegment, cast: CastAsset[]): CastAsset[] {
+  const characters = cast.filter((asset) => asset.kind === "character");
+  if (characters.length === 0) return [];
+  if (characters.length === 1) return characters;
+  const mentioned = characters.filter(
+    (asset) => segment.narration.includes(asset.name) || segment.lines?.some((line) => line.speaker.includes(asset.name)),
+  );
+  return mentioned;
+}
+
 export async function runPipeline(options: RunPipelineOptions): Promise<PipelineResult> {
   const { topic, config } = options;
   const logger = options.logger ?? silentLogger;
@@ -332,11 +345,21 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       const durationSec = round3(
         Math.max(tts.durationSec + config.video.tailPaddingSec, config.video.minSegmentSec),
       );
+      const explicitCast = resolveCastNames(segment.cast, cast);
+      const inferredCast = explicitCast.length > 0 ? [] : inferSegmentCast(segment, cast);
+      if (inferredCast.length > 0) {
+        logger.info(
+          `分镜 ${index + 1} 脚本没有写角色名，按已上传角色代入：${inferredCast.map((item) => item.name).join("、")}`,
+        );
+        warnings.push(
+          `分镜 ${index + 1} 的脚本没有标明出场角色，已按角色库代入「${inferredCast.map((item) => item.name).join("、")}」；如需换人请在脚本里写明角色名。`,
+        );
+      }
       plans.push({
         index,
         segment,
         material: null,
-        cast: resolveCastNames(segment.cast, cast),
+        cast: explicitCast.length > 0 ? explicitCast : inferredCast,
         tts,
         durationSec,
         cues,
@@ -356,6 +379,17 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       options.videoGenProvider === undefined
         ? createVideoGenProvider(config, logger)
         : options.videoGenProvider;
+    const castCharacters = cast.filter((asset) => asset.kind === "character");
+    const plansWithCast = plans.filter((plan) => plan.cast.some((asset) => asset.kind === "character"));
+    if (!videoGen && castCharacters.length > 0) {
+      warnings.push(
+        `角色库里已有 ${castCharacters.length} 个角色，但没有启用 AI 画面生成，成片只会用素材/背景，不会出现角色形象；在设置里配置 AI 画面模型后才会用角色参考图。`,
+      );
+    } else if (videoGen && castCharacters.length > 0 && plansWithCast.length === 0) {
+      warnings.push(
+        "脚本没有任何分镜引用角色库，已上传的角色形象不会出现在成片里；请在剧本里写明角色名，或重新生成脚本。",
+      );
+    }
     const usedIds = new Set<string>();
     for (let index = 0; index < plans.length; index += 1) {
       throwIfAborted(signal);
@@ -446,6 +480,12 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         percent: Math.round(renderBase + (index / plans.length) * (88 - renderBase)),
         message: `剪辑分镜 ${index + 1}/${plans.length}`,
       });
+      const willSync =
+        Boolean(lipsyncProvider) &&
+        Boolean(plan.lines && plan.lines.length > 0) &&
+        plan.durationSec > 2 &&
+        plan.durationSec < 120 &&
+        plan.cast.some((asset) => asset.kind === "character");
       const result = await renderSegment({
         index: plan.index + 1,
         segment: plan.segment,
@@ -458,15 +498,12 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         jobDir,
         topic: normalizedTopic,
         logger,
+        // 口型同步会把整帧重新生成，先不烧字幕，同步后再补，避免文字被模型重绘。
+        ...(willSync ? { burnSubtitles: false } : {}),
       });
       let segmentFile = result.file;
       // 口型结果按分镜序号记录，供 result.json 展示。
-      const syncable =
-        Boolean(lipsyncProvider) &&
-        Boolean(plan.lines && plan.lines.length > 0) &&
-        plan.durationSec > 2 &&
-        plan.durationSec < 120 &&
-        plan.cast.some((asset) => asset.kind === "character");
+      const syncable = willSync;
       if (syncable && lipsyncProvider) {
         report({
           stage: "lipsync",
@@ -481,6 +518,22 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           );
           segmentFile = synced.file;
           lipsyncStats.synced += 1;
+          // VideoRetalk 会按音频扩展/截断画面，字幕与后续分镜起点必须按真实时长重算。
+          const syncedProbe = await probeMedia(segmentFile);
+          const syncedDuration = round3(Math.max(syncedProbe.durationSec ?? plan.durationSec, 0.1));
+          if (Math.abs(syncedDuration - plan.durationSec) > 0.05) {
+            logger.info(
+              `分镜 ${index + 1} 口型同步后时长 ${plan.durationSec.toFixed(2)}s → ${syncedDuration.toFixed(2)}s，已按新时长重排字幕与后续分镜`,
+            );
+            plan.durationSec = syncedDuration;
+          }
+          segmentFile = await burnSegmentSubtitles({
+            index: index + 1,
+            file: segmentFile,
+            cues: plan.cues,
+            config,
+            logger,
+          });
           logger.info(`分镜 ${index + 1} 口型已同步（${synced.model}）`);
         } catch (error) {
           if (!config.lipsync.fallbackToUnsynced) throw error;
@@ -500,6 +553,13 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         );
       }
       rendered.push(segmentFile);
+    }
+
+    // 口型同步可能改变分镜时长：按最终时长重排起点，保证 SRT 与画面一致。
+    let finalCursor = 0;
+    for (const plan of plans) {
+      plan.startSec = round3(finalCursor);
+      finalCursor = round3(finalCursor + plan.durationSec);
     }
 
     throwIfAborted(signal);

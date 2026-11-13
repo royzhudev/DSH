@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { runPipeline } from "../../src/pipeline.js";
-import { probeMedia } from "../../src/media/ffmpeg.js";
+import { probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
 import { silentLogger } from "../../src/logger.js";
 import { CastLibrary } from "../../src/cast/library.js";
 import { MaterialLibrary } from "../../src/materials/library.js";
@@ -147,9 +147,14 @@ test(
         dialogue: true,
         lipsyncProvider: provider,
       });
-      assert.ok(calls.length >= 1, "对话分镜应调用口型同步");
+      assert.ok(calls.length >= 1, "对话分镜应按已上传角色调用口型同步");
       assert.equal(calls.length, result.segments.filter((segment) => segment.lines?.length).length);
       assert.ok(result.segments.every((segment) => segment.lipsync === "synced"));
+      // 脚本里只有“我/你”时，也要代入已上传的单个角色，不能因为名字对不上就丢掉参考图
+      assert.ok(
+        result.segments.every((segment) => segment.cast?.some((asset) => asset.name === "林小满")),
+        "每个分镜都应带上已上传角色",
+      );
       const srt = await fs.readFile(result.srtPath, "utf8");
       assert.match(srt, /：/);
       const probe = await probeMedia(result.videoPath);
@@ -184,6 +189,78 @@ test(
       });
       assert.ok(result.segments.every((segment) => segment.lipsync === "unsynced"));
       assert.ok(result.warnings?.some((warning) => warning.includes("口型同步失败")));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "口型同步：时长变化后字幕与后续分镜起点重排，不再错位",
+  { timeout: 300_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "silent" } });
+    const library = new CastLibrary(config.castDir, silentLogger);
+    await library.add({ kind: "character", name: "林小满", description: "25 岁女性" });
+    const provider: LipsyncProvider = {
+      name: "fake",
+      async sync(request) {
+        const target = path.join(path.dirname(request.videoFile), "fake-synced.mp4");
+        // 模拟 VideoRetalk 的 video_extension：画面被拉长到 3.2 秒
+        await runFfmpeg([
+          "-y",
+          "-stream_loop",
+          "-1",
+          "-i",
+          request.videoFile,
+          "-i",
+          request.audioFile,
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          "-t",
+          "3.2",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "ultrafast",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "aac",
+          target,
+        ]);
+        return { provider: "fake", model: "fake", file: target, durationSec: 3.2 };
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "外卖员被冤枉",
+        config,
+        logger: silentLogger,
+        dialogue: true,
+        lipsyncProvider: provider,
+      });
+      assert.ok(result.segments.every((segment) => segment.lipsync === "synced"));
+      const total = result.segments.reduce((sum, segment) => sum + segment.durationSec, 0);
+      assert.ok(Math.abs(total - result.durationSec) < 0.6, `时长对不上：${total} vs ${result.durationSec}`);
+      let expectedStart = 0;
+      for (const segment of result.segments) {
+        assert.ok(Math.abs(segment.startSec - expectedStart) < 0.05, "分镜起点应连续");
+        expectedStart += segment.durationSec;
+      }
+      const srt = await fs.readFile(result.srtPath, "utf8");
+      const ends = [...srt.matchAll(/(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> /g)].map((match) => {
+        const [, h, m, s, ms] = match;
+        return Number(h) * 3600 + Number(m) * 60 + Number(s) + Number(ms) / 1000;
+      });
+      assert.ok(ends.length > 0);
+      assert.ok(
+        Math.max(...ends) <= result.durationSec + 0.3,
+        `字幕结尾 ${Math.max(...ends)} 超过成片时长 ${result.durationSec}`,
+      );
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
