@@ -56,6 +56,13 @@ export function parseScriptJson(raw: string): unknown {
   }
 }
 
+/** 判重时只看“念出来的内容”：去掉标点、空白和全半角差异。 */
+function normalizeSpoken(text: string): string {
+  return text
+    .replace(/[\s，。！？、；：,.!?;:"'“”‘’（）()【】《》…—~-]/g, "")
+    .trim();
+}
+
 function cleanNarration(text: string): string {
   return text
     .replace(/^\s*(?:\d+[.、)]|[-*•])\s*/, "")
@@ -151,11 +158,11 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
     const lineKey = (segment.lines ?? [])
       .map((line) => `${line.speaker}：${line.text}`.replace(/\s+/g, ""))
       .join("|");
-    // 对话模式按台词判重：台词一样就是同一场戏，场景/镜头换个说法也算重复；
-    // 旁白模式仍按“旁白+场景+镜头”判重，同样的旁白可以在不同画面里出现。
-    const key = isDialogue
-      ? lineKey
-      : [segment.narration, segment.scene ?? "", segment.shot ?? ""].join("\u0000");
+    // 无论对话还是旁白，只要“念出来的内容”一样就是重复：观众听到的是同一句话，
+    // 场景/镜头换个说法也救不回来（之前按“旁白+场景+镜头”判重，同一句台词换了场景
+    // 就能溜过去，成片里一句词连播四次）。
+    const key = isDialogue ? lineKey : normalizeSpoken(segment.narration);
+
     if (seenSegments.has(key)) return false;
     seenSegments.add(key);
     return true;

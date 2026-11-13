@@ -251,18 +251,45 @@ test("normalizeScript 在去重后只剩一个分镜时给出明确报错", () =
   );
 });
 
-test("normalizeScript 保留台词相同但场景/镜头不同的分镜", () => {
+test("normalizeScript 按念出来的内容判重：旁白一样就算不同场景也只留一条", () => {
+  // 观众听到的是同一句话，场景/镜头换个说法也救不回来，必须在脚本层就丢掉。
+  assert.throws(
+    () =>
+      normalizeScript(
+        {
+          title: "重复台词",
+          segments: [
+            { narration: "我不走。", scene: "客厅，白天", shot: "中景" },
+            { narration: "我不走！", scene: "雨夜街头", shot: "特写" },
+          ],
+        },
+        { provider: "test", topic: "重复台词", maxSegments: 8 },
+      ),
+    (error: unknown) => error instanceof AppError && error.code === "SCRIPT_DUPLICATED",
+  );
+});
+
+test("normalizeScript 只丢掉重复的旁白，其余分镜照常保留并重排 id", () => {
   const script = normalizeScript(
     {
-      title: "重复台词",
+      title: "重复旁白",
       segments: [
-        { narration: "我不走。", scene: "客厅，白天", shot: "中景" },
-        { narration: "我不走。", scene: "雨夜街头", shot: "特写" },
+        { narration: "合同里写着我陪。", scene: "包厢", shot: "中景" },
+        { narration: "皮衣哥嘴硬心软。", scene: "包厢", shot: "近景" },
+        { narration: "合同里写着我陪！", scene: "走廊", shot: "全景" },
+        { narration: "这单，我认了。", scene: "包厢", shot: "特写" },
       ],
     },
-    { provider: "test", topic: "重复台词", maxSegments: 8 },
+    { provider: "test", topic: "重复旁白", maxSegments: 8 },
   );
-  assert.equal(script.segments.length, 2);
+  assert.deepEqual(
+    script.segments.map((segment) => segment.narration),
+    ["合同里写着我陪。", "皮衣哥嘴硬心软。", "这单，我认了。"],
+  );
+  assert.deepEqual(
+    script.segments.map((segment) => segment.id),
+    [1, 2, 3],
+  );
 });
 
 
