@@ -258,16 +258,20 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
             file: path.join(config.castDir, asset.imageFile!),
           }));
         const primary = references.find((reference) => reference.role === "character") ?? references[0];
+        const shotPrompt = buildShotPrompt({
+          topic: normalizedTopic,
+          index: index + 1,
+          total: plans.length,
+          segment: plan.segment,
+          cast: plan.cast,
+        });
+        logger.info(
+          `分镜 ${index + 1}/${plans.length} 画面提示词：${shotPrompt.split("\n")[1] ?? shotPrompt.slice(0, 40)}`,
+        );
         try {
           const generated: GeneratedClip = await videoGen.generate(
             {
-              prompt: buildShotPrompt({
-                topic: normalizedTopic,
-                index: index + 1,
-                total: plans.length,
-                segment: plan.segment,
-                cast: plan.cast,
-              }),
+              prompt: shotPrompt,
               durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
               ...(primary ? { image: primary.file } : {}),
               ...(references.length > 0 ? { references } : {}),
@@ -298,6 +302,27 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         }
       }
     }
+    // 平台偶尔对不同分镜返回同一条视频；这里按文件内容对比，发现重复就明确告警，
+    // 免得成片里"同一个分镜出现了两次"却查不出原因。
+    const clipOwners = new Map<string, number>();
+    for (const plan of plans) {
+      if (!plan.generated?.file) continue;
+      try {
+        const digest = sha256((await fs.readFile(plan.generated.file)).toString("base64"));
+        const owner = clipOwners.get(digest);
+        if (owner) {
+          warnings.push(
+            `分镜 ${owner} 与分镜 ${plan.index + 1} 拿到的是同一条生成视频，建议对这两镜换提示词或重新生成。`,
+          );
+          logger.warn(`分镜 ${owner} 与分镜 ${plan.index + 1} 生成视频内容完全一致：${plan.generated.file}`);
+        } else {
+          clipOwners.set(digest, plan.index + 1);
+        }
+      } catch (error) {
+        logger.warn(`对比分镜 ${plan.index + 1} 生成视频失败：${toErrorMessage(error)}`);
+      }
+    }
+
     report({
       stage: "materials",
       percent: 65,

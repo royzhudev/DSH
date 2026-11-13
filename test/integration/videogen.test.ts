@@ -122,3 +122,60 @@ test(
     assert.equal(await fs.stat(result.videoPath).then((stat) => stat.size > 0), true);
   },
 );
+
+test(
+  "流水线：多个分镜各用各的生成视频，重复内容会给出告警",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, {
+      script: { provider: "offline", targetDurationSec: 16, maxSegments: 4 },
+      videoGen: {
+        provider: "http",
+        baseUrl: "http://127.0.0.1:1",
+        model: "fake-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5000,
+        clipDurationSec: 2,
+        fallbackToMaterials: true,
+      },
+    });
+    const clips: string[] = [];
+    for (const [index, color] of ["red", "green", "blue", "yellow"].entries()) {
+      const file = path.join(dir, `clip-${index}.mp4`);
+      await runFfmpeg(["-y", "-f", "lavfi", "-i", `color=c=${color}:s=160x160:d=1.5`, "-pix_fmt", "yuv420p", file]);
+      clips.push(file);
+    }
+    const requests: VideoGenRequest[] = [];
+    // 第 3 镜故意返回第 1 镜的视频，模拟平台对两个分镜给出同一条结果。
+    const provider: VideoGenProvider = {
+      name: "fake",
+      model: "fake-model",
+      generate: async (request) => {
+        requests.push(request);
+        const index = requests.length - 1;
+        const file = index === 2 ? clips[0]! : clips[index % clips.length]!;
+        return { file, durationSec: 1.5, provider: "fake", model: "fake-model" };
+      },
+    };
+    const result = await runPipeline({
+      topic: "城市夜景",
+      config,
+      logger: silentLogger,
+      videoGenProvider: provider,
+    });
+
+    assert.equal(result.segments.length >= 3, true);
+    // 每个分镜的提示词都不同（镜头序号不同）。
+    assert.equal(new Set(requests.map((request) => request.prompt)).size, requests.length);
+    assert.equal(
+      (result.warnings ?? []).some((warning) => warning.includes("同一条生成视频")),
+      true,
+      `重复画面没有被识别：${(result.warnings ?? []).join(" / ")}`,
+    );
+    assert.equal(await fs.stat(result.videoPath).then((stat) => stat.size > 0), true);
+  },
+);
+
