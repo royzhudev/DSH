@@ -76,6 +76,7 @@ node dist/cli.js create --topic "城市夜景"
 - 视频模型本身不出声：配音先在 TTS 阶段按角色生成，再与画面对齐；需要口型对齐时接下面的 VideoRetalk。
 - 每句配音的时间轴是真实时长，多句按顺序拼接成该分镜的音轨，再接画面。
 - 非 Edge 供应商不支持切换音色时，仍逐句合成，字幕保留说话人；静音占位仅用于演示/测试。
+- Edge 是免费基础音色；要更接近短剧演员的自然表演，可在设置里换成 OpenAI 兼容 TTS（如 `gpt-4o-mini-tts`），系统会为每个角色分配不同音色，并按角色设定传 `instructions` 表演提示（口语化、停顿起伏、不要朗读腔）。
 - 命令行为 `video-agent create --dialogue`；API 为 `dialogue: true`（创建任务与 `/api/scripts/generate` 预览都支持）。
 
 ## 口型同步（人物对白）

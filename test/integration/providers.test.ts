@@ -103,3 +103,51 @@ test(
     assert.ok(result.durationSec > 3);
   },
 );
+test("OpenAI 配音：按角色传 speed 与 instructions 表演提示", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let received: Record<string, unknown> = {};
+  const server = http.createServer();
+  server.on("request", (req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      received = JSON.parse(raw || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+    });
+  });
+  const port = await new Promise<number>((resolve) => server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    resolve(typeof address === "object" && address ? address.port : 0);
+  }));
+  try {
+    const { OpenAiTtsProvider } = await import("../../src/tts/openai.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "openai",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key",
+        model: "gpt-4o-mini-tts",
+        voice: "onyx",
+        rate: 0.94,
+      },
+    });
+    const provider = new OpenAiTtsProvider(config.tts, config.cacheDir, silentLogger);
+    await provider.synthesize({
+      text: "合同里写着我陪。",
+      cacheKey: "openai-style-test",
+      rate: 0.94,
+      instructions: "像短剧演员一样自然地说台词，不要朗读腔。",
+    });
+    assert.equal(received.voice, "onyx");
+    assert.equal(received.speed, 0.94);
+    assert.ok(String(received.instructions).includes("不要朗读腔"));
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

@@ -173,10 +173,16 @@ export async function burnSegmentSubtitles(options: {
   cues: SubtitleCue[];
   config: AppConfig;
   logger: Logger;
+  /**
+   * 输出目录；必须传分镜自己的目录。口型同步的视频写在任务根目录，
+   * 如果这里用 dirname(file)，所有分镜都会写同一个 segment-subbed.mp4，
+   * 后一镜覆盖前一镜，拼接时就会把同一段画面重复拼 N 次。
+   */
+  outputDir: string;
 }): Promise<string> {
-  const { index, file, cues, config, logger } = options;
+  const { index, file, cues, config, logger, outputDir } = options;
   if (!config.subtitles.enabled || cues.length === 0) return file;
-  const segDir = path.dirname(file);
+  const segDir = outputDir;
   const assFile = path.join(segDir, `sub-${index}.ass`);
   await fs.writeFile(
     assFile,

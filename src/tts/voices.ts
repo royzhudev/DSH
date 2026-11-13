@@ -9,6 +9,7 @@
  * 同一个角色每次生成都得到同一个音色。
  */
 
+export type VoicePoolName = "edge" | "openai";
 export type VoiceGender = "female" | "male" | "unknown";
 export type VoiceAge = "young" | "middle" | "old" | "unknown";
 
@@ -33,6 +34,27 @@ const EDGE_VOICE_PROFILES: EdgeVoiceProfile[] = [
 ];
 
 export const EDGE_VOICE_POOL = EDGE_VOICE_PROFILES.map((profile) => profile.voice);
+
+/**
+ * OpenAI 兼容 TTS 的音色池（gpt-4o-mini-tts / tts-1 通用名称）。
+ * 这些音色同样按性别/年龄打标签；支持 instructions 的模型还能按角色写表演提示。
+ */
+const OPENAI_VOICE_PROFILES: EdgeVoiceProfile[] = [
+  { voice: "nova", gender: "female", age: "young", note: "明亮年轻女声" },
+  { voice: "shimmer", gender: "female", age: "young", note: "柔和女声" },
+  { voice: "coral", gender: "female", age: "middle", note: "温暖成熟女声" },
+  { voice: "sage", gender: "female", age: "old", note: "沉稳年长女声" },
+  { voice: "alloy", gender: "male", age: "young", note: "中性年轻声线" },
+  { voice: "echo", gender: "male", age: "young", note: "清亮男声" },
+  { voice: "onyx", gender: "male", age: "middle", note: "低沉男声" },
+  { voice: "fable", gender: "male", age: "old", note: "年长叙事男声" },
+];
+
+export const OPENAI_VOICE_POOL = OPENAI_VOICE_PROFILES.map((profile) => profile.voice);
+
+function profilesFor(pool: VoicePoolName): EdgeVoiceProfile[] {
+  return pool === "openai" ? OPENAI_VOICE_PROFILES : EDGE_VOICE_PROFILES;
+}
 
 const FEMALE_HINTS = ["女", "姐", "妹", "姑娘", "女孩", "少女", "阿姨", "妈妈", "母亲", "奶奶", "姥姥", "女士", "太太", "妻子", "她"];
 const MALE_HINTS = ["男", "哥", "弟", "男孩", "少年", "大叔", "叔叔", "爸爸", "父亲", "爷爷", "姥爷", "先生", "丈夫", "他"];
@@ -84,14 +106,15 @@ function hashName(name: string): number {
  * 按人物设定筛出候选音色：性别、年龄都对得上的优先；
  * 对不上时逐级放宽（先只保性别，再退回整个池子），保证总能给出音色。
  */
-function candidateVoices(gender: VoiceGender, age: VoiceAge): string[] {
+function candidateVoices(gender: VoiceGender, age: VoiceAge, poolName: VoicePoolName = "edge"): string[] {
+  const all = profilesFor(poolName);
   const byGender = (profile: EdgeVoiceProfile): boolean =>
     gender === "unknown" || profile.gender === gender;
-  const exact = EDGE_VOICE_PROFILES.filter(
+  const exact = all.filter(
     (profile) => byGender(profile) && (age === "unknown" || profile.age === age),
   );
-  const sameGender = EDGE_VOICE_PROFILES.filter(byGender);
-  const pool = exact.length > 0 ? exact : sameGender.length > 0 ? sameGender : EDGE_VOICE_PROFILES;
+  const sameGender = all.filter(byGender);
+  const pool = exact.length > 0 ? exact : sameGender.length > 0 ? sameGender : all;
   return pool.map((profile) => profile.voice);
 }
 
@@ -111,13 +134,14 @@ export function resolveSpeakerVoice(
   cast: SpeakerLike[],
   fallbackVoice: string,
   used: Set<string> = new Set(),
+  pool: VoicePoolName = "edge",
 ): string {
   const asset = cast.find((item) => item.name === speaker);
   const explicit = asset?.voice?.trim();
   if (explicit) return explicit;
 
   const description = asset?.description ?? "";
-  const candidates = candidateVoices(inferVoiceGender(description), inferVoiceAge(description));
+  const candidates = candidateVoices(inferVoiceGender(description), inferVoiceAge(description), pool);
   const preferred = hashName(speaker) % candidates.length;
   for (let offset = 0; offset < candidates.length; offset += 1) {
     const candidate = candidates[(preferred + offset) % candidates.length]!;
@@ -136,13 +160,28 @@ export function assignDialogueVoices(
   speakers: string[],
   cast: SpeakerLike[],
   fallbackVoice: string,
+  pool: VoicePoolName = "edge",
 ): Map<string, string> {
   const used = new Set<string>();
   const result = new Map<string, string>();
   for (const speaker of speakers) {
-    result.set(speaker, resolveSpeakerVoice(speaker, cast, fallbackVoice, used));
+    result.set(speaker, resolveSpeakerVoice(speaker, cast, fallbackVoice, used, pool));
   }
   return result;
+}
+
+/**
+ * 给支持 instructions 的 TTS（OpenAI gpt-4o-mini-tts 等）写表演提示：
+ * 用短剧演员的口语感，避免“念稿子”的僵硬感。
+ */
+export function voiceStyleFor(description: string): string {
+  const age = inferVoiceAge(description);
+  const gender = inferVoiceGender(description);
+  const parts = ["像短剧演员一样自然地说台词，口语化，停顿和语气有起伏，不要朗读腔。"];
+  parts.push(gender === "male" ? "成年男声。" : gender === "female" ? "成年女声。" : "");
+  if (age === "old") parts.push("语速偏慢，声音低沉一些。");
+  if (age === "young") parts.push("语气轻快，有活力。");
+  return parts.filter(Boolean).join("");
 }
 
 /** 每个角色的音高微调：年长角色压低，年轻角色略提高，避免和年龄设定违和。 */
