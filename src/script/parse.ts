@@ -120,6 +120,26 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
     }
   }
 
+  // 模型偶尔把同一句台词（连同同一个场景/镜头）重复输出，成片就会变成“同一个镜头来回放”。
+  // 内容完全相同的分镜只保留第一次出现的那条，别把重复项送去配音和画面生成。
+  const seenSegments = new Set<string>();
+  const uniqueSegments = segments.filter((segment) => {
+    const key = [segment.narration, segment.scene ?? "", segment.shot ?? ""].join("\u0000");
+    if (seenSegments.has(key)) return false;
+    seenSegments.add(key);
+    return true;
+  });
+  if (uniqueSegments.length < segments.length) {
+    if (uniqueSegments.length < 2) {
+      throw new AppError(
+        "脚本模型把同一段内容重复输出了好几遍，去掉重复后只剩 1 个分镜；这样生成的片子会一直是同一个镜头，请重试或补充剧情细节。",
+        { code: "SCRIPT_DUPLICATED" },
+      );
+    }
+    segments.length = 0;
+    segments.push(...uniqueSegments);
+  }
+
   if (segments.length < 2) {
     throw new AppError("脚本至少需要 2 个有效分镜", { code: "SCRIPT_INVALID" });
   }

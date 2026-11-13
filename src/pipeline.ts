@@ -412,6 +412,16 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         // 角色参考图是“人设定妆照”，不是每个分镜的首帧。所有镜头都拿同一张图做首帧，
         // 生成结果会像同一个镜头重复播放。只让第 1 镜定调，其余镜头按剧本文字生成不同画面。
         const firstFrame = index === 0 ? primary : undefined;
+        const shotPrompt = buildShotPrompt({
+          topic: normalizedTopic,
+          index: index + 1,
+          total: plans.length,
+          segment: plan.segment,
+          cast: plan.cast,
+        });
+        logger.info(
+          `分镜 ${index + 1}/${plans.length} 画面提示词：${shotPrompt.split("\n")[1] ?? shotPrompt.slice(0, 40)}`,
+        );
         try {
           const generated: GeneratedClip = await videoGen.generate(
             {
