@@ -41,7 +41,7 @@ function buildUserPrompt(request: ScriptRequest): string {
       : "（素材库暂无可选标签，请给出通用画面关键词）";
   const dialogue = request.dialogue === true;
   const format = dialogue
-    ? `6. 只输出如下结构的 JSON（对话模式：每个分镜用 lines 给出 2 到 4 句人物台词，speaker 必须是上面清单里的角色名；narration 用“角色：台词”按顺序拼接，供字幕兜底）：
+    ? `7. 只输出如下结构的 JSON（对话模式：每个分镜用 lines 给出 2 到 4 句人物台词，speaker 必须是上面清单里的角色名；narration 用“角色：台词”按顺序拼接，供字幕兜底）：
 {
   "title": "短剧标题，20 字以内",
   "summary": "一句话概括",
@@ -60,7 +60,7 @@ function buildUserPrompt(request: ScriptRequest): string {
     }
   ]
 }`
-    : `6. 只输出如下结构的 JSON：
+    : `7. 只输出如下结构的 JSON：
 {
   "title": "视频标题，20 字以内",
   "summary": "一句话概括",
@@ -85,7 +85,8 @@ function buildUserPrompt(request: ScriptRequest): string {
 ${speech}
 3. 每个分镜给出 2 到 4 个画面检索关键词，优先从以下素材标签中选择：${tags}
 4. 每个分镜补全 scene（场景：地点/时间/光线）和 shot（镜头：景别、人物动作、构图），用于画面生成。
-5. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
+5. 每个分镜必须推进剧情：不要重复前面分镜的台词、场景或镜头描述，相邻分镜的景别/机位要有变化，避免成片看起来是同一个镜头反复播放。
+6. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
 ${format}`;
 }
 export interface OpenAiScriptOptions {

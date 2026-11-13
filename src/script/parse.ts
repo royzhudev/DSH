@@ -120,16 +120,48 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
     }
   }
 
+  // 模型有时把同一句台词写进好几个分镜，成片就会同一句反复出现。
+  // 这里按“说话人+台词”全片去重，只保留第一次出现；分镜台词被清空的整段丢掉。
+  const seenLines = new Set<string>();
+  for (const segment of segments) {
+    if (!segment.lines || segment.lines.length === 0) continue;
+    const kept = segment.lines.filter((line) => {
+      const key = `${line.speaker}：${line.text}`;
+      if (line.text.length >= 4 && seenLines.has(key)) return false;
+      seenLines.add(key);
+      return true;
+    });
+    if (kept.length !== segment.lines.length) {
+      segment.lines = kept;
+      segment.narration = kept.map((line) => `${line.speaker}：${line.text}`).join(" ");
+    }
+  }
+  const withoutRepeatedLines = segments.filter(
+    (segment) => segment.lines === undefined || segment.lines.length > 0,
+  );
+  const droppedLines = segments.length - withoutRepeatedLines.length;
+  segments.length = 0;
+  segments.push(...withoutRepeatedLines);
+
   // 模型偶尔把同一句台词（连同同一个场景/镜头）重复输出，成片就会变成“同一个镜头来回放”。
-  // 内容完全相同的分镜只保留第一次出现的那条，别把重复项送去配音和画面生成。
+  // 台词相同就算重复（场景/镜头措辞不同也算），只保留第一次出现的那条。
   const seenSegments = new Set<string>();
   const uniqueSegments = segments.filter((segment) => {
-    const key = [segment.narration, segment.scene ?? "", segment.shot ?? ""].join("\u0000");
+    const isDialogue = (segment.lines ?? []).length > 0;
+    const lineKey = (segment.lines ?? [])
+      .map((line) => `${line.speaker}：${line.text}`.replace(/\s+/g, ""))
+      .join("|");
+    // 对话模式按台词判重：台词一样就是同一场戏，场景/镜头换个说法也算重复；
+    // 旁白模式仍按“旁白+场景+镜头”判重，同样的旁白可以在不同画面里出现。
+    const key = isDialogue
+      ? lineKey
+      : [segment.narration, segment.scene ?? "", segment.shot ?? ""].join("\u0000");
     if (seenSegments.has(key)) return false;
     seenSegments.add(key);
     return true;
   });
-  if (uniqueSegments.length < segments.length) {
+  const droppedSegments = segments.length - uniqueSegments.length + droppedLines;
+  if (droppedSegments > 0) {
     if (uniqueSegments.length < 2) {
       throw new AppError(
         "脚本模型把同一段内容重复输出了好几遍，去掉重复后只剩 1 个分镜；这样生成的片子会一直是同一个镜头，请重试或补充剧情细节。",
@@ -155,5 +187,6 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
     summary: (parsed.data.summary ?? "").trim(),
     segments: limited,
     provider: options.provider,
+    ...(droppedSegments > 0 ? { droppedSegments } : {}),
   };
 }

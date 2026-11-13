@@ -55,6 +55,8 @@ export interface Script {
   provider: string;
   /** dialogue：人物对话（多音色）；narration：第三人称旁白。 */
   mode?: "dialogue" | "narration";
+  /** 脚本里被判定为重复而丢掉的分镜数量（台词/旁白相同）。 */
+  droppedSegments?: number;
 }
 
 export type MaterialType = "video" | "image";

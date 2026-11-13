@@ -298,6 +298,12 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         "当前使用离线脚本模板，剧本/大纲没有参与分镜生成；配置脚本模型后可严格按剧本生成。",
       );
     }
+    if (script.droppedSegments && script.droppedSegments > 0) {
+      warnings.push(
+        `脚本里有 ${script.droppedSegments} 个内容重复的分镜已自动去掉（台词/旁白相同），避免成片出现同一镜头反复播放。`,
+      );
+      logger.warn(`脚本去重：丢掉 ${script.droppedSegments} 个重复分镜`);
+    }
     await writeJsonFile(scriptPath, script);
     logger.info(`脚本已生成：${script.title}（${script.segments.length} 段）`);
     report({
