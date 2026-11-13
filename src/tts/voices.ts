@@ -145,6 +145,24 @@ export function assignDialogueVoices(
   return result;
 }
 
+/** 每个角色的音高微调：年长角色压低，年轻角色略提高，避免和年龄设定违和。 */
+export function voicePitchFor(description: string): string {
+  const age = inferVoiceAge(description);
+  if (age === "old") return "-4Hz";
+  if (age === "young") return "+2Hz";
+  return "0Hz";
+}
+
+/**
+ * 每个角色的音量增量（百分比）：只对需要提高嗓门的台词加一点，
+ * 其余保持 0，响度差由拼接阶段的 loudnorm 统一拉平。
+ */
+export function voiceVolumeFor(description: string, text: string): number {
+  if (/喊|吼|嚷|咆哮|大叫|站住|住手|闭嘴|滚开|放开|不许|别动/.test(text)) return 6;
+  if (/耳语|小声|低声|别出声|压低声音|悄悄/.test(text)) return -4;
+  return 0;
+}
+
 /** 每个角色的语速微调：年长角色慢一点，年轻角色略快，让对白更像真人。 */
 export function voiceRateFor(description: string, baseRate: number): number {
   const age = inferVoiceAge(description);

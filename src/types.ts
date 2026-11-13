@@ -383,6 +383,10 @@ export interface ScriptProvider {
 export interface TtsRequest {
   text: string;
   cacheKey: string;
+  /** 逐句语气：语速倍率（1 为正常）、音量增量（百分比）、音高增量（如 "-4Hz"）。 */
+  rate?: number;
+  volume?: number;
+  pitch?: string;
 }
 
 export interface TtsProvider {

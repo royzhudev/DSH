@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assignDialogueVoices, inferVoiceAge, inferVoiceGender, resolveSpeakerVoice, voiceRateFor } from "../../src/tts/voices.js";
+import {
+  assignDialogueVoices,
+  inferVoiceAge,
+  inferVoiceGender,
+  resolveSpeakerVoice,
+  voicePitchFor,
+  voiceRateFor,
+  voiceVolumeFor,
+} from "../../src/tts/voices.js";
 import { OfflineScriptProvider } from "../../src/script/offline.js";
 import { normalizeScript } from "../../src/script/parse.js";
 
@@ -112,3 +120,12 @@ test("对话音色：能从设定里读出年龄段，并据此微调语速", ()
   assert.equal(inferVoiceGender("推门进来"), "unknown");
 });
 
+
+test("对话语气：音高按年龄微调，音量只跟着台词强度变", () => {
+  assert.equal(voicePitchFor("70 岁的退休教师"), "-4Hz");
+  assert.equal(voicePitchFor("20 岁女大学生"), "+2Hz");
+  assert.equal(voicePitchFor("看不出年纪的人"), "0Hz");
+  assert.equal(voiceVolumeFor("30 岁男性", "你站住！"), 6);
+  assert.equal(voiceVolumeFor("30 岁男性", "别出声，跟我来。"), -4);
+  assert.equal(voiceVolumeFor("30 岁男性", "我们走吧。"), 0);
+});
