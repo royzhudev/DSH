@@ -386,13 +386,22 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     if (this.protocol() === "dashscope") {
       const duration = Math.max(1, Math.round(request.durationSec));
       const wan3 = /^wan3[.\-]/i.test(this.settings.model.trim());
+      // 角色/道具参考图必须走到平台上，否则生成的人物和角色库里的完全不是一个人。
+      // 万相 3.0 用 media[type=reference_image]，最多 10 张；首帧与参考图互斥，二选一。
+      const referenceMedia = wan3
+        ? referenceImages
+            .slice(0, 10)
+            .map((reference) => ({ type: "reference_image", url: reference.image }))
+        : [];
+      const media: Array<{ type: string; url: string }> = [...referenceMedia];
+      // 首帧和参考图不能同时传（平台会报错），有角色参考图时以人物一致性优先。
+      if (image && media.length === 0) media.push({ type: "first_frame", url: image });
+      const input: Record<string, unknown> = { prompt: request.prompt };
+      if (media.length > 0) input.media = media;
+      else if (!wan3 && image) input.img_url = image;
       return {
         model: this.settings.model,
-        input: {
-          prompt: request.prompt,
-          // 万相 3.0 的图生视频用 media[type=first_frame]；早期模型用 img_url。
-          ...(image ? (wan3 ? { media: [{ type: "first_frame", url: image }] } : { img_url: image }) : {}),
-        },
+        input,
         parameters: wan3
           ? { resolution: this.DASHSCOPE_RESOLUTION, ratio: this.DASHSCOPE_RATIO, duration }
           : { duration, size: "720*1280" },

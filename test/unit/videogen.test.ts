@@ -924,3 +924,139 @@ test("HTTP 视频：提交成功但查询被拒时，保留任务 ID 交给调�
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("HTTP 视频：万相 3.0 把角色库参考图放进 media[type=reference_image]", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const bytes = await fs.readFile(clip);
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        protocol: "dashscope",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+      },
+    });
+    const hero = path.join(dir, "cast", "hero.png");
+    const extra = path.join(dir, "cast", "cafe.png");
+    await fs.mkdir(path.dirname(hero), { recursive: true });
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x884466:s=64x64", "-frames:v", "1", hero]);
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x223344:s=64x64", "-frames:v", "1", extra]);
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if ((init?.method ?? "GET") === "POST") {
+        body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ output: { task_id: "task-wan3-ref", task_status: "PENDING" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(input).endsWith("/files/clip.mp4")) return new Response(bytes, { status: 200 });
+      return new Response(
+        JSON.stringify({
+          output: { task_status: "SUCCEEDED", video_url: "https://dashscope.aliyuncs.com/files/clip.mp4" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+    await provider.generate(
+      {
+        prompt: "女主在咖啡馆说话",
+        durationSec: 5,
+        image: hero,
+        references: [
+          { role: "character", name: "女主", file: hero },
+          { role: "scene", name: "咖啡馆", file: extra },
+        ],
+      },
+      path.join(dir, "gen"),
+    );
+
+    const input = body?.input as {
+      media?: Array<{ type: string; url: string }>;
+      img_url?: string;
+    };
+    const media = input.media ?? [];
+    assert.equal(media.length, 2, "两张角色/场景参考图都要传给平台");
+    assert.equal(media.every((item) => item.type === "reference_image"), true);
+    assert.match(String(media[0]?.url), /^data:image\/png;base64,/);
+    // 首帧与参考图互斥：有参考图时不再单独传 first_frame，避免平台报错。
+    assert.equal(media.some((item) => item.type === "first_frame"), false);
+    assert.equal(input.img_url, undefined);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("HTTP 视频：没有参考图时万相 3.0 仍用首帧，且参考图最多 10 张", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const bytes = await fs.readFile(clip);
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        protocol: "dashscope",
+        baseUrl: "https://dashscope.aliyuncs.com",
+        model: "wan3.0-video",
+        apiKey: "sk-test",
+        submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
+        pollPath: "/api/v1/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+      },
+    });
+    const hero = path.join(dir, "cast", "hero.png");
+    await fs.mkdir(path.dirname(hero), { recursive: true });
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x884466:s=64x64", "-frames:v", "1", hero]);
+    const bodies: Array<Record<string, unknown>> = [];
+    let taskSeq = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if ((init?.method ?? "GET") === "POST") {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        taskSeq += 1;
+        return new Response(
+          JSON.stringify({ output: { task_id: `task-${taskSeq}`, task_status: "PENDING" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(input).endsWith("/files/clip.mp4")) return new Response(bytes, { status: 200 });
+      return new Response(
+        JSON.stringify({
+          output: { task_status: "SUCCEEDED", video_url: "https://dashscope.aliyuncs.com/files/clip.mp4" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger, { fetchImpl });
+
+    await provider.generate({ prompt: "无参考图", durationSec: 5, image: hero }, path.join(dir, "gen"));
+    const first = (bodies[0]?.input as { media?: Array<{ type: string }> }).media ?? [];
+    assert.equal(first[0]?.type, "first_frame");
+
+    // 12 张参考图只发前 10 张（平台上限）。
+    const many = Array.from({ length: 12 }, (_, index) => ({
+      role: "character",
+      name: `角色${index + 1}`,
+      file: hero,
+    }));
+    await provider.generate(
+      { prompt: "参考图超限", durationSec: 5, references: many },
+      path.join(dir, "gen"),
+    );
+    const second = (bodies[1]?.input as { media?: Array<{ type: string }> }).media ?? [];
+    assert.equal(second.length, 10);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
