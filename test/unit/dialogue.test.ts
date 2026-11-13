@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assignDialogueVoices, resolveSpeakerVoice } from "../../src/tts/voices.js";
+import { assignDialogueVoices, inferVoiceAge, inferVoiceGender, resolveSpeakerVoice, voiceRateFor } from "../../src/tts/voices.js";
 import { OfflineScriptProvider } from "../../src/script/offline.js";
 import { normalizeScript } from "../../src/script/parse.js";
 
@@ -74,40 +74,41 @@ test("脚本解析：接受 lines 台词并回填 narration 与 cast", () => {
   assert.equal(script.segments[1]!.lines, undefined);
 });
 
-test("对话音色：按角色性别自动分配男声/女声", () => {
-  const cast = [
-    { name: "黄乐", description: "28 岁男性，酒吧老板", kind: "character" },
-    { name: "林小满", description: "25 岁女性，齐肩短发", kind: "character" },
-  ];
-  const voices = assignDialogueVoices(["黄乐", "林小满"], cast, "zh-CN-XiaoxiaoNeural");
-  const male = voices.get("黄乐")!;
-  const female = voices.get("林小满")!;
-  assert.ok(["zh-CN-YunxiNeural", "zh-CN-YunjianNeural", "zh-CN-YunyangNeural"].includes(male), `男角色分到女声：${male}`);
-  assert.ok(["zh-CN-XiaoyiNeural", "zh-CN-XiaomoNeural"].includes(female), `女角色分到男声：${female}`);
-  assert.notEqual(male, female);
+test("对话音色：按人物设定的性别挑音色，不会给大叔配少女音", () => {
+  const female = resolveSpeakerVoice(
+    "林小满",
+    [{ name: "林小满", description: "25 岁女性，齐肩短发，米色风衣" }],
+    "zh-CN-YunxiNeural",
+  );
+  const male = resolveSpeakerVoice(
+    "老周",
+    [{ name: "老周", description: "45 岁男性，寸头，皮夹克，声音低沉" }],
+    "zh-CN-XiaoxiaoNeural",
+  );
+  assert.match(female, /Xiao/);
+  assert.doesNotMatch(female, /Yun/);
+  assert.match(male, /Yun/);
+  assert.doesNotMatch(male, /Xiao/);
 });
 
-test("对话音色：同一角色跨分镜保持同一个声音", async () => {
-  const { OfflineScriptProvider } = await import("../../src/script/offline.js");
-  const script = await new OfflineScriptProvider().generate({
-    topic: "酒吧误会",
-    targetDurationSec: 20,
-    maxSegments: 4,
-    availableTags: [],
-    dialogue: true,
-    cast: [
-      { name: "黄乐", kind: "character", description: "28 岁男性" },
-      { name: "林小满", kind: "character", description: "25 岁女性" },
-    ],
-  });
-  const speakers = [
-    ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
-  ];
-  const cast = [
-    { name: "黄乐", description: "28 岁男性" },
-    { name: "林小满", description: "25 岁女性" },
-  ];
-  const voices = assignDialogueVoices(speakers, cast, "zh-CN-XiaoxiaoNeural");
-  assert.ok(voices.has("黄乐") && voices.has("林小满"));
-  assert.notEqual(voices.get("黄乐"), voices.get("林小满"));
+test("对话音色：从设定里读不出性别时退回整个音色池，仍保持稳定", () => {
+  const cast = [{ name: "神秘人", description: "戴着兜帽，看不出年纪" }];
+  const first = resolveSpeakerVoice("神秘人", cast, "zh-CN-YunxiNeural");
+  const second = resolveSpeakerVoice("神秘人", cast, "zh-CN-YunxiNeural");
+  assert.equal(first, second);
+  assert.notEqual(first, "zh-CN-YunxiNeural");
 });
+
+test("对话音色：能从设定里读出年龄段，并据此微调语速", () => {
+  assert.equal(inferVoiceAge("25 岁女性"), "young");
+  assert.equal(inferVoiceAge("40 岁男性，公司经理"), "middle");
+  assert.equal(inferVoiceAge("68 岁的退休教师"), "old");
+  assert.equal(inferVoiceAge("看不出年纪"), "unknown");
+  assert.ok(voiceRateFor("68 岁的退休教师", 1) < 1);
+  assert.ok(voiceRateFor("25 岁女性", 1) > 1);
+  assert.equal(voiceRateFor("看不出年纪", 1), 1);
+  assert.equal(inferVoiceGender("她推门进来"), "female");
+  assert.equal(inferVoiceGender("他推门进来"), "male");
+  assert.equal(inferVoiceGender("推门进来"), "unknown");
+});
+

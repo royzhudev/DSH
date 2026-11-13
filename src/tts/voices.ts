@@ -1,33 +1,76 @@
 /**
  * 对话模式的音色分配。
  *
- * 目标：同一角色在整条片子里用同一个音色，不同角色尽量不同音色，
- * 且不要和旁白音色撞车（否则听起来还是一个人在自说自话）。
- * 用户可以在角色库里给角色手动指定 voice；没指定时按角色设定的性别
- * 自动挑选男声/女声，再按名字稳定分配，同一个名字每次生成都得到同一个音色。
+ * 目标：
+ * 1. 同一角色在整条片子里用同一个音色，不同角色尽量不同音色，且不要和旁白撞车；
+ * 2. 音色要和人物设定对得上——角色描述里写了性别、年龄，就挑声音特征接近的音色，
+ *    而不是按名字哈希随便给一个（否则容易出现“大叔配少女音”这种不自然的搭配）。
+ * 用户可以在角色库里给角色手动指定 voice；没指定时按描述 + 名字稳定地自动分配，
+ * 同一个角色每次生成都得到同一个音色。
  */
 
-interface VoiceOption {
-  id: string;
-  gender: "female" | "male";
-  /** 听感说明，用于设置页提示与文档。 */
-  tone: string;
+export type VoiceGender = "female" | "male" | "unknown";
+export type VoiceAge = "young" | "middle" | "old" | "unknown";
+
+interface EdgeVoiceProfile {
+  voice: string;
+  gender: VoiceGender;
+  age: VoiceAge;
+  /** 听感备注，仅用于日志和排查。 */
+  note: string;
 }
 
-/** Edge TTS 的中文音色池：男女各三个，覆盖温柔/活泼/沉稳与年轻/低沉/播报。 */
-const VOICE_LIBRARY: VoiceOption[] = [
-  { id: "zh-CN-XiaoxiaoNeural", gender: "female", tone: "温柔亲和" },
-  { id: "zh-CN-XiaoyiNeural", gender: "female", tone: "活泼年轻" },
-  { id: "zh-CN-XiaomoNeural", gender: "female", tone: "沉稳知性" },
-  { id: "zh-CN-YunxiNeural", gender: "male", tone: "年轻清亮" },
-  { id: "zh-CN-YunjianNeural", gender: "male", tone: "低沉有力" },
-  { id: "zh-CN-YunyangNeural", gender: "male", tone: "稳重播报" },
+/** Edge TTS 的中文音色池：按性别与年龄打标签，方便按人物设定匹配。 */
+const EDGE_VOICE_PROFILES: EdgeVoiceProfile[] = [
+  { voice: "zh-CN-XiaoxiaoNeural", gender: "female", age: "young", note: "温柔年轻女声" },
+  { voice: "zh-CN-XiaoyiNeural", gender: "female", age: "young", note: "活泼少女" },
+  { voice: "zh-CN-XiaomoNeural", gender: "female", age: "middle", note: "沉稳成熟女声" },
+  { voice: "zh-CN-XiaochenNeural", gender: "female", age: "old", note: "年长女声" },
+  { voice: "zh-CN-YunxiNeural", gender: "male", age: "young", note: "年轻男声" },
+  { voice: "zh-CN-YunjianNeural", gender: "male", age: "middle", note: "低沉中年男声" },
+  { voice: "zh-CN-YunyangNeural", gender: "male", age: "middle", note: "播音腔中年男声" },
+  { voice: "zh-CN-YunyeNeural", gender: "male", age: "old", note: "年长男声" },
 ];
 
-const EDGE_VOICE_POOL = VOICE_LIBRARY.map((voice) => voice.id);
+export const EDGE_VOICE_POOL = EDGE_VOICE_PROFILES.map((profile) => profile.voice);
 
-const MALE_HINTS = /男|爸|父|叔|伯|哥|弟|爷|先生|小伙|少年|男孩|男主/;
-const FEMALE_HINTS = /女|妈|母|姨|姑|姐|妹|奶|阿姨|小姐|姑娘|女孩|女主/;
+const FEMALE_HINTS = ["女", "姐", "妹", "姑娘", "女孩", "少女", "阿姨", "妈妈", "母亲", "奶奶", "姥姥", "女士", "太太", "妻子", "她"];
+const MALE_HINTS = ["男", "哥", "弟", "男孩", "少年", "大叔", "叔叔", "爸爸", "父亲", "爷爷", "姥爷", "先生", "丈夫", "他"];
+const YOUNG_HINTS = ["少女", "女孩", "男孩", "少年", "青年", "学生", "大学生", "20 岁", "20岁", "18 岁", "18岁", "22 岁", "22岁", "25 岁", "25岁"];
+const OLD_HINTS = ["老", "奶奶", "爷爷", "姥姥", "姥爷", "花甲", "古稀", "退休", "60 岁", "60岁", "65 岁", "65岁", "70 岁", "70岁"];
+const MIDDLE_HINTS = ["中年", "30 岁", "30岁", "35 岁", "35岁", "40 岁", "40岁", "45 岁", "45岁", "50 岁", "50岁", "母亲", "父亲", "老板", "经理"];
+
+function hit(text: string, hints: string[]): boolean {
+  return hints.some((hint) => text.includes(hint));
+}
+
+/** 从人物设定里读出性别倾向；读不出来就返回 unknown，交给名字和音色池兜底。 */
+export function inferVoiceGender(description: string): VoiceGender {
+  const text = description.trim();
+  if (!text) return "unknown";
+  const female = hit(text, FEMALE_HINTS);
+  const male = hit(text, MALE_HINTS);
+  if (female && !male) return "female";
+  if (male && !female) return "male";
+  return "unknown";
+}
+
+/** 从人物设定里读出年龄段；读不出来返回 unknown。 */
+export function inferVoiceAge(description: string): VoiceAge {
+  const text = description.trim();
+  if (!text) return "unknown";
+  const age = text.match(/(\d{1,2})\s*岁/);
+  if (age) {
+    const value = Number(age[1]);
+    if (value >= 55) return "old";
+    if (value >= 32) return "middle";
+    return "young";
+  }
+  if (hit(text, OLD_HINTS)) return "old";
+  if (hit(text, YOUNG_HINTS)) return "young";
+  if (hit(text, MIDDLE_HINTS)) return "middle";
+  return "unknown";
+}
 
 function hashName(name: string): number {
   let hash = 0;
@@ -37,32 +80,31 @@ function hashName(name: string): number {
   return hash;
 }
 
+/**
+ * 按人物设定筛出候选音色：性别、年龄都对得上的优先；
+ * 对不上时逐级放宽（先只保性别，再退回整个池子），保证总能给出音色。
+ */
+function candidateVoices(gender: VoiceGender, age: VoiceAge): string[] {
+  const byGender = (profile: EdgeVoiceProfile): boolean =>
+    gender === "unknown" || profile.gender === gender;
+  const exact = EDGE_VOICE_PROFILES.filter(
+    (profile) => byGender(profile) && (age === "unknown" || profile.age === age),
+  );
+  const sameGender = EDGE_VOICE_PROFILES.filter(byGender);
+  const pool = exact.length > 0 ? exact : sameGender.length > 0 ? sameGender : EDGE_VOICE_PROFILES;
+  return pool.map((profile) => profile.voice);
+}
+
 export interface SpeakerLike {
   name: string;
-  voice?: string;
-  /** 角色设定，用来判断男声/女声，例如“25 岁女性，齐肩短发”。 */
+  /** 人物设定（性别、年龄、身份），用来挑音色；没有就按名字稳定分配。 */
   description?: string;
-  kind?: string;
-}
-
-function genderOf(speaker: string, cast: SpeakerLike[]): "female" | "male" | undefined {
-  const asset = cast.find((item) => item.name === speaker);
-  const text = `${asset?.description ?? ""} ${speaker}`;
-  const female = FEMALE_HINTS.test(text);
-  const male = MALE_HINTS.test(text);
-  if (female && !male) return "female";
-  if (male && !female) return "male";
-  return undefined;
-}
-
-function poolFor(gender: "female" | "male" | undefined): string[] {
-  if (!gender) return EDGE_VOICE_POOL;
-  return VOICE_LIBRARY.filter((voice) => voice.gender === gender).map((voice) => voice.id);
+  voice?: string;
 }
 
 /**
- * 给说话人挑音色：显式指定的优先；否则按性别从男/女声池里按名字稳定挑选，
- * 跳过已经分给别人的音色和旁白音色（池子够大时）。
+ * 给说话人挑音色：显式指定的优先；否则按人物设定（性别/年龄）挑，
+ * 同一角色稳定得到同一个音色，并尽量避开旁白音色和已经分给其他角色的音色。
  */
 export function resolveSpeakerVoice(
   speaker: string,
@@ -70,22 +112,20 @@ export function resolveSpeakerVoice(
   fallbackVoice: string,
   used: Set<string> = new Set(),
 ): string {
-  const explicit = cast.find((item) => item.name === speaker)?.voice?.trim();
+  const asset = cast.find((item) => item.name === speaker);
+  const explicit = asset?.voice?.trim();
   if (explicit) return explicit;
-  const pool = poolFor(genderOf(speaker, cast));
-  const preferred = hashName(speaker) % pool.length;
-  for (let offset = 0; offset < pool.length; offset += 1) {
-    const candidate = pool[(preferred + offset) % pool.length]!;
+
+  const description = asset?.description ?? "";
+  const candidates = candidateVoices(inferVoiceGender(description), inferVoiceAge(description));
+  const preferred = hashName(speaker) % candidates.length;
+  for (let offset = 0; offset < candidates.length; offset += 1) {
+    const candidate = candidates[(preferred + offset) % candidates.length]!;
     if (candidate === fallbackVoice || used.has(candidate)) continue;
     used.add(candidate);
     return candidate;
   }
-  // 同性别池子被占满时，再退到整个池子；仍然避开旁白音色。
-  for (const voice of EDGE_VOICE_POOL) {
-    if (voice === fallbackVoice || used.has(voice)) continue;
-    used.add(voice);
-    return voice;
-  }
+  // 候选都被占满时退而求其次：和旁白不同即可。
   const any = EDGE_VOICE_POOL.find((voice) => voice !== fallbackVoice) ?? EDGE_VOICE_POOL[0]!;
   used.add(any);
   return any;
@@ -105,9 +145,10 @@ export function assignDialogueVoices(
   return result;
 }
 
-/** 音色听感说明，设置页/角色页展示用。 */
-export function describeVoice(voice: string): string {
-  return VOICE_LIBRARY.find((item) => item.id === voice)?.tone ?? "";
+/** 每个角色的语速微调：年长角色慢一点，年轻角色略快，让对白更像真人。 */
+export function voiceRateFor(description: string, baseRate: number): number {
+  const age = inferVoiceAge(description);
+  const delta = age === "old" ? -0.08 : age === "young" ? 0.06 : 0;
+  const rate = Math.round((baseRate + delta) * 100) / 100;
+  return Math.min(2, Math.max(0.5, rate));
 }
-
-export { EDGE_VOICE_POOL };
