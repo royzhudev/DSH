@@ -2368,7 +2368,7 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
-          <div><div class="card-title">配音</div><div class="card-sub">Edge TTS 免费无需密钥；也支持 OpenAI 兼容语音接口</div></div>
+          <div><div class="card-title">配音</div><div class="card-sub">Edge TTS 免费无需密钥；也支持 OpenAI 兼容语音接口与 ElevenLabs 自然表演</div></div>
           <span class="pill pill-soft">${esc(s.tts.provider)}</span>
         </div>
         <div class="card-body">
@@ -2376,7 +2376,7 @@ async function renderSettings() {
             <div class="field">
               <label for="tts-provider">供应商</label>
               <select class="select" id="tts-provider">
-                ${options([["edge", "Edge TTS（免费）"], ["openai", "OpenAI 兼容 /audio/speech"], ["silent", "静音占位"]], s.tts.provider)}
+                ${options([["edge", "Edge TTS（免费）"], ["openai", "OpenAI 兼容 /audio/speech"], ["elevenlabs", "ElevenLabs（自然表演）"], ["silent", "静音占位"]], s.tts.provider)}
               </select>
             </div>
             <div class="field">

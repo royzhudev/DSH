@@ -151,3 +151,62 @@ test("OpenAI 配音：按角色传 speed 与 instructions 表演提示", async (
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("ElevenLabs 配音：按角色传 voice_id 与表演参数，返回可用的音频", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let path_ = "";
+  let key = "";
+  let body: Record<string, unknown> = {};
+  const server = http.createServer();
+  server.on("request", (req, res) => {
+    path_ = req.url ?? "";
+    key = String(req.headers["xi-api-key"] ?? "");
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      body = JSON.parse(raw || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { ElevenLabsTtsProvider } = await import("../../src/tts/elevenlabs.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "elevenlabs",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "test-key",
+        model: "eleven_multilingual_v2",
+        voice: "voice-abc",
+        rate: 1,
+      },
+    });
+    const provider = new ElevenLabsTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({
+      text: "合同里写着我陪。",
+      cacheKey: "elevenlabs-test",
+      instructions: "自然一点",
+    });
+    assert.equal(result.provider, "elevenlabs");
+    assert.ok(result.durationSec > 0.2);
+    assert.equal(path_, "/v1/text-to-speech/voice-abc");
+    assert.equal(key, "test-key");
+    assert.equal(body.model_id, "eleven_multilingual_v2");
+    assert.equal(body.text, "合同里写着我陪。");
+    const settings = body.voice_settings as Record<string, unknown>;
+    assert.equal(settings.style, 0.45);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

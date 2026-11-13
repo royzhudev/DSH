@@ -144,4 +144,6 @@ test("对话音色：OpenAI 兼容 TTS 用同一套男女声池，并按角色�
   const style = voiceStyleFor("45 岁男性，说话沉稳");
   assert.ok(style.includes("自然"), style);
   assert.ok(style.includes("男声"), style);
+  assert.ok(voiceStyleFor("", "你站住！").includes("争执"));
+  assert.ok(voiceStyleFor("", "你是谁？").includes("疑问"));
 });

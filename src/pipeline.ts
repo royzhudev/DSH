@@ -34,7 +34,7 @@ import { preflightVideoJob } from "./preflight.js";
 import { burnSegmentSubtitles, renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
-import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
+import { probeMedia, extractPoster, concatAudio, createSilence } from "./media/ffmpeg.js";
 import { createLipsyncProvider } from "./lipsync/dashscope.js";
 import {
   assignDialogueVoices,
@@ -160,10 +160,23 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   const audioFiles: string[] = [];
   const synthesized: Array<DialogueLine & { voice: string; durationSec: number }> = [];
   const cues: SubtitleCue[] = [];
+  const audioDir = path.join(jobDir, "audio");
+  await ensureDir(audioDir);
+  const silences = new Map<string, string>();
+  const silenceFor = async (seconds: number): Promise<string> => {
+    const key = seconds.toFixed(2);
+    const existing = silences.get(key);
+    if (existing) return existing;
+    const file = path.join(audioDir, `pause-${key.replace(".", "-")}.mp3`);
+    await createSilence(seconds, file);
+    silences.set(key, file);
+    return file;
+  };
   let offset = 0;
   let allCached = true;
+  let previousSpeaker: string | undefined;
 
-  for (const line of lines) {
+  for (const [lineIndex, line] of lines.entries()) {
     if (signal?.aborted) throw new AppError("任务已取消", { code: "ABORTED", status: 499 });
     const voice = voices.get(line.speaker) ?? config.tts.voice;
     // 语速跟着人物设定微调（年长慢一点、年轻快一点），比全片一个速度自然。
@@ -171,7 +184,10 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
     const rate = voiceRateFor(description, config.tts.rate);
     const pitch = voicePitchFor(description);
     const volume = voiceVolumeFor(description, line.text);
-    const instructions = config.tts.provider === "openai" ? voiceStyleFor(description) : undefined;
+    const instructions =
+      config.tts.provider === "openai" || config.tts.provider === "elevenlabs"
+        ? voiceStyleFor(description, line.text)
+        : undefined;
     let provider = ttsProvider;
     const providerKey = `${voice}|${rate}`;
     if (canSwitchVoice && (voice !== ttsProvider.voice || rate !== config.tts.rate)) {
@@ -198,6 +214,15 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
       { text: line.text, cacheKey, rate, volume, pitch },
       signal,
     );
+    // 对白之间留出自然停顿：换人说话停久一点，同一人连续说停短一点。
+    // 没有停顿会让配音一句顶一句，听起来像念稿。
+    const pause =
+      lineIndex === 0 ? 0.12 : previousSpeaker === line.speaker ? 0.18 : 0.32;
+    if (pause > 0) {
+      audioFiles.push(await silenceFor(pause));
+      offset += pause;
+    }
+    previousSpeaker = line.speaker;
     audioFiles.push(result.audioPath);
     allCached = allCached && result.cached;
     synthesized.push({
@@ -214,8 +239,6 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
     offset += result.durationSec;
   }
 
-  const audioDir = path.join(jobDir, "audio");
-  await ensureDir(audioDir);
   const audioPath = path.join(audioDir, `segment-${String(index + 1).padStart(2, "0")}.mp3`);
   await concatAudio(audioFiles, audioPath);
   const voicesUsed = [...new Set(synthesized.map((line) => line.voice))];
