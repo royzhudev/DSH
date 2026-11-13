@@ -265,3 +265,66 @@ test("normalizeScript 保留台词相同但场景/镜头不同的分镜", () => 
   assert.equal(script.segments.length, 2);
 });
 
+
+test("脚本去重：台词相同、场景措辞不同的分镜只保留一条", () => {
+  const script = normalizeScript(
+    {
+      title: "重复分镜",
+      segments: [
+        {
+          lines: [
+            { speaker: "黄乐", text: "卖不动我自己吞。" },
+            { speaker: "客人", text: "那这杯酒，算我敬两位。" },
+          ],
+          scene: "酒吧，夜晚",
+          shot: "中景",
+        },
+        {
+          lines: [
+            { speaker: "黄乐", text: "卖不动我自己吞。" },
+            { speaker: "客人", text: "那这杯酒，算我敬两位。" },
+          ],
+          scene: "酒吧，夜里（换个说法）",
+          shot: "近景",
+        },
+        {
+          lines: [{ speaker: "黄乐", text: "那就再来一杯。" }],
+          scene: "酒吧，夜晚",
+          shot: "特写",
+        },
+      ],
+    },
+    { provider: "test", topic: "重复分镜", maxSegments: 6 },
+  );
+  assert.equal(script.segments.length, 2);
+  assert.equal(script.droppedSegments, 1);
+  assert.equal(script.segments[1]!.lines?.[0]?.text, "那就再来一杯。");
+});
+
+test("脚本去重：同一句台词不会在多个分镜里重复出现", () => {
+  const script = normalizeScript(
+    {
+      title: "重复台词",
+      segments: [
+        {
+          lines: [
+            { speaker: "黄乐", text: "卖不动我自己吞。" },
+            { speaker: "客人", text: "那这杯酒，算我敬两位。" },
+          ],
+        },
+        {
+          lines: [
+            { speaker: "客人", text: "那这杯酒，算我敬两位。" },
+            { speaker: "黄乐", text: "你先坐下慢慢说。" },
+          ],
+        },
+        { lines: [{ speaker: "黄乐", text: "今晚这单我认了。" }] },
+      ],
+    },
+    { provider: "test", topic: "重复台词", maxSegments: 8 },
+  );
+  const allLines = script.segments.flatMap((segment) => segment.lines?.map((line) => `${line.speaker}：${line.text}`) ?? []);
+  assert.equal(new Set(allLines).size, allLines.length, `台词有重复：${allLines.join(" / ")}`);
+  assert.equal(allLines.includes("客人：那这杯酒，算我敬两位。"), true);
+  assert.equal(script.droppedSegments, undefined);
+});
