@@ -36,7 +36,7 @@ import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
 import { createLipsyncProvider } from "./lipsync/dashscope.js";
-import { assignDialogueVoices, voiceRateFor } from "./tts/voices.js";
+import { assignDialogueVoices, voicePitchFor, voiceRateFor, voiceVolumeFor } from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
 export interface RunPipelineOptions {
@@ -117,6 +117,8 @@ interface DialogueSynthesisInput {
   jobDir: string;
   index: number;
   ttsProvider: TtsProvider;
+  /** 全片统一的说话人→音色表，避免同一角色在不同分镜换声音。 */
+  voices?: Map<string, string>;
   signal?: AbortSignal;
 }
 
@@ -134,7 +136,8 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   const { lines, cast, config, logger, jobDir, index, ttsProvider, signal } = input;
   const canSwitchVoice = config.tts.provider === "edge";
   const voices = canSwitchVoice
-    ? assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice)
+    ? (input.voices ??
+      assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice))
     : new Map<string, string>();
   const providers = new Map<string, TtsProvider>();
   const audioFiles: string[] = [];
@@ -147,7 +150,10 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
     if (signal?.aborted) throw new AppError("任务已取消", { code: "ABORTED", status: 499 });
     const voice = voices.get(line.speaker) ?? config.tts.voice;
     // 语速跟着人物设定微调（年长慢一点、年轻快一点），比全片一个速度自然。
-    const rate = voiceRateFor(cast.find((asset) => asset.name === line.speaker)?.description ?? "", config.tts.rate);
+    const description = cast.find((asset) => asset.name === line.speaker)?.description ?? "";
+    const rate = voiceRateFor(description, config.tts.rate);
+    const pitch = voicePitchFor(description);
+    const volume = voiceVolumeFor(description, line.text);
     let provider = ttsProvider;
     const providerKey = `${voice}|${rate}`;
     if (canSwitchVoice && (voice !== ttsProvider.voice || rate !== config.tts.rate)) {
@@ -159,9 +165,20 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
       providers.set(providerKey, provider);
     }
     const cacheKey = sha256(
-      [config.tts.provider, config.tts.model, voice, String(rate), line.text].join("|"),
+      [
+        config.tts.provider,
+        config.tts.model,
+        voice,
+        String(rate),
+        pitch,
+        String(volume),
+        line.text,
+      ].join("|"),
     ).slice(0, 40);
-    const result = await provider.synthesize({ text: line.text, cacheKey }, signal);
+    const result = await provider.synthesize(
+      { text: line.text, cacheKey, rate, volume, pitch },
+      signal,
+    );
     audioFiles.push(result.audioPath);
     allCached = allCached && result.cached;
     synthesized.push({
@@ -313,6 +330,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     });
 
     const ttsProvider = options.ttsProvider ?? createTtsProvider(config, config.cacheDir, logger);
+    // 先按整条脚本收集说话人，一次性分配音色：同一角色跨分镜也保持同一个声音。
+    const allSpeakers = [
+      ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
+    ];
+    const dialogueVoices = assignDialogueVoices(allSpeakers, cast, config.tts.voice);
     const plans: SegmentPlan[] = [];
     let cursor = 0;
     const totalSegments = script.segments.length;
@@ -334,6 +356,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           jobDir,
           index,
           ttsProvider,
+          voices: dialogueVoices,
           signal,
         });
         tts = synthesized.tts;
@@ -444,7 +467,9 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           const generated: GeneratedClip = await videoGen.generate(
             {
               prompt: shotPrompt,
-              durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
+              // 生成片段要覆盖整个分镜：按分镜时长申请，最多 10 秒（平台单段上限），
+              // 不足时渲染阶段定格补帧，避免循环同一段画面。
+              durationSec: Math.min(10, Math.max(config.videoGen.clipDurationSec, Math.ceil(plan.durationSec))),
               ...(firstFrame ? { image: firstFrame.file } : {}),
               ...(references.length > 0 ? { references } : {}),
             },

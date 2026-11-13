@@ -58,7 +58,13 @@ export class EdgeTtsProvider implements TtsProvider {
       const { audioFilePath, metadataFilePath } = await tts.toFile(
         tempDir,
         escapeXml(request.text),
-        { rate: this.settings.rate },
+        {
+          rate: request.rate ?? this.settings.rate,
+          ...(request.volume !== undefined && request.volume !== 0
+            ? { volume: `${request.volume > 0 ? "+" : ""}${request.volume}%` }
+            : {}),
+          ...(request.pitch && request.pitch !== "0Hz" ? { pitch: request.pitch } : {}),
+        },
       );
       await fs.rename(audioFilePath, audioFile);
       if (metadataFilePath) {
