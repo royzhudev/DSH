@@ -209,3 +209,59 @@ test("OpenAI 兼容脚本供应商解析模型返回的 JSON", async () => {
   assert.equal(script.title, "模型标题");
   assert.equal(script.segments.length, 2);
 });
+
+test("normalizeScript 丢掉内容完全相同的分镜，避免同一个镜头反复播放", () => {
+  const script = normalizeScript(
+    {
+      title: "酒局",
+      segments: [
+        { narration: "卖不动我自己吞。", scene: "包间，夜", shot: "中景，举杯" },
+        { narration: "黄乐：那这杯酒，算我敬两位。", scene: "包间，夜", shot: "近景，黄乐" },
+        { narration: "卖不动我自己吞。", scene: "包间，夜", shot: "中景，举杯" },
+        { narration: "黄乐：那这杯酒，算我敬两位。", scene: "包间，夜", shot: "近景，黄乐" },
+      ],
+    },
+    { provider: "test", topic: "酒局", maxSegments: 8 },
+  );
+  assert.deepEqual(
+    script.segments.map((segment) => segment.narration),
+    ["卖不动我自己吞。", "黄乐：那这杯酒，算我敬两位。"],
+  );
+  assert.deepEqual(
+    script.segments.map((segment) => segment.id),
+    [1, 2],
+  );
+});
+
+test("normalizeScript 在去重后只剩一个分镜时给出明确报错", () => {
+  assert.throws(
+    () =>
+      normalizeScript(
+        {
+          title: "重复",
+          segments: [
+            { narration: "同一句话。", scene: "同一场景", shot: "同一镜头" },
+            { narration: "同一句话。", scene: "同一场景", shot: "同一镜头" },
+            { narration: "同一句话。", scene: "同一场景", shot: "同一镜头" },
+          ],
+        },
+        { provider: "test", topic: "重复", maxSegments: 8 },
+      ),
+    (error: unknown) => error instanceof AppError && error.code === "SCRIPT_DUPLICATED",
+  );
+});
+
+test("normalizeScript 保留台词相同但场景/镜头不同的分镜", () => {
+  const script = normalizeScript(
+    {
+      title: "重复台词",
+      segments: [
+        { narration: "我不走。", scene: "客厅，白天", shot: "中景" },
+        { narration: "我不走。", scene: "雨夜街头", shot: "特写" },
+      ],
+    },
+    { provider: "test", topic: "重复台词", maxSegments: 8 },
+  );
+  assert.equal(script.segments.length, 2);
+});
+
