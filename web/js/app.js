@@ -106,6 +106,7 @@ const state = {
   douyin: null,
   publishes: [],
   scriptPreview: null,
+  createDialogue: false,
   createTopic: "",
   createStory: "",
   pollTimer: null,
@@ -579,7 +580,13 @@ function renderPreview(data) {
         (segment) => `<div class="script-segment">
           <span class="seg-index">${esc(segment.id)}</span>
           <div>
-            <p class="seg-text">${esc(segment.narration)}</p>
+            ${
+              (segment.lines ?? []).length
+                ? `<ul class="seg-lines">${segment.lines
+                    .map((line) => `<li><span class="seg-speaker">${esc(line.speaker)}</span>${esc(line.text)}</li>`)
+                    .join("")}</ul>`
+                : `<p class="seg-text">${esc(segment.narration)}</p>`
+            }
             ${segment.scene || segment.shot ? `<p class="seg-shot">${[segment.scene, segment.shot].filter(Boolean).map((text) => esc(text)).join(" · ")}</p>` : ""}
             ${
               (segment.cast ?? []).length
@@ -740,6 +747,12 @@ async function renderCreate() {
                 <span>AI 生成画面</span>
               </label>
               <span class="hint">${videoGenReady ? `${esc(settings.videoGen.model)}${castWithImages > 0 ? ` · ${castWithImages} 个角色/道具可图生视频` : " · 有参考图时自动图生视频"}` : "未配置 AI 画面模型，可在设置中启用"}</span>
+              <label class="switch">
+                <input type="checkbox" id="dialogue" ${state.createDialogue ? "checked" : ""} />
+                <span class="track"></span>
+                <span>人物对话（多音色）</span>
+              </label>
+              <span class="hint">分镜写成“角色：台词”，每个角色用自己的音色；关闭则用第三人称旁白讲解。角色音色可在「角色与道具」里设置，未设置会自动分配。</span>
             </div>
           </div>
 
@@ -790,6 +803,10 @@ async function renderCreate() {
   storyInput.addEventListener("input", () => {
     state.createStory = storyInput.value;
     storyCount.textContent = `${storyInput.value.length} / 6000`;
+  });
+
+  document.getElementById("dialogue").addEventListener("change", (event) => {
+    state.createDialogue = Boolean(event.target.checked);
   });
 
   document.getElementById("topic-chips").addEventListener("click", (event) => {
@@ -847,6 +864,7 @@ function readCreateForm() {
     voice,
     subtitlesEnabled: Boolean(document.getElementById("subtitles")?.checked),
     videoGenEnabled: Boolean(document.getElementById("videogen")?.checked),
+    dialogue: Boolean(document.getElementById("dialogue")?.checked),
   };
 }
 
@@ -869,6 +887,7 @@ async function previewScript() {
         castIds: values.castIds,
         targetDurationSec: values.targetDurationSec,
         maxSegments: values.maxSegments,
+        ...(values.dialogue ? { dialogue: true } : {}),
       },
     });
     state.scriptPreview = data;
@@ -897,6 +916,7 @@ async function createVideo() {
     videoGenEnabled: values.videoGenEnabled,
     ttsProvider: settings.tts.provider,
     ...(values.castIds ? { castIds: values.castIds } : {}),
+    ...(values.dialogue ? { dialogue: true } : {}),
   };
   if (values.story) body.story = values.story;
   if (values.voice) body.voice = values.voice;
@@ -1542,6 +1562,14 @@ function castUploadCardHtml() {
         <textarea class="textarea" id="cast-desc" maxlength="500" rows="3" placeholder="例如：25 岁女性，齐肩短发，米色风衣，左眉有一道浅疤"></textarea>
         <span class="hint">会写进每个出场分镜的提示词，越具体越容易保持一致</span>
       </div>
+      <div class="field">
+        <label for="cast-voice">对话配音音色 <span class="optional">可选</span></label>
+        <input class="input" id="cast-voice" list="cast-voice-options" placeholder="留空自动分配；例如 zh-CN-YunxiNeural" maxlength="60" />
+        <datalist id="cast-voice-options">
+          ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
+        </datalist>
+        <span class="hint">开启「人物对话」时，这个角色用该音色；留空时按名字自动分配，不同角色尽量不同音色</span>
+      </div>
       <div class="dropzone" id="cast-dropzone">
         ${icon("upload", 26)}
         <strong id="cast-drop-title">点击或拖拽上传参考图</strong>
@@ -1584,6 +1612,13 @@ function castDialogHtml() {
           <label for="cast-edit-desc">外观设定</label>
           <textarea class="textarea" id="cast-edit-desc" maxlength="500" rows="4"></textarea>
         </div>
+        <div class="field">
+          <label for="cast-edit-voice">对话配音音色</label>
+          <input class="input" id="cast-edit-voice" list="cast-edit-voice-options" maxlength="60" placeholder="留空自动分配" />
+          <datalist id="cast-edit-voice-options">
+            ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
+          </datalist>
+        </div>
         <div class="dialog-error" id="cast-form-error" hidden></div>
       </div>
       <div class="dialog-actions">
@@ -1602,6 +1637,7 @@ function openCastDialog(id) {
   document.getElementById("cast-edit-kind").value = asset.kind;
   document.getElementById("cast-edit-name").value = asset.name;
   document.getElementById("cast-edit-desc").value = asset.description ?? "";
+  document.getElementById("cast-edit-voice").value = asset.voice ?? "";
   const error = document.getElementById("cast-form-error");
   if (error) error.hidden = true;
   dialog.showModal();
@@ -1613,6 +1649,7 @@ async function saveCastEdit() {
   const kind = document.getElementById("cast-edit-kind")?.value ?? "character";
   const name = document.getElementById("cast-edit-name")?.value.trim() ?? "";
   const description = document.getElementById("cast-edit-desc")?.value.trim() ?? "";
+  const voice = document.getElementById("cast-edit-voice")?.value.trim() ?? "";
   const error = document.getElementById("cast-form-error");
   const button = document.getElementById("save-cast");
   if (error) error.hidden = true;
@@ -1628,7 +1665,7 @@ async function saveCastEdit() {
     button.innerHTML = `<span class="spinner"></span> 保存中…`;
   }
   try {
-    await api(`/api/cast/${id}`, { method: "PATCH", body: { kind, name, description } });
+    await api(`/api/cast/${id}`, { method: "PATCH", body: { kind, name, description, voice } });
     document.getElementById("cast-dialog")?.close();
     toast("设定已更新", "success");
     await renderCast();
@@ -1743,6 +1780,7 @@ async function renderCast() {
         kind,
         name,
         description: descInput.value.trim(),
+        voice: document.getElementById("cast-voice")?.value.trim() ?? "",
       });
       state.castUploadFile = null;
       toast("已添加到角色库", "success");

@@ -27,6 +27,7 @@ create 选项：
       --voice <音色>     覆盖 TTS 音色，如 zh-CN-XiaoxiaoNeural
       --story <文本>     剧本/大纲，分镜会按剧本生成
       --cast <id,id>     使用角色库中的角色/道具 id（默认全部）
+      --dialogue         人物对话模式：分镜写成多角色台词，每个角色用不同音色
       --width <像素>     视频宽度，默认 1080
       --height <像素>    视频高度，默认 1920
       --json             以 JSON 输出结果
@@ -104,6 +105,7 @@ async function commandCreate(
     onProgress: printProgress,
     ...(story ? { story } : {}),
     ...(castIds && castIds.length > 0 ? { castIds } : {}),
+    ...(values.dialogue ? { dialogue: true } : {}),
   });
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -207,6 +209,7 @@ async function main(): Promise<void> {
       height: { type: "string" },
       story: { type: "string" },
       cast: { type: "string" },
+      dialogue: { type: "boolean" },
       json: { type: "boolean" },
       tags: { type: "string" },
       port: { type: "string" },

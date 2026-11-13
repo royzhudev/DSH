@@ -27,6 +27,7 @@ import {
   parseCastDescription,
   parseCastKind,
   parseCastName,
+  parseCastVoice,
   selectCastAssets,
   type UpdateCastOptions,
 } from "../cast/library.js";
@@ -349,6 +350,7 @@ function parseJobOptions(body: Record<string, unknown>): JobOptions {
   if (story !== undefined) options.story = story;
   const castIds = optionalCastIds(body);
   if (castIds !== undefined) options.castIds = castIds;
+  if (body.dialogue === true) options.dialogue = true;
   return options;
 }
 
@@ -516,10 +518,12 @@ async function handleCastUpload(
     const kind = parseCastKind(upload.fields.kind);
     const name = parseCastName(upload.fields.name);
     const description = parseCastDescription(upload.fields.description);
+    const voice = parseCastVoice(upload.fields.voice);
     const asset = await ctx.cast.add({
       kind,
       name,
       description,
+      voice,
       imagePath: upload.file?.tempPath ?? null,
     });
     sendJson(res, 201, { cast: castView(asset) });
@@ -539,6 +543,7 @@ async function handleCastUpdate(
   if (body.kind !== undefined) patch.kind = parseCastKind(body.kind);
   if (body.name !== undefined) patch.name = parseCastName(body.name);
   if (body.description !== undefined) patch.description = parseCastDescription(body.description);
+  if (body.voice !== undefined) patch.voice = parseCastVoice(body.voice);
   const asset = await ctx.cast.update(id, patch);
   sendJson(res, 200, { cast: castView(asset) });
 }
@@ -1056,6 +1061,7 @@ async function handleGenerateScript(
       maxSegments: config.script.maxSegments,
       availableTags: materialTagPool(materials),
       ...(story ? { story } : {}),
+      ...(body.dialogue === true ? { dialogue: true } : {}),
       ...(selectedCast.length > 0
         ? {
             cast: selectedCast.map(({ name, kind, description }) => ({ name, kind, description })),

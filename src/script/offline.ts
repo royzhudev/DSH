@@ -29,6 +29,16 @@ export class OfflineScriptProvider implements ScriptProvider {
 
     const count = Math.max(2, Math.min(5, request.maxSegments));
     const cast = request.cast ?? [];
+    const dialogue = request.dialogue === true;
+    const speakers = cast.filter((item) => item.kind === "character").map((item) => item.name);
+    const speakerPair = speakers.length >= 2 ? [speakers[0]!, speakers[1]!] : ["我", "你"];
+    const dialogueLines = [
+      [`你听说了吗？关于${topic}的那件事。`, "当然，我就在现场。"],
+      ["当时到底发生了什么？", "比你想象的复杂。"],
+      ["那你为什么不解释？", "解释有用吗？"],
+      ["所以真相到底是什么？", "等你想明白，就懂了。"],
+      ["这事还没完吧？", "这才刚开始。"],
+    ];
     const castAt = (index: number): string[] => {
       if (cast.length === 0) return [];
       if (cast.length === 1) return [cast[0]!.name];
@@ -39,9 +49,8 @@ export class OfflineScriptProvider implements ScriptProvider {
     };
     const segments = narration.slice(0, count).map((text, index) => {
       const names = castAt(index);
-      return {
+      const base = {
         id: index + 1,
-        narration: text,
         keywords: keywordsAt(index),
         durationHintSec: 6,
         scene: `${topic} · 场景 ${Math.floor(index / 2) + 1}`,
@@ -50,13 +59,26 @@ export class OfflineScriptProvider implements ScriptProvider {
           : `中景，${topic}，镜头稳定`,
         ...(names.length > 0 ? { cast: names } : {}),
       };
+      if (!dialogue) return { ...base, narration: text };
+      const template = dialogueLines[index % dialogueLines.length]!;
+      const lines = template.map((line, position) => ({
+        speaker: speakerPair[position % speakerPair.length]!,
+        text: line,
+      }));
+      return {
+        ...base,
+        narration: lines.map((line) => `${line.speaker}：${line.text}`).join(" "),
+        lines,
+        cast: [...new Set([...(base.cast ?? []), ...speakerPair])],
+      };
     });
 
     return {
-      title: truncate(`${topic}｜${request.targetDurationSec} 秒看懂`, 60),
-      summary: `围绕「${topic}」的 ${count} 段式短视频脚本（离线模板生成）。`,
+      title: truncate(dialogue ? `${topic}｜人物对话版` : `${topic}｜${request.targetDurationSec} 秒看懂`, 60),
+      summary: `围绕「${topic}」的 ${count} 段式${dialogue ? "人物对话" : "短视频"}脚本（离线模板生成）。`,
       segments,
       provider: this.name,
+      ...(dialogue ? { mode: "dialogue" as const } : {}),
     };
   }
 }

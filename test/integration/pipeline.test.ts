@@ -80,3 +80,37 @@ test(
     }
   },
 );
+
+test(
+  "对话模式：分镜按人物台词逐句配音，字幕带说话人",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "silent" } });
+    try {
+      const result = await runPipeline({
+        topic: "外卖员被冤枉",
+        config,
+        logger: silentLogger,
+        dialogue: true,
+      });
+      assert.equal(result.script.mode, "dialogue");
+      assert.ok(result.segments.length >= 2);
+      for (const segment of result.segments) {
+        assert.ok(segment.lines && segment.lines.length >= 2, "对话模式每个分镜都应有台词");
+        assert.ok(segment.lines!.every((line) => line.speaker && line.text && line.durationSec > 0));
+      }
+      // 逐句合成后拼接成一条音轨，时间轴按真实时长累加
+      const first = result.segments[0]!;
+      const expected = first.lines!.reduce((sum, line) => sum + line.durationSec, 0);
+      assert.ok(Math.abs(expected - first.durationSec) < 1.5, `时长对不上：${expected} vs ${first.durationSec}`);
+      const srt = await fs.readFile(result.srtPath, "utf8");
+      assert.match(srt, /我：/);
+      assert.match(srt, /：/);
+      const probe = await probeMedia(result.videoPath);
+      assert.equal(probe.hasAudio, true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
