@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import type {
   AppConfig,
   CastAsset,
+  DialogueLine,
   GeneratedClip,
   JobProgress,
   JobStage,
@@ -11,7 +12,9 @@ import type {
   ScriptProvider,
   SegmentPlan,
   SegmentResult,
+  SubtitleCue,
   TtsProvider,
+  TtsResult,
   VideoGenProvider,
 } from "./types.js";
 import { AppError, toErrorMessage } from "./errors.js";
@@ -29,7 +32,8 @@ import { preflightVideoJob } from "./preflight.js";
 import { renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
-import { probeMedia, extractPoster } from "./media/ffmpeg.js";
+import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
+import { assignDialogueVoices } from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
 export interface RunPipelineOptions {
@@ -50,6 +54,8 @@ export interface RunPipelineOptions {
   story?: string;
   /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定。 */
   castIds?: string[];
+  /** 对话模式：分镜按人物台词生成，并按说话人分配音色。 */
+  dialogue?: boolean;
 }
 
 const STAGE_LABELS: Record<JobStage, string> = {
@@ -95,6 +101,90 @@ function withStageLabel(stage: JobStage, error: unknown): unknown {
     status: error instanceof AppError ? error.status : 500,
     cause: error,
   });
+}
+
+interface DialogueSynthesisInput {
+  lines: DialogueLine[];
+  cast: CastAsset[];
+  config: AppConfig;
+  logger: Logger;
+  jobDir: string;
+  index: number;
+  ttsProvider: TtsProvider;
+  signal?: AbortSignal;
+}
+
+/**
+ * 对话模式：按说话人逐句合成，再把几段配音拼成一条音轨。
+ * - 每个说话人固定音色（角色库可指定，未指定时按名字稳定分配）；
+ * - 字幕按“角色：台词”逐句出现，时间轴按每句真实时长累加；
+ * - Edge 以外的供应商不支持切换音色时，仍按对话逐句合成，字幕保留说话人。
+ */
+async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
+  tts: TtsResult;
+  cues: SubtitleCue[];
+  lines: Array<DialogueLine & { voice: string; durationSec: number }>;
+}> {
+  const { lines, cast, config, logger, jobDir, index, ttsProvider, signal } = input;
+  const canSwitchVoice = config.tts.provider === "edge";
+  const voices = canSwitchVoice
+    ? assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice)
+    : new Map<string, string>();
+  const providers = new Map<string, TtsProvider>();
+  const audioFiles: string[] = [];
+  const synthesized: Array<DialogueLine & { voice: string; durationSec: number }> = [];
+  const cues: SubtitleCue[] = [];
+  let offset = 0;
+  let allCached = true;
+
+  for (const line of lines) {
+    if (signal?.aborted) throw new AppError("任务已取消", { code: "ABORTED", status: 499 });
+    const voice = voices.get(line.speaker) ?? config.tts.voice;
+    let provider = ttsProvider;
+    if (canSwitchVoice && voice !== ttsProvider.voice) {
+      provider = providers.get(voice) ?? createTtsProvider(
+        { ...config, tts: { ...config.tts, voice } },
+        config.cacheDir,
+        logger,
+      );
+      providers.set(voice, provider);
+    }
+    const cacheKey = sha256(
+      [config.tts.provider, config.tts.model, voice, String(config.tts.rate), line.text].join("|"),
+    ).slice(0, 40);
+    const result = await provider.synthesize({ text: line.text, cacheKey }, signal);
+    audioFiles.push(result.audioPath);
+    allCached = allCached && result.cached;
+    synthesized.push({
+      speaker: line.speaker,
+      text: line.text,
+      voice: result.voice,
+      durationSec: round3(result.durationSec),
+    });
+    cues.push({
+      startSec: round3(offset),
+      endSec: round3(offset + result.durationSec),
+      text: `${line.speaker}：${line.text}`,
+    });
+    offset += result.durationSec;
+  }
+
+  const audioDir = path.join(jobDir, "audio");
+  await ensureDir(audioDir);
+  const audioPath = path.join(audioDir, `segment-${String(index + 1).padStart(2, "0")}.mp3`);
+  await concatAudio(audioFiles, audioPath);
+  const voicesUsed = [...new Set(synthesized.map((line) => line.voice))];
+  return {
+    tts: {
+      provider: ttsProvider.name,
+      voice: voicesUsed.join("、"),
+      audioPath,
+      durationSec: round3(offset),
+      cached: allCached,
+    },
+    cues: offset > 0 ? cues : [],
+    lines: synthesized,
+  };
 }
 
 export async function runPipeline(options: RunPipelineOptions): Promise<PipelineResult> {
@@ -167,6 +257,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         maxSegments: config.script.maxSegments,
         availableTags: materialTagPool(materials),
         ...(story ? { story } : {}),
+        ...(options.dialogue ? { dialogue: true } : {}),
         ...(cast.length > 0 ? { cast: castPromptInput(cast) } : {}),
       },
       signal,
@@ -194,28 +285,48 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       throwIfAborted(signal);
       const segment = script.segments[index]!;
 
-      const cacheKey = sha256(
-        [
-          config.tts.provider,
-          config.tts.model,
-          config.tts.voice,
-          String(config.tts.rate),
-          segment.narration,
-        ].join("|"),
-      ).slice(0, 40);
-      const tts = await ttsProvider.synthesize({ text: segment.narration, cacheKey }, signal);
+      const dialogueLines = segment.lines ?? [];
+      let tts: TtsResult;
+      let cues: SubtitleCue[];
+      let lineResults: SegmentPlan["lines"];
+      if (dialogueLines.length > 0) {
+        const synthesized = await synthesizeDialogueLines({
+          lines: dialogueLines,
+          cast,
+          config,
+          logger,
+          jobDir,
+          index,
+          ttsProvider,
+          signal,
+        });
+        tts = synthesized.tts;
+        cues = synthesized.cues;
+        lineResults = synthesized.lines;
+      } else {
+        const cacheKey = sha256(
+          [
+            config.tts.provider,
+            config.tts.model,
+            config.tts.voice,
+            String(config.tts.rate),
+            segment.narration,
+          ].join("|"),
+        ).slice(0, 40);
+        tts = await ttsProvider.synthesize({ text: segment.narration, cacheKey }, signal);
+        cues = buildSubtitleCues({
+          narration: segment.narration,
+          sentences: tts.sentences,
+          audioDurationSec: tts.durationSec,
+          style: config.subtitles,
+        });
+      }
       if (config.tts.provider !== "silent" && tts.provider === "silent") {
         warnings.push(`分镜 ${index + 1} 配音失败，已回退为静音占位（详见服务日志）。`);
       }
       const durationSec = round3(
         Math.max(tts.durationSec + config.video.tailPaddingSec, config.video.minSegmentSec),
       );
-      const cues = buildSubtitleCues({
-        narration: segment.narration,
-        sentences: tts.sentences,
-        audioDurationSec: tts.durationSec,
-        style: config.subtitles,
-      });
       plans.push({
         index,
         segment,
@@ -224,6 +335,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         tts,
         durationSec,
         cues,
+        ...(lineResults ? { lines: lineResults } : {}),
         startSec: round3(cursor),
       });
       cursor = round3(cursor + durationSec);
@@ -376,6 +488,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         : null,
       voice: plan.tts.voice,
       ttsProvider: plan.tts.provider,
+      ...(plan.lines ? { lines: plan.lines } : {}),
       durationSec: plan.durationSec,
       startSec: plan.startSec,
       subtitleCues: plan.cues.length,

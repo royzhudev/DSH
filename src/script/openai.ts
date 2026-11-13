@@ -35,18 +35,32 @@ ${story.slice(0, 6000)}
 }
 
 function buildUserPrompt(request: ScriptRequest): string {
-  const tags = request.availableTags.length > 0
-    ? request.availableTags.slice(0, 40).join("、")
-    : "（素材库暂无可选标签，请给出通用画面关键词）";
-  return `请围绕主题「${request.topic}」写一条竖屏短剧脚本。${storySection(request)}${castSection(request)}
-
-硬性要求：
-1. 目标总时长约 ${request.targetDurationSec} 秒，拆成 3 到 ${request.maxSegments} 个分镜。
-2. 每个分镜的口播文案 20 到 60 个汉字，口语化、有节奏，开头 2 秒内抓住注意力，结尾有总结或互动引导。
-3. 每个分镜给出 2 到 4 个画面检索关键词，优先从以下素材标签中选择：${tags}
-4. 每个分镜补全 scene（场景：地点/时间/光线）和 shot（镜头：景别、人物动作、构图），用于画面生成。
-5. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
-6. 只输出如下结构的 JSON：
+  const tags =
+    request.availableTags.length > 0
+      ? request.availableTags.slice(0, 40).join("、")
+      : "（素材库暂无可选标签，请给出通用画面关键词）";
+  const dialogue = request.dialogue === true;
+  const format = dialogue
+    ? `6. 只输出如下结构的 JSON（对话模式：每个分镜用 lines 给出 2 到 4 句人物台词，speaker 必须是上面清单里的角色名；narration 用“角色：台词”按顺序拼接，供字幕兜底）：
+{
+  "title": "短剧标题，20 字以内",
+  "summary": "一句话概括",
+  "segments": [
+    {
+      "narration": "林小满：我没拿你的东西。 客人：那它是怎么消失的？",
+      "lines": [
+        { "speaker": "林小满", "text": "我没拿你的东西。" },
+        { "speaker": "客人", "text": "那它是怎么消失的？" }
+      ],
+      "keywords": ["画面关键词1", "画面关键词2"],
+      "durationHintSec": 7,
+      "scene": "老城区咖啡馆，傍晚，暖色台灯",
+      "shot": "中景，两人对峙，镜头缓慢推进",
+      "cast": ["林小满", "客人"]
+    }
+  ]
+}`
+    : `6. 只输出如下结构的 JSON：
 {
   "title": "视频标题，20 字以内",
   "summary": "一句话概括",
@@ -61,8 +75,19 @@ function buildUserPrompt(request: ScriptRequest): string {
     }
   ]
 }`;
-}
+  const speech = dialogue
+    ? "2. 这是人物对话短剧：每个分镜写 2 到 4 句台词，用 lines 按说话顺序输出（speaker 用角色名）；台词要口语化、有冲突和反转，每句不超过 30 个汉字；不要写第三人称旁白，不要用“他说”“她问”这类转述。"
+    : "2. 每个分镜的口播文案 20 到 60 个汉字，口语化、有节奏，开头 2 秒内抓住注意力，结尾有总结或互动引导。";
+  return `请围绕主题「${request.topic}」写一条竖屏短剧脚本。${storySection(request)}${castSection(request)}
 
+硬性要求：
+1. 目标总时长约 ${request.targetDurationSec} 秒，拆成 3 到 ${request.maxSegments} 个分镜。
+${speech}
+3. 每个分镜给出 2 到 4 个画面检索关键词，优先从以下素材标签中选择：${tags}
+4. 每个分镜补全 scene（场景：地点/时间/光线）和 shot（镜头：景别、人物动作、构图），用于画面生成。
+5. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
+${format}`;
+}
 export interface OpenAiScriptOptions {
   config: ScriptSettings;
   logger: Logger;

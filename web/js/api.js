@@ -58,11 +58,12 @@ export async function uploadMaterial(file, { title = "", tags = "" } = {}) {
   return data;
 }
 
-export async function uploadCast(file, { kind = "character", name = "", description = "" } = {}) {
+export async function uploadCast(file, { kind = "character", name = "", description = "", voice = "" } = {}) {
   const form = new FormData();
   form.append("kind", kind);
   form.append("name", name);
   form.append("description", description);
+  if (voice) form.append("voice", voice);
   if (file) form.append("file", file);
   return postForm("/api/cast", form, "添加失败");
 }

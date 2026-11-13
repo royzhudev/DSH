@@ -3,8 +3,14 @@ import { AppError } from "../errors.js";
 import type { Script, ScriptSegment } from "../types.js";
 import { normalizeTagList, truncate } from "../util/text.js";
 
+const lineSchema = z.object({
+  speaker: z.string().min(1),
+  text: z.string().min(1),
+});
+
 const segmentSchema = z.object({
-  narration: z.string().min(1),
+  narration: z.string().optional(),
+  lines: z.array(lineSchema).optional(),
   keywords: z.array(z.string()).optional(),
   durationHintSec: z.number().positive().optional(),
   onScreenText: z.string().optional(),
@@ -83,23 +89,34 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
 
   const segments: ScriptSegment[] = [];
   for (const raw of parsed.data.segments) {
-    const narration = cleanNarration(raw.narration);
-    if (!narration) continue;
+    const lines = (raw.lines ?? [])
+      .map((line) => ({ speaker: line.speaker.trim(), text: cleanNarration(line.text) }))
+      .filter((line) => line.speaker && line.text)
+      .slice(0, 8);
+    const narration = cleanNarration(
+      raw.narration ?? (lines.length > 0 ? lines.map((line) => `${line.speaker}：${line.text}`).join(" ") : ""),
+    );
+    if (!narration && lines.length === 0) continue;
     const keywords = normalizeTagList(raw.keywords ?? []).slice(0, 6);
     const scene = raw.scene?.trim().slice(0, 200);
     const shot = raw.shot?.trim().slice(0, 400);
     const cast = normalizeTagList(raw.cast ?? []).slice(0, 10);
-    const pieces = splitOverlongNarration(narration);
-    for (const piece of pieces) {
-      segments.push({
-        id: segments.length + 1,
-        narration: piece,
-        keywords,
-        durationHintSec: raw.durationHintSec,
-        ...(scene ? { scene } : {}),
-        ...(shot ? { shot } : {}),
-        ...(cast.length > 0 ? { cast } : {}),
-      });
+    const speakers = [...new Set(lines.map((line) => line.speaker))];
+    const finalCast = normalizeTagList([...(raw.cast ?? []), ...speakers]).slice(0, 10);
+    const base = {
+      keywords,
+      durationHintSec: raw.durationHintSec,
+      ...(scene ? { scene } : {}),
+      ...(shot ? { shot } : {}),
+      ...(finalCast.length > 0 ? { cast: finalCast } : {}),
+      ...(lines.length > 0 ? { lines } : {}),
+    };
+    if (lines.length > 0) {
+      segments.push({ id: segments.length + 1, narration, ...base });
+      continue;
+    }
+    for (const piece of splitOverlongNarration(narration)) {
+      segments.push({ id: segments.length + 1, narration: piece, ...base });
     }
   }
 

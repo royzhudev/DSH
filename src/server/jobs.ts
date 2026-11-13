@@ -105,6 +105,9 @@ function validateOptions(options: JobOptions, config: AppConfig): void {
       });
     }
   }
+  if (options.dialogue !== undefined && options.dialogue !== true && options.dialogue !== false) {
+    throw new AppError("对话模式开关必须是布尔值", { code: "INVALID_OPTIONS", status: 400 });
+  }
   if (options.castIds !== undefined) {
     if (!Array.isArray(options.castIds) || options.castIds.some((id) => typeof id !== "string")) {
       throw new AppError("castIds 必须是角色/道具 id 数组", { code: "INVALID_OPTIONS", status: 400 });
@@ -230,6 +233,7 @@ export class JobManager {
             jobId: id,
             story: record.options.story,
             castIds: record.options.castIds,
+            dialogue: record.options.dialogue,
             onProgress: (progress) => {
               record.progress = progress;
             },

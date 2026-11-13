@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
 import ffmpegStatic from "ffmpeg-static";
 import ffprobeStatic from "ffprobe-static";
 import { AppError } from "../errors.js";
@@ -203,4 +204,40 @@ export async function generateSilentAudio(
     "48k",
     file,
   ]);
+}
+/** 把多段配音按顺序拼成一条音轨（短剧多角色对话用）。 */
+export async function concatAudio(files: string[], outputFile: string): Promise<void> {
+  if (files.length === 0) throw new Error("没有可拼接的音频片段");
+  if (files.length === 1) {
+    await fs.copyFile(files[0]!, outputFile);
+    return;
+  }
+  const listFile = `${outputFile}.list.txt`;
+  const lines = files.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join("\n");
+  await fs.writeFile(listFile, `${lines}\n`, "utf8");
+  try {
+    await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      listFile,
+      "-ar",
+      "24000",
+      "-ac",
+      "1",
+      "-c:a",
+      "libmp3lame",
+      "-b:a",
+      "48k",
+      outputFile,
+    ]);
+  } finally {
+    await fs.rm(listFile, { force: true });
+  }
 }

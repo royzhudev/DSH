@@ -15,6 +15,8 @@ export interface CastAsset {
   description: string;
   /** 参考图相对 castDir 的文件名；没有参考图时不参与图生视频。 */
   imageFile?: string;
+  /** 对话模式下给这个角色配音的音色（Edge voice id 等）；为空时自动分配。 */
+  voice?: string;
   width?: number;
   height?: number;
   sizeBytes?: number;
@@ -23,8 +25,15 @@ export interface CastAsset {
 }
 
 /** 一个分镜：口播文案 + 画面检索关键词 + 短剧镜头信息。 */
+/** 角色台词：短剧的对话单元，按说话人分配不同配音音色。 */
+export interface DialogueLine {
+  speaker: string;
+  text: string;
+}
+
 export interface ScriptSegment {
   id: number;
+  /** 画外旁白/整段文案；对话模式下由 lines 拼接而来，用于字幕与画面提示。 */
   narration: string;
   keywords: string[];
   durationHintSec?: number;
@@ -34,6 +43,8 @@ export interface ScriptSegment {
   shot?: string;
   /** 出场角色/道具名称，对应角色库中的名字。 */
   cast?: string[];
+  /** 对话模式的台词，按顺序朗读，每个说话人可使用不同音色。 */
+  lines?: DialogueLine[];
 }
 
 /** 大模型或离线模板生成的完整脚本。 */
@@ -42,6 +53,8 @@ export interface Script {
   summary: string;
   segments: ScriptSegment[];
   provider: string;
+  /** dialogue：人物对话（多音色）；narration：第三人称旁白。 */
+  mode?: "dialogue" | "narration";
 }
 
 export type MaterialType = "video" | "image";
@@ -95,6 +108,8 @@ export interface SegmentPlan {
   imageToVideo?: boolean;
   tts: TtsResult;
   durationSec: number;
+  /** 对话模式下的台词与音色分配。 */
+  lines?: Array<DialogueLine & { voice: string; durationSec: number }>;
   /** 相对当前分镜的本地时间轴。 */
   cues: SubtitleCue[];
   /** 成片时间轴上的绝对开始时间，拼接后写入 SRT。 */
@@ -118,6 +133,8 @@ export interface SegmentResult {
   material: Pick<Material, "id" | "title" | "type" | "file"> | null;
   voice: string;
   ttsProvider: TtsProviderName;
+  /** 对话模式：本分镜的台词、说话人与音色。 */
+  lines?: Array<DialogueLine & { voice: string; durationSec: number }>;
   durationSec: number;
   startSec: number;
   subtitleCues: number;
@@ -298,6 +315,8 @@ export interface JobOptions {
   maxSegments?: number;
   ttsProvider?: TtsProviderName;
   voice?: string;
+  /** 对话模式：分镜按人物台词生成，并按说话人分配音色。 */
+  dialogue?: boolean;
   subtitlesEnabled?: boolean;
   videoGenEnabled?: boolean;
   allowUnmatched?: boolean;
@@ -316,6 +335,8 @@ export interface ScriptRequest {
   story?: string;
   /** 可选的角色/道具设定，用于安排出场并保持外观一致。 */
   cast?: Array<Pick<CastAsset, "name" | "kind" | "description">>;
+  /** 生成人物对话（多角色台词）而不是第三人称旁白。 */
+  dialogue?: boolean;
 }
 
 export interface ScriptProvider {
