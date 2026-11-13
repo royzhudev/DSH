@@ -354,9 +354,16 @@ test(
     const preview = (await previewResponse.json()) as {
       script: { segments: Array<{ narration: string; keywords: string[] }> };
       provider: string;
+      review: { score: number; items: Array<{ id: string; level: string; title: string }> };
     };
     assert.equal(preview.provider, "offline");
     assert.equal(preview.script.segments.length, 2);
+    // 创作品控随预览一起返回，页面不用再请求一次
+    assert.equal(typeof preview.review.score, "number");
+    assert.deepEqual(
+      preview.review.items.map((item) => item.id),
+      ["topic", "hook", "dialogue", "shots", "pace", "consistency", "publish-compliance", "publish-cover"],
+    );
 
     const createResponse = await jsonRequest(request, `${app.url}/api/videos`, {
       topic: "城市夜景",

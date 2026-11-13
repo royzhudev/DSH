@@ -29,12 +29,32 @@ export interface AddCastOptions {
   description?: string;
   /** 参考图；省略时只保存文字设定。 */
   imagePath?: string | null;
+  /** 对话模式下的配音音色（Edge voice id）。 */
+  voice?: string;
 }
 
 export interface UpdateCastOptions {
   kind?: CastKind;
   name?: string;
   description?: string;
+  voice?: string;
+}
+
+const VOICE_MAX_LENGTH = 60;
+
+export function parseCastVoice(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") {
+    throw new AppError("配音音色必须是文本", { code: "CAST_INVALID", status: 400 });
+  }
+  const voice = value.trim();
+  if (voice.length > VOICE_MAX_LENGTH) {
+    throw new AppError(`配音音色不能超过 ${VOICE_MAX_LENGTH} 个字符`, {
+      code: "CAST_INVALID",
+      status: 400,
+    });
+  }
+  return voice;
 }
 
 export function castImageType(filename: string): string | null {
@@ -139,6 +159,7 @@ export class CastLibrary {
       const kind = parseCastKind(options.kind);
       const name = parseCastName(options.name);
       const description = parseCastDescription(options.description);
+      const voice = parseCastVoice(options.voice);
       this.assertNameAvailable(assets, name);
       const image = options.imagePath
         ? await this.importImage(options.imagePath, kind, name)
@@ -149,6 +170,7 @@ export class CastLibrary {
         kind,
         name,
         description,
+        ...(voice ? { voice } : {}),
         ...image,
         createdAt: now,
         updatedAt: now,
@@ -172,6 +194,11 @@ export class CastLibrary {
       }
       if (patch.description !== undefined) {
         target.description = parseCastDescription(patch.description);
+      }
+      if (patch.voice !== undefined) {
+        const voice = parseCastVoice(patch.voice);
+        if (voice) target.voice = voice;
+        else delete target.voice;
       }
       target.updatedAt = new Date().toISOString();
       await this.persist(assets);

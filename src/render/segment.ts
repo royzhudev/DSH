@@ -20,6 +20,8 @@ export interface RenderSegmentOptions {
   jobDir: string;
   topic: string;
   logger: Logger;
+  /** 是否烧录字幕；口型同步需要先不烧字幕，等同步后再补，避免模型把字也重绘。 */
+  burnSubtitles?: boolean;
 }
 
 export interface RenderedSegment {
@@ -83,7 +85,7 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
     ].join(",");
   }
 
-  if (config.subtitles.enabled) {
+  if (config.subtitles.enabled && options.burnSubtitles !== false) {
     await fs.writeFile(
       path.join(segDir, "sub.ass"),
       renderAss(cues, config.subtitles, {
@@ -150,4 +152,57 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
   );
   await runFfmpeg(args, { cwd: segDir, timeoutMs: 10 * 60 * 1000 });
   return { index, file: outputFile, durationSec };
+}
+
+
+/** 在已有分镜视频上补烧字幕（口型同步之后调用，保持文字清晰且时间轴不变）。 */
+export async function burnSegmentSubtitles(options: {
+  index: number;
+  file: string;
+  cues: SubtitleCue[];
+  config: AppConfig;
+  logger: Logger;
+}): Promise<string> {
+  const { index, file, cues, config, logger } = options;
+  if (!config.subtitles.enabled || cues.length === 0) return file;
+  const segDir = path.dirname(file);
+  const assFile = path.join(segDir, `sub-${index}.ass`);
+  await fs.writeFile(
+    assFile,
+    renderAss(cues, config.subtitles, {
+      width: config.video.width,
+      height: config.video.height,
+      fps: config.video.fps,
+    }),
+    "utf8",
+  );
+  const output = path.join(segDir, "segment-subbed.mp4");
+  await runFfmpeg(
+    [
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      file,
+      "-vf",
+      `ass=${quoteFilterValue(path.basename(assFile))}`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      config.video.preset,
+      "-crf",
+      String(config.video.crf),
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "copy",
+      "-movflags",
+      "+faststart",
+      output,
+    ],
+    { cwd: segDir, timeoutMs: 10 * 60 * 1000 },
+  );
+  logger.debug(`分镜 ${index} 口型同步后补烧字幕`);
+  return output;
 }

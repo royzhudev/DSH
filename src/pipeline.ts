@@ -3,15 +3,20 @@ import fs from "node:fs/promises";
 import type {
   AppConfig,
   CastAsset,
+  DialogueLine,
   GeneratedClip,
   JobProgress,
   JobStage,
+  LipsyncProvider,
   PipelineResult,
   ProgressReporter,
   ScriptProvider,
+  ScriptSegment,
   SegmentPlan,
   SegmentResult,
+  SubtitleCue,
   TtsProvider,
+  TtsResult,
   VideoGenProvider,
 } from "./types.js";
 import { AppError, toErrorMessage } from "./errors.js";
@@ -26,10 +31,12 @@ import { CastLibrary, castSummary, resolveCastNames, selectCastAssets } from "./
 import { buildShotPrompt } from "./cast/prompt.js";
 import { isAiVideoEnabled } from "./config.js";
 import { preflightVideoJob } from "./preflight.js";
-import { renderSegment } from "./render/segment.js";
+import { burnSegmentSubtitles, renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
-import { probeMedia, extractPoster } from "./media/ffmpeg.js";
+import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
+import { createLipsyncProvider } from "./lipsync/dashscope.js";
+import { assignDialogueVoices } from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
 export interface RunPipelineOptions {
@@ -46,10 +53,14 @@ export interface RunPipelineOptions {
   ttsProvider?: TtsProvider;
   /** 显式传入 null 可禁用画面生成；未传时按配置创建。 */
   videoGenProvider?: VideoGenProvider | null;
+  /** 显式传入 null 可禁口型同步；未传时按配置创建。 */
+  lipsyncProvider?: LipsyncProvider | null;
   /** 剧本/大纲文本；为空时只按主题创作。 */
   story?: string;
   /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定。 */
   castIds?: string[];
+  /** 对话模式：分镜按人物台词生成，并按说话人分配音色。 */
+  dialogue?: boolean;
 }
 
 const STAGE_LABELS: Record<JobStage, string> = {
@@ -60,6 +71,7 @@ const STAGE_LABELS: Record<JobStage, string> = {
   tts: "配音合成",
   videogen: "AI 画面生成",
   render: "分镜剪辑",
+  lipsync: "对口型",
   concat: "成片拼接",
   done: "完成",
 };
@@ -95,6 +107,102 @@ function withStageLabel(stage: JobStage, error: unknown): unknown {
     status: error instanceof AppError ? error.status : 500,
     cause: error,
   });
+}
+
+interface DialogueSynthesisInput {
+  lines: DialogueLine[];
+  cast: CastAsset[];
+  config: AppConfig;
+  logger: Logger;
+  jobDir: string;
+  index: number;
+  ttsProvider: TtsProvider;
+  signal?: AbortSignal;
+}
+
+/**
+ * 对话模式：按说话人逐句合成，再把几段配音拼成一条音轨。
+ * - 每个说话人固定音色（角色库可指定，未指定时按名字稳定分配）；
+ * - 字幕按“角色：台词”逐句出现，时间轴按每句真实时长累加；
+ * - Edge 以外的供应商不支持切换音色时，仍按对话逐句合成，字幕保留说话人。
+ */
+async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
+  tts: TtsResult;
+  cues: SubtitleCue[];
+  lines: Array<DialogueLine & { voice: string; durationSec: number }>;
+}> {
+  const { lines, cast, config, logger, jobDir, index, ttsProvider, signal } = input;
+  const canSwitchVoice = config.tts.provider === "edge";
+  const voices = canSwitchVoice
+    ? assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice)
+    : new Map<string, string>();
+  const providers = new Map<string, TtsProvider>();
+  const audioFiles: string[] = [];
+  const synthesized: Array<DialogueLine & { voice: string; durationSec: number }> = [];
+  const cues: SubtitleCue[] = [];
+  let offset = 0;
+  let allCached = true;
+
+  for (const line of lines) {
+    if (signal?.aborted) throw new AppError("任务已取消", { code: "ABORTED", status: 499 });
+    const voice = voices.get(line.speaker) ?? config.tts.voice;
+    let provider = ttsProvider;
+    if (canSwitchVoice && voice !== ttsProvider.voice) {
+      provider = providers.get(voice) ?? createTtsProvider(
+        { ...config, tts: { ...config.tts, voice } },
+        config.cacheDir,
+        logger,
+      );
+      providers.set(voice, provider);
+    }
+    const cacheKey = sha256(
+      [config.tts.provider, config.tts.model, voice, String(config.tts.rate), line.text].join("|"),
+    ).slice(0, 40);
+    const result = await provider.synthesize({ text: line.text, cacheKey }, signal);
+    audioFiles.push(result.audioPath);
+    allCached = allCached && result.cached;
+    synthesized.push({
+      speaker: line.speaker,
+      text: line.text,
+      voice: result.voice,
+      durationSec: round3(result.durationSec),
+    });
+    cues.push({
+      startSec: round3(offset),
+      endSec: round3(offset + result.durationSec),
+      text: `${line.speaker}：${line.text}`,
+    });
+    offset += result.durationSec;
+  }
+
+  const audioDir = path.join(jobDir, "audio");
+  await ensureDir(audioDir);
+  const audioPath = path.join(audioDir, `segment-${String(index + 1).padStart(2, "0")}.mp3`);
+  await concatAudio(audioFiles, audioPath);
+  const voicesUsed = [...new Set(synthesized.map((line) => line.voice))];
+  return {
+    tts: {
+      provider: ttsProvider.name,
+      voice: voicesUsed.join("、"),
+      audioPath,
+      durationSec: round3(offset),
+      cached: allCached,
+    },
+    cues: offset > 0 ? cues : [],
+    lines: synthesized,
+  };
+}
+
+
+/** 脚本没写清分镜出场角色时，用已上传的角色兜底，避免参考图完全没用上。 */
+function inferSegmentCast(segment: ScriptSegment, cast: CastAsset[]): CastAsset[] {
+  const characters = cast.filter((asset) => asset.kind === "character");
+  if (characters.length === 0) return [];
+  if (characters.length === 1) return characters;
+  const mentioned = characters.filter(
+    (asset) => segment.narration.includes(asset.name) || segment.lines?.some((line) => line.speaker.includes(asset.name)),
+  );
+  return mentioned;
 }
 
 export async function runPipeline(options: RunPipelineOptions): Promise<PipelineResult> {
@@ -167,6 +275,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         maxSegments: config.script.maxSegments,
         availableTags: materialTagPool(materials),
         ...(story ? { story } : {}),
+        ...(options.dialogue ? { dialogue: true } : {}),
         ...(cast.length > 0 ? { cast: castPromptInput(cast) } : {}),
       },
       signal,
@@ -194,36 +303,67 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       throwIfAborted(signal);
       const segment = script.segments[index]!;
 
-      const cacheKey = sha256(
-        [
-          config.tts.provider,
-          config.tts.model,
-          config.tts.voice,
-          String(config.tts.rate),
-          segment.narration,
-        ].join("|"),
-      ).slice(0, 40);
-      const tts = await ttsProvider.synthesize({ text: segment.narration, cacheKey }, signal);
+      const dialogueLines = segment.lines ?? [];
+      let tts: TtsResult;
+      let cues: SubtitleCue[];
+      let lineResults: SegmentPlan["lines"];
+      if (dialogueLines.length > 0) {
+        const synthesized = await synthesizeDialogueLines({
+          lines: dialogueLines,
+          cast,
+          config,
+          logger,
+          jobDir,
+          index,
+          ttsProvider,
+          signal,
+        });
+        tts = synthesized.tts;
+        cues = synthesized.cues;
+        lineResults = synthesized.lines;
+      } else {
+        const cacheKey = sha256(
+          [
+            config.tts.provider,
+            config.tts.model,
+            config.tts.voice,
+            String(config.tts.rate),
+            segment.narration,
+          ].join("|"),
+        ).slice(0, 40);
+        tts = await ttsProvider.synthesize({ text: segment.narration, cacheKey }, signal);
+        cues = buildSubtitleCues({
+          narration: segment.narration,
+          sentences: tts.sentences,
+          audioDurationSec: tts.durationSec,
+          style: config.subtitles,
+        });
+      }
       if (config.tts.provider !== "silent" && tts.provider === "silent") {
         warnings.push(`分镜 ${index + 1} 配音失败，已回退为静音占位（详见服务日志）。`);
       }
       const durationSec = round3(
         Math.max(tts.durationSec + config.video.tailPaddingSec, config.video.minSegmentSec),
       );
-      const cues = buildSubtitleCues({
-        narration: segment.narration,
-        sentences: tts.sentences,
-        audioDurationSec: tts.durationSec,
-        style: config.subtitles,
-      });
+      const explicitCast = resolveCastNames(segment.cast, cast);
+      const inferredCast = explicitCast.length > 0 ? [] : inferSegmentCast(segment, cast);
+      if (inferredCast.length > 0) {
+        logger.info(
+          `分镜 ${index + 1} 脚本没有写角色名，按已上传角色代入：${inferredCast.map((item) => item.name).join("、")}`,
+        );
+        warnings.push(
+          `分镜 ${index + 1} 的脚本没有标明出场角色，已按角色库代入「${inferredCast.map((item) => item.name).join("、")}」；如需换人请在脚本里写明角色名。`,
+        );
+      }
       plans.push({
         index,
         segment,
         material: null,
-        cast: resolveCastNames(segment.cast, cast),
+        cast: explicitCast.length > 0 ? explicitCast : inferredCast,
         tts,
         durationSec,
         cues,
+        ...(lineResults ? { lines: lineResults } : {}),
         startSec: round3(cursor),
       });
       cursor = round3(cursor + durationSec);
@@ -239,6 +379,17 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       options.videoGenProvider === undefined
         ? createVideoGenProvider(config, logger)
         : options.videoGenProvider;
+    const castCharacters = cast.filter((asset) => asset.kind === "character");
+    const plansWithCast = plans.filter((plan) => plan.cast.some((asset) => asset.kind === "character"));
+    if (!videoGen && castCharacters.length > 0) {
+      warnings.push(
+        `角色库里已有 ${castCharacters.length} 个角色，但没有启用 AI 画面生成，成片只会用素材/背景，不会出现角色形象；在设置里配置 AI 画面模型后才会用角色参考图。`,
+      );
+    } else if (videoGen && castCharacters.length > 0 && plansWithCast.length === 0) {
+      warnings.push(
+        "脚本没有任何分镜引用角色库，已上传的角色形象不会出现在成片里；请在剧本里写明角色名，或重新生成脚本。",
+      );
+    }
     const usedIds = new Set<string>();
     for (let index = 0; index < plans.length; index += 1) {
       throwIfAborted(signal);
@@ -258,29 +409,22 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
             file: path.join(config.castDir, asset.imageFile!),
           }));
         const primary = references.find((reference) => reference.role === "character") ?? references[0];
-        const shotPrompt = buildShotPrompt({
-          topic: normalizedTopic,
-          index: index + 1,
-          total: plans.length,
-          segment: plan.segment,
-          cast: plan.cast,
-        });
-        logger.info(
-          `分镜 ${index + 1}/${plans.length} 画面提示词：${shotPrompt.split("\n")[1] ?? shotPrompt.slice(0, 40)}`,
-        );
+        // 角色参考图是“人设定妆照”，不是每个分镜的首帧。所有镜头都拿同一张图做首帧，
+        // 生成结果会像同一个镜头重复播放。只让第 1 镜定调，其余镜头按剧本文字生成不同画面。
+        const firstFrame = index === 0 ? primary : undefined;
         try {
           const generated: GeneratedClip = await videoGen.generate(
             {
               prompt: shotPrompt,
               durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
-              ...(primary ? { image: primary.file } : {}),
+              ...(firstFrame ? { image: firstFrame.file } : {}),
               ...(references.length > 0 ? { references } : {}),
             },
             path.join(jobDir, "generated"),
             signal,
           );
           plan.generated = generated;
-          plan.imageToVideo = Boolean(primary);
+          plan.imageToVideo = Boolean(firstFrame);
         } catch (error) {
           if (signal?.aborted) throw error;
           if (!config.videoGen.fallbackToMaterials) throw error;
@@ -330,7 +474,21 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     });
 
     throwIfAborted(signal);
+    const lipsyncProvider =
+      options.lipsyncProvider === undefined
+        ? createLipsyncProvider(config.lipsync, logger)
+        : options.lipsyncProvider;
+    if (config.lipsync.provider === "dashscope" && !config.lipsync.apiKey) {
+      warnings.push("口型同步已选择百炼 VideoRetalk，但还没有填写 API Key，本次跳过口型同步。");
+    }
+    if (lipsyncProvider) {
+      warnings.push(
+        "口型同步会按成片时长计费（百炼 VideoRetalk 0.08 元/秒），且只在分镜含台词、画面有人物时生效。",
+      );
+    }
     const rendered: string[] = [];
+    const lipsyncStats = { synced: 0, skipped: 0, failed: 0 };
+    const segmentLipsync = new Map<number, "synced" | "unsynced" | "skipped">();
     const renderBase = videoGen ? 65 : 50;
     for (let index = 0; index < plans.length; index += 1) {
       throwIfAborted(signal);
@@ -340,6 +498,12 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         percent: Math.round(renderBase + (index / plans.length) * (88 - renderBase)),
         message: `剪辑分镜 ${index + 1}/${plans.length}`,
       });
+      const willSync =
+        Boolean(lipsyncProvider) &&
+        Boolean(plan.lines && plan.lines.length > 0) &&
+        plan.durationSec > 2 &&
+        plan.durationSec < 120 &&
+        plan.cast.some((asset) => asset.kind === "character");
       const result = await renderSegment({
         index: plan.index + 1,
         segment: plan.segment,
@@ -352,8 +516,68 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         jobDir,
         topic: normalizedTopic,
         logger,
+        // 口型同步会把整帧重新生成，先不烧字幕，同步后再补，避免文字被模型重绘。
+        ...(willSync ? { burnSubtitles: false } : {}),
       });
-      rendered.push(result.file);
+      let segmentFile = result.file;
+      // 口型结果按分镜序号记录，供 result.json 展示。
+      const syncable = willSync;
+      if (syncable && lipsyncProvider) {
+        report({
+          stage: "lipsync",
+          percent: Math.round(renderBase + ((index + 0.5) / plans.length) * (88 - renderBase)),
+          message: `对口型 ${index + 1}/${plans.length}`,
+        });
+        try {
+          const synced = await lipsyncProvider.sync(
+            { videoFile: result.file, audioFile: plan.tts.audioPath },
+            jobDir,
+            signal,
+          );
+          segmentFile = synced.file;
+          lipsyncStats.synced += 1;
+          // VideoRetalk 会按音频扩展/截断画面，字幕与后续分镜起点必须按真实时长重算。
+          const syncedProbe = await probeMedia(segmentFile);
+          const syncedDuration = round3(Math.max(syncedProbe.durationSec ?? plan.durationSec, 0.1));
+          if (Math.abs(syncedDuration - plan.durationSec) > 0.05) {
+            logger.info(
+              `分镜 ${index + 1} 口型同步后时长 ${plan.durationSec.toFixed(2)}s → ${syncedDuration.toFixed(2)}s，已按新时长重排字幕与后续分镜`,
+            );
+            plan.durationSec = syncedDuration;
+          }
+          segmentFile = await burnSegmentSubtitles({
+            index: index + 1,
+            file: segmentFile,
+            cues: plan.cues,
+            config,
+            logger,
+          });
+          logger.info(`分镜 ${index + 1} 口型已同步（${synced.model}）`);
+        } catch (error) {
+          if (!config.lipsync.fallbackToUnsynced) throw error;
+          lipsyncStats.failed += 1;
+          warnings.push(
+            `分镜 ${index + 1} 口型同步失败，已保留未对口型的片段：${toErrorMessage(error)}`,
+          );
+          logger.warn(`分镜 ${index + 1} 口型同步失败，回退未对口型画面：${toErrorMessage(error)}`);
+        }
+      } else if (lipsyncProvider && plan.lines?.length) {
+        lipsyncStats.skipped += 1;
+      }
+      if (lipsyncProvider && plan.lines?.length) {
+        segmentLipsync.set(
+          plan.index,
+          segmentFile === result.file ? (syncable ? "unsynced" : "skipped") : "synced",
+        );
+      }
+      rendered.push(segmentFile);
+    }
+
+    // 口型同步可能改变分镜时长：按最终时长重排起点，保证 SRT 与画面一致。
+    let finalCursor = 0;
+    for (const plan of plans) {
+      plan.startSec = round3(finalCursor);
+      finalCursor = round3(finalCursor + plan.durationSec);
     }
 
     throwIfAborted(signal);
@@ -401,6 +625,8 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         : null,
       voice: plan.tts.voice,
       ttsProvider: plan.tts.provider,
+      ...(segmentLipsync.has(plan.index) ? { lipsync: segmentLipsync.get(plan.index) } : {}),
+      ...(plan.lines ? { lines: plan.lines } : {}),
       durationSec: plan.durationSec,
       startSec: plan.startSec,
       subtitleCues: plan.cues.length,
