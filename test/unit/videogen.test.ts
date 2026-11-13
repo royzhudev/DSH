@@ -974,7 +974,7 @@ test("HTTP 视频：万相 3.0 把角色库参考图放进 media[type=reference_
         image: hero,
         references: [
           { role: "character", name: "女主", file: hero },
-          { role: "scene", name: "咖啡馆", file: extra },
+          { role: "prop", name: "咖啡馆", file: extra },
         ],
       },
       path.join(dir, "gen"),
@@ -1045,7 +1045,7 @@ test("HTTP 视频：没有参考图时万相 3.0 仍用首帧，且参考图最�
 
     // 12 张参考图只发前 10 张（平台上限）。
     const many = Array.from({ length: 12 }, (_, index) => ({
-      role: "character",
+      role: "character" as const,
       name: `角色${index + 1}`,
       file: hero,
     }));
