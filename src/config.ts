@@ -71,6 +71,15 @@ export const DEFAULT_CONFIG: AppConfig = {
     resultPath: "",
     fallbackToMaterials: true,
   },
+  lipsync: {
+    // 默认关闭；开启后分镜渲染完会调用口型同步，再进成片拼接。
+    provider: "none",
+    baseUrl: "https://dashscope.aliyuncs.com",
+    model: "videoretalk",
+    timeoutMs: 900_000,
+    pollIntervalMs: 5_000,
+    fallbackToUnsynced: true,
+  },
   douyin: {
     clientKey: "",
     redirectUri: "",
@@ -227,6 +236,17 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
   config.videoGen.baseUrl = set(config.videoGen.baseUrl, envString(env, "VIDEOGEN_BASE_URL"));
   config.videoGen.apiKey = set(config.videoGen.apiKey, envString(env, "VIDEOGEN_API_KEY"));
   config.videoGen.model = set(config.videoGen.model, envString(env, "VIDEOGEN_MODEL"));
+
+  const lipsyncProvider = envString(env, "LIPSYNC_PROVIDER") as "none" | "dashscope" | undefined;
+  if (lipsyncProvider) config.lipsync.provider = lipsyncProvider;
+  config.lipsync.baseUrl = set(config.lipsync.baseUrl, envString(env, "LIPSYNC_BASE_URL"));
+  config.lipsync.apiKey = set(config.lipsync.apiKey, envString(env, "LIPSYNC_API_KEY"));
+  config.lipsync.model = set(config.lipsync.model, envString(env, "LIPSYNC_MODEL"));
+  config.lipsync.pollIntervalMs = set(
+    config.lipsync.pollIntervalMs,
+    envNumber(env, "LIPSYNC_POLL_INTERVAL_MS"),
+  );
+  config.lipsync.timeoutMs = set(config.lipsync.timeoutMs, envNumber(env, "LIPSYNC_TIMEOUT_MS"));
   config.videoGen.submitPath = set(config.videoGen.submitPath, envString(env, "VIDEOGEN_SUBMIT_PATH"));
   config.videoGen.pollPath = set(config.videoGen.pollPath, envString(env, "VIDEOGEN_POLL_PATH"));
   config.videoGen.pollIntervalMs = set(

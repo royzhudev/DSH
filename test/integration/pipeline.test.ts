@@ -5,7 +5,9 @@ import test from "node:test";
 import { runPipeline } from "../../src/pipeline.js";
 import { probeMedia } from "../../src/media/ffmpeg.js";
 import { silentLogger } from "../../src/logger.js";
+import { CastLibrary } from "../../src/cast/library.js";
 import { MaterialLibrary } from "../../src/materials/library.js";
+import type { LipsyncProvider } from "../../src/types.js";
 import { generateTestImage, makeTempDir, makeTestConfig } from "../helpers.js";
 
 test(
@@ -109,6 +111,79 @@ test(
       assert.match(srt, /：/);
       const probe = await probeMedia(result.videoPath);
       assert.equal(probe.hasAudio, true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "口型同步：对话分镜渲染后调用对口型，失败可回退",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "silent" } });
+    const library = new CastLibrary(config.castDir, silentLogger);
+    await library.add({
+      kind: "character",
+      name: "林小满",
+      description: "25 岁女性，齐肩短发，米色风衣",
+    });
+    const calls: Array<{ videoFile: string; audioFile: string }> = [];
+    const provider: LipsyncProvider = {
+      name: "fake",
+      async sync(request) {
+        calls.push(request);
+        const target = path.join(path.dirname(request.videoFile), "fake-lipsync.mp4");
+        await fs.copyFile(request.videoFile, target);
+        return { provider: "fake", model: "fake-lipsync", file: target, durationSec: 1 };
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "外卖员被冤枉",
+        config,
+        logger: silentLogger,
+        dialogue: true,
+        lipsyncProvider: provider,
+      });
+      assert.ok(calls.length >= 1, "对话分镜应调用口型同步");
+      assert.equal(calls.length, result.segments.filter((segment) => segment.lines?.length).length);
+      assert.ok(result.segments.every((segment) => segment.lipsync === "synced"));
+      const srt = await fs.readFile(result.srtPath, "utf8");
+      assert.match(srt, /：/);
+      const probe = await probeMedia(result.videoPath);
+      assert.equal(probe.hasAudio, true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "口型同步：失败时回退未对口型片段并给出提醒",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "silent" } });
+    const library = new CastLibrary(config.castDir, silentLogger);
+    await library.add({ kind: "character", name: "林小满", description: "25 岁女性" });
+    const provider: LipsyncProvider = {
+      name: "fake",
+      async sync() {
+        throw new Error("口型服务暂不可用");
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "外卖员被冤枉",
+        config,
+        logger: silentLogger,
+        dialogue: true,
+        lipsyncProvider: provider,
+      });
+      assert.ok(result.segments.every((segment) => segment.lipsync === "unsynced"));
+      assert.ok(result.warnings?.some((warning) => warning.includes("口型同步失败")));
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

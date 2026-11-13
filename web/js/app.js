@@ -752,7 +752,7 @@ async function renderCreate() {
                 <span class="track"></span>
                 <span>人物对话（多音色）</span>
               </label>
-              <span class="hint">分镜写成“角色：台词”，每个角色用自己的音色；关闭则用第三人称旁白讲解。角色音色可在「角色与道具」里设置，未设置会自动分配。</span>
+              <span class="hint">分镜写成“角色：台词”，每个角色用自己的音色；关闭则用第三人称旁白讲解。角色音色可在「角色与道具」里设置，未设置会自动分配。${settings.lipsync.provider === "dashscope" ? "成片会调用百炼 VideoRetalk 对齐口型（按秒计费）。" : "需要口型对齐时在设置里启用口型同步。"}</span>
             </div>
           </div>
 
@@ -2536,6 +2536,38 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
+          <div><div class="card-title">口型同步（对白）</div><div class="card-sub">分镜渲染后把人物口型对齐到台词音轨</div></div>
+          <span class="pill ${s.lipsync.provider === "dashscope" ? "pill-brand" : "pill-soft"}">${s.lipsync.provider === "dashscope" ? "已启用" : "未启用"}</span>
+        </div>
+        <div class="card-body">
+          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里云百炼 VideoRetalk</strong>（<code>videoretalk</code>）：提交人物视频 + 人声音频，返回口型对齐的新视频。只支持<strong>华北 2（北京）</strong>地域，必须使用该地域的 API Key；视频/音频需 2–120 秒、视频边长 640–2048、画面是人物正面近景。程序会先把本地文件上传到百炼临时存储（48 小时有效），再提交异步任务并轮询，成片按秒计费（0.08 元/秒）。只在同时满足「对话模式 + 分镜有台词 + 出现角色」时才调用。</span></div>
+          <div class="field-grid-3">
+            <div class="field">
+              <label for="lipsync-provider">供应商</label>
+              <select class="select" id="lipsync-provider">
+                ${options([["none", "不使用"], ["dashscope", "阿里百炼 VideoRetalk"]], s.lipsync.provider)}
+              </select>
+            </div>
+            <div class="field">
+              <label for="lipsync-model">模型</label>
+              <input class="input" id="lipsync-model" value="${attr(s.lipsync.model)}" placeholder="videoretalk" />
+            </div>
+            <div class="field">
+              <label for="lipsync-base-url">接口地址</label>
+              <input class="input" id="lipsync-base-url" value="${attr(s.lipsync.baseUrl)}" placeholder="https://dashscope.aliyuncs.com" />
+            </div>
+          </div>
+          ${secretField("lipsync-api-key", "百炼 API Key（北京地域）", { set: s.lipsync.apiKeySet, hint: s.lipsync.apiKeyHint })}
+          <div class="field-grid-2">
+            ${numberField("lipsync-poll-interval", "轮询间隔（毫秒）", s.lipsync.pollIntervalMs, { min: 1000, max: 60000, step: 1000 })}
+            ${numberField("lipsync-timeout", "超时（毫秒）", s.lipsync.timeoutMs, { min: 30000, max: 3600000, step: 10000 })}
+          </div>
+          ${switchField("lipsync-fallback", "口型失败时保留未对口型片段", s.lipsync.fallbackToUnsynced)}
+        </div>
+      </section>
+
+      <section class="card settings-card">
+        <div class="card-head">
           <div><div class="card-title">抖音开放平台</div><div class="card-sub">用于授权抖音号并发布成片</div></div>
           <span class="pill ${douyin?.authorized ? "pill-success" : douyin?.configured ? "pill-warning" : "pill-soft"}">${douyin?.authorized ? "已授权" : douyin?.configured ? "待授权" : "未配置"}</span>
         </div>
@@ -2696,6 +2728,17 @@ function collectSettings() {
   const videoGenKey = secret("videogen-api-key");
   if (videoGenKey !== undefined) videoGen.apiKey = videoGenKey;
 
+  const lipsync = {
+    provider: value("lipsync-provider"),
+    model: value("lipsync-model").trim(),
+    baseUrl: value("lipsync-base-url").trim(),
+    pollIntervalMs: number("lipsync-poll-interval"),
+    timeoutMs: number("lipsync-timeout"),
+    fallbackToUnsynced: checked("lipsync-fallback"),
+  };
+  const lipsyncKey = secret("lipsync-api-key");
+  if (lipsyncKey !== undefined) lipsync.apiKey = lipsyncKey;
+
   const douyin = {
     clientKey: value("douyin-client-key").trim(),
     redirectUri: value("douyin-redirect-uri").trim(),
@@ -2709,6 +2752,7 @@ function collectSettings() {
     script,
     tts,
     videoGen,
+    lipsync,
     video: {
       width: number("video-width"),
       height: number("video-height"),

@@ -7,6 +7,7 @@ import type {
   GeneratedClip,
   JobProgress,
   JobStage,
+  LipsyncProvider,
   PipelineResult,
   ProgressReporter,
   ScriptProvider,
@@ -33,6 +34,7 @@ import { renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
+import { createLipsyncProvider } from "./lipsync/dashscope.js";
 import { assignDialogueVoices } from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
@@ -50,6 +52,8 @@ export interface RunPipelineOptions {
   ttsProvider?: TtsProvider;
   /** 显式传入 null 可禁用画面生成；未传时按配置创建。 */
   videoGenProvider?: VideoGenProvider | null;
+  /** 显式传入 null 可禁口型同步；未传时按配置创建。 */
+  lipsyncProvider?: LipsyncProvider | null;
   /** 剧本/大纲文本；为空时只按主题创作。 */
   story?: string;
   /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定。 */
@@ -66,6 +70,7 @@ const STAGE_LABELS: Record<JobStage, string> = {
   tts: "配音合成",
   videogen: "AI 画面生成",
   render: "分镜剪辑",
+  lipsync: "对口型",
   concat: "成片拼接",
   done: "完成",
 };
@@ -417,7 +422,21 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     });
 
     throwIfAborted(signal);
+    const lipsyncProvider =
+      options.lipsyncProvider === undefined
+        ? createLipsyncProvider(config.lipsync, logger)
+        : options.lipsyncProvider;
+    if (config.lipsync.provider === "dashscope" && !config.lipsync.apiKey) {
+      warnings.push("口型同步已选择百炼 VideoRetalk，但还没有填写 API Key，本次跳过口型同步。");
+    }
+    if (lipsyncProvider) {
+      warnings.push(
+        "口型同步会按成片时长计费（百炼 VideoRetalk 0.08 元/秒），且只在分镜含台词、画面有人物时生效。",
+      );
+    }
     const rendered: string[] = [];
+    const lipsyncStats = { synced: 0, skipped: 0, failed: 0 };
+    const segmentLipsync = new Map<number, "synced" | "unsynced" | "skipped">();
     const renderBase = videoGen ? 65 : 50;
     for (let index = 0; index < plans.length; index += 1) {
       throwIfAborted(signal);
@@ -440,7 +459,47 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         topic: normalizedTopic,
         logger,
       });
-      rendered.push(result.file);
+      let segmentFile = result.file;
+      // 口型结果按分镜序号记录，供 result.json 展示。
+      const syncable =
+        Boolean(lipsyncProvider) &&
+        Boolean(plan.lines && plan.lines.length > 0) &&
+        plan.durationSec > 2 &&
+        plan.durationSec < 120 &&
+        plan.cast.some((asset) => asset.kind === "character");
+      if (syncable && lipsyncProvider) {
+        report({
+          stage: "lipsync",
+          percent: Math.round(renderBase + ((index + 0.5) / plans.length) * (88 - renderBase)),
+          message: `对口型 ${index + 1}/${plans.length}`,
+        });
+        try {
+          const synced = await lipsyncProvider.sync(
+            { videoFile: result.file, audioFile: plan.tts.audioPath },
+            jobDir,
+            signal,
+          );
+          segmentFile = synced.file;
+          lipsyncStats.synced += 1;
+          logger.info(`分镜 ${index + 1} 口型已同步（${synced.model}）`);
+        } catch (error) {
+          if (!config.lipsync.fallbackToUnsynced) throw error;
+          lipsyncStats.failed += 1;
+          warnings.push(
+            `分镜 ${index + 1} 口型同步失败，已保留未对口型的片段：${toErrorMessage(error)}`,
+          );
+          logger.warn(`分镜 ${index + 1} 口型同步失败，回退未对口型画面：${toErrorMessage(error)}`);
+        }
+      } else if (lipsyncProvider && plan.lines?.length) {
+        lipsyncStats.skipped += 1;
+      }
+      if (lipsyncProvider && plan.lines?.length) {
+        segmentLipsync.set(
+          plan.index,
+          segmentFile === result.file ? (syncable ? "unsynced" : "skipped") : "synced",
+        );
+      }
+      rendered.push(segmentFile);
     }
 
     throwIfAborted(signal);
@@ -488,6 +547,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         : null,
       voice: plan.tts.voice,
       ttsProvider: plan.tts.provider,
+      ...(segmentLipsync.has(plan.index) ? { lipsync: segmentLipsync.get(plan.index) } : {}),
       ...(plan.lines ? { lines: plan.lines } : {}),
       durationSec: plan.durationSec,
       startSec: plan.startSec,
