@@ -185,3 +185,66 @@ test(
   },
 );
 
+
+test(
+  "流水线：相邻分镜描述雷同时自动换机位，并校验所有分镜都拼进成片",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, {
+      script: { provider: "offline", targetDurationSec: 20, maxSegments: 4 },
+      videoGen: {
+        provider: "http",
+        baseUrl: "http://127.0.0.1:1",
+        model: "fake-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5000,
+        clipDurationSec: 2,
+        fallbackToMaterials: true,
+      },
+    });
+    const clips: string[] = [];
+    for (const [index, color] of ["red", "green", "blue", "orange"].entries()) {
+      const file = path.join(dir, `clip-${index}.mp4`);
+      await runFfmpeg(["-y", "-f", "lavfi", "-i", `color=c=${color}:s=160x160:d=1.5`, "-pix_fmt", "yuv420p", file]);
+      clips.push(file);
+    }
+    const requests: VideoGenRequest[] = [];
+    const provider: VideoGenProvider = {
+      name: "fake",
+      model: "fake-model",
+      generate: async (request) => {
+        const index = requests.length;
+        requests.push(request);
+        return { file: clips[index % clips.length]!, durationSec: 1.5, provider: "fake", model: "fake-model" };
+      },
+    };
+    const result = await runPipeline({
+      topic: "城市夜景",
+      config,
+      logger: silentLogger,
+      videoGenProvider: provider,
+    });
+
+    assert.ok(result.segments.length >= 4);
+    assert.equal(new Set(requests.map((request) => request.prompt)).size, requests.length);
+    assert.ok(
+      (result.warnings ?? []).some((warning) => warning.includes("已自动改用")),
+      `相邻雷同分镜没有换机位：${(result.warnings ?? []).join(" / ")}`,
+    );
+    assert.ok(result.assembly, "缺少拼接校验信息");
+    assert.equal(result.assembly!.included, true);
+    assert.equal(result.assembly!.renderedSegments, result.segments.length);
+    assert.ok(
+      Math.abs(result.assembly!.actualDurationSec - result.assembly!.expectedDurationSec) <=
+        Math.max(1, result.assembly!.expectedDurationSec * 0.05),
+      `成片时长与分镜合计差太多：${JSON.stringify(result.assembly)}`,
+    );
+    for (const segment of result.segments) {
+      assert.ok(segment.renderedFile, "每个分镜都应记录进入拼接的文件");
+      assert.ok(segment.renderedSha256);
+    }
+  },
+);

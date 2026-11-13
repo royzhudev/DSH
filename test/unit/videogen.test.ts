@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
+import { buildShotPrompt } from "../../src/cast/prompt.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../../src/videogen/http.js";
 import { createVideoGenProvider } from "../../src/videogen/index.js";
 import { AppError } from "../../src/errors.js";
@@ -1060,3 +1061,26 @@ test("HTTP 视频：没有参考图时万相 3.0 仍用首帧，且参考图最�
   }
 });
 
+
+test("分镜提示词：包含本镜内容，并可按机位变化避免相邻分镜重复", () => {
+  const segment = {
+    id: 1,
+    narration: "黄乐：这杯酒算我敬两位。",
+    lines: [{ speaker: "黄乐", text: "这杯酒算我敬两位。" }],
+    keywords: ["酒吧"],
+    scene: "酒吧，夜晚",
+    shot: "中景",
+  };
+  const base = buildShotPrompt({ topic: "酒吧误会", index: 2, total: 4, segment, cast: [] });
+  assert.ok(base.includes("这杯酒算我敬两位"), "提示词必须带上本镜台词");
+  const varied = buildShotPrompt({
+    topic: "酒吧误会",
+    index: 2,
+    total: 4,
+    segment,
+    cast: [],
+    variation: "近景，人物半身，背景虚化",
+  });
+  assert.notEqual(base, varied);
+  assert.ok(varied.includes("近景"));
+});

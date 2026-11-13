@@ -116,6 +116,9 @@ export interface SegmentPlan {
   cues: SubtitleCue[];
   /** 成片时间轴上的绝对开始时间，拼接后写入 SRT。 */
   startSec: number;
+  /** 实际进入拼接的渲染文件（相对任务目录）与内容哈希，用于拼接校验。 */
+  renderedFile?: string;
+  renderedSha256?: string;
 }
 
 export interface VideoInfo {
@@ -150,9 +153,21 @@ export interface SegmentResult {
     provider: string;
     model: string;
   };
+  /** 该分镜实际进入拼接的渲染文件（相对任务目录）。 */
+  renderedFile?: string;
+  /** 渲染文件内容哈希，用于核对是否把重复片段拼进了成片。 */
+  renderedSha256?: string;
 }
 
 export interface PipelineResult {
+  /** 拼接校验：分镜数、预计时长与实际成片时长。 */
+  assembly?: {
+    segmentCount: number;
+    renderedSegments: number;
+    expectedDurationSec: number;
+    actualDurationSec: number;
+    included: boolean;
+  };
   jobId: string;
   topic: string;
   /** 用户提供的剧本/大纲（如果有）。 */

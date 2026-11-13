@@ -39,6 +39,15 @@ import { createLipsyncProvider } from "./lipsync/dashscope.js";
 import { assignDialogueVoices, voicePitchFor, voiceRateFor, voiceVolumeFor } from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
+/** 相邻分镜描述雷同时轮流使用的机位，保证画面有变化。 */
+const SHOT_VARIATIONS = [
+  "近景，人物半身，背景虚化",
+  "全景，交代空间与人物位置",
+  "侧面跟拍，人物有走动",
+  "特写，表情或手部细节",
+  "俯拍，强化人物关系",
+] as const;
+
 export interface RunPipelineOptions {
   topic: string;
   config: AppConfig;
@@ -453,12 +462,27 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         // 角色参考图是“人设定妆照”，不是每个分镜的首帧。所有镜头都拿同一张图做首帧，
         // 生成结果会像同一个镜头重复播放。只让第 1 镜定调，其余镜头按剧本文字生成不同画面。
         const firstFrame = index === 0 ? primary : undefined;
+        const previous = plans[index - 1];
+        const sameScene = previous && previous.segment.scene === plan.segment.scene;
+        const sameShot = previous && previous.segment.shot === plan.segment.shot;
+        const variation =
+          previous && sameScene && sameShot
+            ? SHOT_VARIATIONS[index % SHOT_VARIATIONS.length]
+            : sameShot
+              ? SHOT_VARIATIONS[index % SHOT_VARIATIONS.length]
+              : undefined;
+        if (variation) {
+          warnings.push(
+            `分镜 ${index} 与 ${index + 1} 的场景/镜头描述相同，已自动改用「${variation}」构图，避免生成重复画面。`,
+          );
+        }
         const shotPrompt = buildShotPrompt({
           topic: normalizedTopic,
           index: index + 1,
           total: plans.length,
           segment: plan.segment,
           cast: plan.cast,
+          ...(variation ? { variation } : {}),
         });
         logger.info(
           `分镜 ${index + 1}/${plans.length} 画面提示词：${shotPrompt.split("\n")[1] ?? shotPrompt.slice(0, 40)}`,
@@ -540,6 +564,8 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       );
     }
     const rendered: string[] = [];
+    const renderedHashes = new Map<string, number>();
+    const duplicatedSegments: string[] = [];
     const lipsyncStats = { synced: 0, skipped: 0, failed: 0 };
     const segmentLipsync = new Map<number, "synced" | "unsynced" | "skipped">();
     const renderBase = videoGen ? 65 : 50;
@@ -623,6 +649,15 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           segmentFile === result.file ? (syncable ? "unsynced" : "skipped") : "synced",
         );
       }
+      const digest = sha256((await fs.readFile(segmentFile)).toString("base64"));
+      const previous = renderedHashes.get(digest);
+      if (previous !== undefined) {
+        duplicatedSegments.push(`分镜 ${previous} 与分镜 ${index + 1}`);
+      } else {
+        renderedHashes.set(digest, index + 1);
+      }
+      plan.renderedSha256 = digest;
+      plan.renderedFile = path.relative(jobDir, segmentFile).split(path.sep).join("/");
       rendered.push(segmentFile);
     }
 
@@ -658,6 +693,32 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     );
     await fs.writeFile(srtPath, renderSrt(srtCues), "utf8");
 
+    const videoProbe = await probeMedia(outputFile);
+    // 拼接校验：每个分镜的渲染文件都必须进入成片，且成片时长要与分镜合计一致。
+    const expectedDurationSec = round3(finalCursor);
+    const actualDurationSec = round3(videoProbe.durationSec ?? finalDuration);
+    const durationTolerance = Math.max(1, expectedDurationSec * 0.05);
+    const assemblyIncluded = rendered.length === plans.length;
+    if (!assemblyIncluded) {
+      warnings.push(
+        `拼接校验失败：共 ${plans.length} 个分镜，只有 ${rendered.length} 段进入成片，请查看任务详情。`,
+      );
+    }
+    if (Math.abs(actualDurationSec - expectedDurationSec) > durationTolerance) {
+      warnings.push(
+        `拼接校验：成片实际 ${actualDurationSec.toFixed(2)}s，分镜合计 ${expectedDurationSec.toFixed(2)}s，差异较大；可能有分镜未拼入或被重复拼接。`,
+      );
+    }
+    if (duplicatedSegments.length > 0) {
+      warnings.push(
+        `拼接前发现重复画面：${duplicatedSegments.join("、")} 的渲染结果完全相同，成片会重复播放；请检查脚本内容或画面模型是否返回了同一段视频。`,
+      );
+      logger.warn(`拼接前发现重复画面：${duplicatedSegments.join("、")}`);
+    }
+    logger.info(
+      `拼接校验：${plans.length} 个分镜 → ${rendered.length} 段进入成片，预计 ${expectedDurationSec.toFixed(2)}s，实际 ${actualDurationSec.toFixed(2)}s`,
+    );
+
     const finishedAt = new Date().toISOString();
     const segmentResults: SegmentResult[] = plans.map((plan) => ({
       index: plan.index + 1,
@@ -678,6 +739,8 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         : null,
       voice: plan.tts.voice,
       ttsProvider: plan.tts.provider,
+      ...(plan.renderedFile ? { renderedFile: plan.renderedFile } : {}),
+      ...(plan.renderedSha256 ? { renderedSha256: plan.renderedSha256 } : {}),
       ...(segmentLipsync.has(plan.index) ? { lipsync: segmentLipsync.get(plan.index) } : {}),
       ...(plan.lines ? { lines: plan.lines } : {}),
       durationSec: plan.durationSec,
@@ -690,7 +753,6 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         : undefined,
     }));
 
-    const videoProbe = await probeMedia(outputFile);
     const result: PipelineResult = {
       jobId,
       topic: normalizedTopic,
@@ -705,6 +767,13 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       resultPath,
       script,
       cast: castSummary(cast),
+      assembly: {
+        segmentCount: plans.length,
+        renderedSegments: rendered.length,
+        expectedDurationSec,
+        actualDurationSec,
+        included: assemblyIncluded,
+      },
       segments: segmentResults,
       ...(warnings.length > 0 ? { warnings } : {}),
       video: {
