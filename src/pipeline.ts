@@ -36,7 +36,7 @@ import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio } from "./media/ffmpeg.js";
 import { createLipsyncProvider } from "./lipsync/dashscope.js";
-import { assignDialogueVoices } from "./tts/voices.js";
+import { assignDialogueVoices, voiceRateFor } from "./tts/voices.js";
 import { ensureDir, sha256, shortId, writeJsonFile } from "./util/fs.js";
 
 export interface RunPipelineOptions {
@@ -117,8 +117,6 @@ interface DialogueSynthesisInput {
   jobDir: string;
   index: number;
   ttsProvider: TtsProvider;
-  /** 全片统一的说话人→音色表，避免同一角色在不同分镜换声音。 */
-  voices?: Map<string, string>;
   signal?: AbortSignal;
 }
 
@@ -136,8 +134,7 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   const { lines, cast, config, logger, jobDir, index, ttsProvider, signal } = input;
   const canSwitchVoice = config.tts.provider === "edge";
   const voices = canSwitchVoice
-    ? (input.voices ??
-      assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice))
+    ? assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice)
     : new Map<string, string>();
   const providers = new Map<string, TtsProvider>();
   const audioFiles: string[] = [];
@@ -149,17 +146,20 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   for (const line of lines) {
     if (signal?.aborted) throw new AppError("任务已取消", { code: "ABORTED", status: 499 });
     const voice = voices.get(line.speaker) ?? config.tts.voice;
+    // 语速跟着人物设定微调（年长慢一点、年轻快一点），比全片一个速度自然。
+    const rate = voiceRateFor(cast.find((asset) => asset.name === line.speaker)?.description ?? "", config.tts.rate);
     let provider = ttsProvider;
-    if (canSwitchVoice && voice !== ttsProvider.voice) {
-      provider = providers.get(voice) ?? createTtsProvider(
-        { ...config, tts: { ...config.tts, voice } },
+    const providerKey = `${voice}|${rate}`;
+    if (canSwitchVoice && (voice !== ttsProvider.voice || rate !== config.tts.rate)) {
+      provider = providers.get(providerKey) ?? createTtsProvider(
+        { ...config, tts: { ...config.tts, voice, rate } },
         config.cacheDir,
         logger,
       );
-      providers.set(voice, provider);
+      providers.set(providerKey, provider);
     }
     const cacheKey = sha256(
-      [config.tts.provider, config.tts.model, voice, String(config.tts.rate), line.text].join("|"),
+      [config.tts.provider, config.tts.model, voice, String(rate), line.text].join("|"),
     ).slice(0, 40);
     const result = await provider.synthesize({ text: line.text, cacheKey }, signal);
     audioFiles.push(result.audioPath);
@@ -183,6 +183,15 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   const audioPath = path.join(audioDir, `segment-${String(index + 1).padStart(2, "0")}.mp3`);
   await concatAudio(audioFiles, audioPath);
   const voicesUsed = [...new Set(synthesized.map((line) => line.voice))];
+  if (canSwitchVoice) {
+    const summary = [...voices.entries()]
+      .map(([speaker, voice]) => {
+        const description = cast.find((asset) => asset.name === speaker)?.description ?? "";
+        return `${speaker}=${voice}（语速 ${voiceRateFor(description, config.tts.rate)}）`;
+      })
+      .join("，");
+    logger.info(`分镜 ${index + 1} 角色音色：${summary || "沿用旁白音色"}`);
+  }
   return {
     tts: {
       provider: ttsProvider.name,
@@ -298,11 +307,6 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     });
 
     const ttsProvider = options.ttsProvider ?? createTtsProvider(config, config.cacheDir, logger);
-    // 先按整条脚本收集说话人，一次性分配音色：同一角色跨分镜也保持同一个声音。
-    const allSpeakers = [
-      ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
-    ];
-    const dialogueVoices = assignDialogueVoices(allSpeakers, cast, config.tts.voice);
     const plans: SegmentPlan[] = [];
     let cursor = 0;
     const totalSegments = script.segments.length;
@@ -324,7 +328,6 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           jobDir,
           index,
           ttsProvider,
-          voices: dialogueVoices,
           signal,
         });
         tts = synthesized.tts;
@@ -434,16 +437,8 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         try {
           const generated: GeneratedClip = await videoGen.generate(
             {
-              prompt: buildShotPrompt({
-                topic: normalizedTopic,
-                index: index + 1,
-                total: plans.length,
-                segment: plan.segment,
-                cast: plan.cast,
-              }),
-              // 生成片段要覆盖整个分镜：按分镜时长申请，最多 10 秒（平台单段上限），
-              // 不足时渲染阶段定格补帧，避免循环同一段画面。
-              durationSec: Math.min(10, Math.max(config.videoGen.clipDurationSec, Math.ceil(plan.durationSec))),
+              prompt: shotPrompt,
+              durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
               ...(firstFrame ? { image: firstFrame.file } : {}),
               ...(references.length > 0 ? { references } : {}),
             },

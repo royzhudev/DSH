@@ -205,39 +205,44 @@ export async function generateSilentAudio(
     file,
   ]);
 }
-/** 把多段配音按顺序拼成一条音轨（短剧多角色对话用）。 */
+/**
+ * 把多段配音按顺序拼成一条音轨（短剧多角色对话用）。
+ *
+ * 不同音色（男声/女声/年长/年轻）天生响度不一样，直接拼起来会有“一句大声一句小声”的
+ * 割裂感。这里先逐句做响度归一（EBU R128，-18 LUFS），再用 concat 滤镜拼成一条，
+ * 让每个角色的音量在同一水平上。
+ */
 export async function concatAudio(files: string[], outputFile: string): Promise<void> {
   if (files.length === 0) throw new Error("没有可拼接的音频片段");
   if (files.length === 1) {
     await fs.copyFile(files[0]!, outputFile);
     return;
   }
-  const listFile = `${outputFile}.list.txt`;
-  const lines = files.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join("\n");
-  await fs.writeFile(listFile, `${lines}\n`, "utf8");
-  try {
-    await runFfmpeg([
-      "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-f",
-      "concat",
-      "-safe",
-      "0",
-      "-i",
-      listFile,
-      "-ar",
-      "24000",
-      "-ac",
-      "1",
-      "-c:a",
-      "libmp3lame",
-      "-b:a",
-      "48k",
-      outputFile,
-    ]);
-  } finally {
-    await fs.rm(listFile, { force: true });
-  }
+  const inputs = files.flatMap((file) => ["-i", file]);
+  const normalized = files.map((_, index) => `[${index}:a]loudnorm=I=-18:TP=-2:LRA=7[a${index}]`);
+  const concatInputs = files.map((_, index) => `[a${index}]`).join("");
+  const filter = [
+    ...normalized,
+    `${concatInputs}concat=n=${files.length}:v=0:a=1[out]`,
+  ].join(";");
+  await runFfmpeg([
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    ...inputs,
+    "-filter_complex",
+    filter,
+    "-map",
+    "[out]",
+    "-ar",
+    "24000",
+    "-ac",
+    "1",
+    "-c:a",
+    "libmp3lame",
+    "-b:a",
+    "48k",
+    outputFile,
+  ]);
 }
