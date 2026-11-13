@@ -115,9 +115,15 @@ test(
     assert.equal(result.segments[0]!.imageToVideo, true);
     assert.ok(result.segments[0]!.cast?.some((item) => item.name === "林小满"));
     assert.ok(requests.length > 0);
-    assert.ok(requests[0]!.image, "首帧参考图没有传给图生视频");
+    assert.ok(requests[0]!.image, "第 1 镜应该用角色参考图定调");
     assert.ok(requests[0]!.references?.some((reference) => reference.name === "林小满"));
     assert.ok(requests[0]!.prompt.includes("林小满"));
+    // 同一张定妆照不能当成每个分镜的首帧，否则成片看起来像同一个镜头重复
+    assert.ok(
+      requests.slice(1).every((request) => !request.image),
+      "后续分镜不应复用同一张角色图做首帧",
+    );
+    assert.equal(new Set(requests.map((request) => request.prompt)).size, requests.length, "每个分镜的提示词应不同");
     assert.ok(result.warnings?.some((warning) => warning.includes("离线")), "缺少离线脚本提示");
     assert.equal(await fs.stat(result.videoPath).then((stat) => stat.size > 0), true);
   },

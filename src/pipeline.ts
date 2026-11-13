@@ -409,6 +409,9 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
             file: path.join(config.castDir, asset.imageFile!),
           }));
         const primary = references.find((reference) => reference.role === "character") ?? references[0];
+        // 角色参考图是“人设定妆照”，不是每个分镜的首帧。所有镜头都拿同一张图做首帧，
+        // 生成结果会像同一个镜头重复播放。只让第 1 镜定调，其余镜头按剧本文字生成不同画面。
+        const firstFrame = index === 0 ? primary : undefined;
         try {
           const generated: GeneratedClip = await videoGen.generate(
             {
@@ -420,14 +423,14 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
                 cast: plan.cast,
               }),
               durationSec: Math.min(config.videoGen.clipDurationSec, Math.max(2, plan.durationSec)),
-              ...(primary ? { image: primary.file } : {}),
+              ...(firstFrame ? { image: firstFrame.file } : {}),
               ...(references.length > 0 ? { references } : {}),
             },
             path.join(jobDir, "generated"),
             signal,
           );
           plan.generated = generated;
-          plan.imageToVideo = Boolean(primary);
+          plan.imageToVideo = Boolean(firstFrame);
         } catch (error) {
           if (signal?.aborted) throw error;
           if (!config.videoGen.fallbackToMaterials) throw error;
