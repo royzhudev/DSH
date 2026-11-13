@@ -198,7 +198,7 @@ GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
 → {"output": {"task_id": "...", "task_status": "SUCCEEDED", "video_url": "https://..."}}
 ```
 
-轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态；图生视频时首帧放在 `input.img_url`（DashScope 的参考图只取首帧，角色库里的多张参考图请改用通用 HTTP 网关）。
+轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态。百炼/万相 3.0 的分镜会带上角色库参考图：`media[type=reference_image]`（最多 10 张），没有参考图时才用 `media[type=first_frame]` 首帧——首帧和参考图在平台上互斥，同一请求不能混用；早期 Wan 模型仍走 `input.img_url`。
 
 > **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
 >
