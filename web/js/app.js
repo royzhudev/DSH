@@ -1568,7 +1568,7 @@ function castUploadCardHtml() {
         <datalist id="cast-voice-options">
           ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
         </datalist>
-        <span class="hint">开启「人物对话」时，这个角色用该音色；留空时按名字自动分配，不同角色尽量不同音色</span>
+        <span class="hint">开启「人物对话」时，这个角色用该音色；留空时按设定里的性别（如“25 岁女性”“中年男声”）自动挑男声/女声，同一角色全片用同一个声音</span>
       </div>
       <div class="dropzone" id="cast-dropzone">
         ${icon("upload", 26)}
