@@ -7,6 +7,8 @@ export interface ShotPromptInput {
   segment: ScriptSegment;
   /** 本分镜出场的角色/道具设定。 */
   cast: CastAsset[];
+  /** 与上一镜区分用的机位/构图提示；相邻分镜场景镜头相同时由流水线补上。 */
+  variation?: string;
 }
 
 const STYLE_SUFFIX = "竖屏 9:16，真实拍摄质感，电影感构图，光线自然，镜头稳定，无文字水印。";
@@ -27,13 +29,24 @@ function castLine(asset: CastAsset): string {
  * 配合参考图（图生视频）让后续镜头延续同一形象。
  */
 export function buildShotPrompt(input: ShotPromptInput): string {
-  const { topic, index, total, segment, cast } = input;
+  const { topic, index, total, segment, cast, variation } = input;
   const scene = segment.scene?.trim();
   const shot = segment.shot?.trim();
+  // 分镜内容一定要进提示词：相邻分镜的 scene/shot 写得很像时，
+  // 只有台词/旁白不同，画面模型才会给出不同的表演与构图。
+  const content = [
+    ...(segment.lines ?? []).map((line) => `${line.speaker}：${line.text}`),
+    ...(segment.lines?.length ? [] : [segment.narration]),
+  ]
+    .filter(Boolean)
+    .join(" ");
   const lines = [
     `短剧《${topic}》第 ${index}/${total} 镜。`,
     scene ? `场景：${scene}。` : "",
-    shot ? `镜头：${shot}。` : `画面：${segment.narration}。`,
+    shot ? `镜头：${shot}。` : "",
+    content ? `本镜内容：${content}。` : "",
+    variation ? `本镜构图：${variation}。` : "",
+    "不要重复上一镜的画面与机位；每个分镜必须呈现新的动作或信息。" ,
     ...cast.map(castLine),
     cast.length > 0
       ? "一致性要求：同一人物/道具在本片不同镜头中外观、服装、光线方向保持一致，延续同一部短剧的影像风格。"
