@@ -79,6 +79,7 @@ node dist/cli.js create --topic "城市夜景"
 - Edge 是免费基础音色；要更接近短剧演员的自然表演，可在设置里换成 OpenAI 兼容 TTS（如 `gpt-4o-mini-tts`），系统会为每个角色分配不同音色，并按角色设定传 `instructions` 表演提示（口语化、停顿起伏、不要朗读腔）。
 - 更自然的方案：配音供应商选 `ElevenLabs`（`eleven_multilingual_v2`），角色库的 voice 填 ElevenLabs `voice_id`，接口地址填 `https://api.elevenlabs.io`、密钥填 `TTS_API_KEY`；合成时按短剧对白给 `stability/style` 表演参数。
 - 对白之间会自动留停顿（首次开口 0.12s、同一人 0.18s、换人 0.32s），并按每句内容补情绪提示（争执/疑问/哭腔/耳语/笑意），避免一句顶一句的念稿感。
+- 单句内部也按标点朗读：`，、` 停 150ms、`；` 210ms、`。` 320ms、`！？` 360ms、`……` 420ms；感叹句与「滚、凭什么、竟然、不可能」等强情绪词会更快更高更响，疑问句略慢并抬高，`……` 与「对不起、算了、原来」等泄气句放慢压低，5 字以内短句轻微放慢。这样即使仍用免费的 Edge 音色，也不会把一整句话一口气念完（这是“播音腔”最主要的来源）。
 - 命令行为 `video-agent create --dialogue`；API 为 `dialogue: true`（创建任务与 `/api/scripts/generate` 预览都支持）。
 
 ## 口型同步（人物对白）

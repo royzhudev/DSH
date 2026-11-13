@@ -36,6 +36,8 @@ import { concatSegments } from "./render/concat.js";
 import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio, createSilence } from "./media/ffmpeg.js";
 import { createLipsyncProvider } from "./lipsync/dashscope.js";
+import { synthesizeNaturalSpeech, synthesizeSpeechPieces } from "./tts/speech.js";
+import { estimateSentences } from "./tts/estimate.js";
 import {
   assignDialogueVoices,
   voicePitchFor,
@@ -198,45 +200,37 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
       );
       providers.set(providerKey, provider);
     }
-    const cacheKey = sha256(
-      [
-        config.tts.provider,
-        config.tts.model,
-        voice,
-        String(rate),
-        pitch,
-        String(volume),
-        instructions ?? "",
-        line.text,
-      ].join("|"),
-    ).slice(0, 40);
-    const result = await provider.synthesize(
-      { text: line.text, cacheKey, rate, volume, pitch },
-      signal,
-    );
     // 对白之间留出自然停顿：换人说话停久一点，同一人连续说停短一点。
     // 没有停顿会让配音一句顶一句，听起来像念稿。
-    const pause =
-      lineIndex === 0 ? 0.12 : previousSpeaker === line.speaker ? 0.18 : 0.32;
+    const pause = lineIndex === 0 ? 0.12 : previousSpeaker === line.speaker ? 0.18 : 0.32;
     if (pause > 0) {
       audioFiles.push(await silenceFor(pause));
       offset += pause;
     }
     previousSpeaker = line.speaker;
-    audioFiles.push(result.audioPath);
-    allCached = allCached && result.cached;
+    // 一句话内部也按标点分句合成：整段一口气念完是“播音腔”的主要来源，
+    // 分句后句与句之间才有呼吸，也能按语气单独调快慢高低。
+    const planned = await synthesizeSpeechPieces({
+      provider,
+      text: line.text,
+      base: { rate, pitch, volume },
+      silenceFor,
+      signal,
+    });
+    audioFiles.push(...planned.pieces);
+    allCached = allCached && planned.cached;
     synthesized.push({
       speaker: line.speaker,
       text: line.text,
-      voice: result.voice,
-      durationSec: round3(result.durationSec),
+      voice: provider.voice,
+      durationSec: round3(planned.durationSec),
     });
     cues.push({
       startSec: round3(offset),
-      endSec: round3(offset + result.durationSec),
+      endSec: round3(offset + planned.durationSec),
       text: `${line.speaker}：${line.text}`,
     });
-    offset += result.durationSec;
+    offset += planned.durationSec;
   }
 
   const audioPath = path.join(audioDir, `segment-${String(index + 1).padStart(2, "0")}.mp3`);
@@ -437,7 +431,34 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
             segment.narration,
           ].join("|"),
         ).slice(0, 40);
-        tts = await ttsProvider.synthesize({ text: segment.narration, cacheKey }, signal);
+        // 旁白也按标点分句、句间停顿，避免整段一口气念到底。
+        const narrationDir = path.join(jobDir, "audio");
+        await ensureDir(narrationDir);
+        const narrationSilences = new Map<string, string>();
+        const natural = await synthesizeNaturalSpeech({
+          provider: ttsProvider,
+          text: segment.narration,
+          base: { rate: config.tts.rate, pitch: "0Hz", volume: 0 },
+          silenceFor: async (seconds) => {
+            const key = seconds.toFixed(2);
+            const existing = narrationSilences.get(key);
+            if (existing) return existing;
+            const file = path.join(narrationDir, `pause-${key.replace(".", "-")}.mp3`);
+            await createSilence(seconds, file);
+            narrationSilences.set(key, file);
+            return file;
+          },
+          outputFile: path.join(narrationDir, `narration-${String(index + 1).padStart(2, "0")}-${cacheKey}.mp3`),
+          signal,
+        });
+        tts = {
+          provider: ttsProvider.name,
+          voice: ttsProvider.voice,
+          audioPath: natural.audioPath,
+          durationSec: natural.durationSec,
+          sentences: estimateSentences(segment.narration, natural.durationSec),
+          cached: natural.cached,
+        };
         cues = buildSubtitleCues({
           narration: segment.narration,
           sentences: tts.sentences,
