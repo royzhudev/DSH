@@ -23,11 +23,20 @@ const EDGE_VOICES: VoiceOption[] = [
   { value: "zh-CN-XiaoyiNeural", label: "晓伊 · 活泼女声" },
   { value: "zh-CN-YunjianNeural", label: "云健 · 浑厚男声" },
   { value: "zh-CN-YunyangNeural", label: "云扬 · 新闻男声" },
+  { value: "zh-CN-YunxiaNeural", label: "云夏 · 少年男声" },
+  { value: "zh-CN-YunyeNeural", label: "云野 · 年长男声" },
   { value: "zh-CN-XiaochenNeural", label: "晓辰 · 知性女声" },
+  { value: "zh-CN-XiaomoNeural", label: "晓墨 · 成熟女声" },
+  { value: "zh-CN-XiaoruiNeural", label: "晓睿 · 年长女声" },
+  { value: "zh-CN-XiaoshuangNeural", label: "晓双 · 童声" },
   { value: "zh-CN-liaoning-XiaobeiNeural", label: "晓北 · 东北女声" },
   { value: "zh-CN-shaanxi-XiaoniNeural", label: "晓妮 · 陕西女声" },
   { value: "zh-HK-HiuMaanNeural", label: "曉曼 · 粤语女声" },
+  { value: "zh-HK-HiuGaaiNeural", label: "曉佳 · 粤语女声" },
+  { value: "zh-HK-WanLungNeural", label: "雲龍 · 粤语男声" },
   { value: "zh-TW-HsiaoChenNeural", label: "曉臻 · 台湾女声" },
+  { value: "zh-TW-HsiaoYuNeural", label: "曉雨 · 台湾女声" },
+  { value: "zh-TW-YunJheNeural", label: "雲哲 · 台湾男声" },
 ];
 
 const OPENAI_VOICES: VoiceOption[] = [
@@ -38,6 +47,9 @@ const OPENAI_VOICES: VoiceOption[] = [
   { value: "nova", label: "nova · 明亮女声" },
   { value: "shimmer", label: "shimmer · 柔和女声" },
   { value: "coral", label: "coral · 亲和女声" },
+  { value: "sage", label: "sage · 沉稳女声" },
+  { value: "ash", label: "ash · 清亮男声" },
+  { value: "ballad", label: "ballad · 叙事男声" },
   { value: "verse", label: "verse · 沉稳男声" },
 ];
 
@@ -72,6 +84,9 @@ const COSYVOICE_VOICES: VoiceOption[] = [
   { value: "longyuan", label: "龙媛 · 女声" },
   { value: "longfei", label: "龙飞 · 男声" },
   { value: "longtong", label: "龙彤 · 童声" },
+  { value: "longwan", label: "龙婉 · 女声" },
+  { value: "longcheng", label: "龙橙 · 男声" },
+  { value: "longhua", label: "龙华 · 男声" },
 ];
 
 const MINIMAX_VOICES: VoiceOption[] = [
@@ -176,6 +191,11 @@ async function elevenLabsVoices(
     logger.warn(`读取 ElevenLabs 音色失败，使用常用音色列表：${String(error)}`);
     return null;
   }
+}
+
+/** 同步取当前供应商/模型的内置音色列表（ElevenLabs 远程列表走 voiceCatalog）。 */
+export function catalogVoiceOptions(settings: TtsSettings): VoiceOption[] {
+  return catalogFor(settings.provider, settings.model).voices;
 }
 
 /** 是否是该供应商/模型之外、但属于我们内置音色库的旧音色（换供应商后残留）。 */

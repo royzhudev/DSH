@@ -4,6 +4,7 @@ import test from "node:test";
 import { mergeDialogueTurns } from "../../src/pipeline.js";
 import {
   assignDialogueVoices,
+  assignDialogueVoicesFromCatalog,
   OPENAI_VOICE_POOL,
   voiceStyleFor,
   inferVoiceAge,
@@ -159,4 +160,31 @@ test("对白轮次：同一角色连续台词合并为一次合成，换人才�
   assert.equal(turns[0]!.text, "合同里写着我陪，我认。");
   assert.equal(turns[0]!.items.length, 2);
   assert.equal(turns[1]!.text, "你走吧。");
+});
+
+test("百炼等供应商：按角色设定的音色分配，未指定时从当前模型音色目录里挑不同声音", () => {
+  const catalog = [
+    { value: "Cherry", label: "Cherry · 女声" },
+    { value: "Serena", label: "Serena · 女声" },
+    { value: "Ethan", label: "Ethan · 男声" },
+    { value: "Chelsie", label: "Chelsie · 女声" },
+  ];
+  const cast = [
+    { name: "林小满", description: "25 岁女性" },
+    { name: "黄乐", description: "45 岁男性" },
+    { name: "老周" },
+  ];
+  const voices = assignDialogueVoicesFromCatalog(["林小满", "黄乐", "老周"], cast, "Cherry", catalog);
+  assert.equal(voices.get("黄乐"), "Ethan", "男性角色应优先匹配男声");
+  assert.notEqual(voices.get("林小满"), voices.get("老周"), "不同角色不应分到同一个音色");
+  assert.ok(["Serena", "Chelsie"].includes(voices.get("林小满")!), "女性角色应分到女声");
+
+  const explicit = assignDialogueVoicesFromCatalog(
+    ["林小满", "黄乐"],
+    [{ name: "林小满", voice: "Serena" }, { name: "黄乐", description: "45 岁男性" }],
+    "Cherry",
+    catalog,
+  );
+  assert.equal(explicit.get("林小满"), "Serena", "角色自己设定的音色优先");
+  assert.notEqual(explicit.get("黄乐"), "Serena");
 });

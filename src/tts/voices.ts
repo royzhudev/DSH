@@ -160,6 +160,60 @@ export function resolveSpeakerVoice(
   return any;
 }
 
+/**
+ * 非 Edge/OpenAI 的供应商（百炼、ElevenLabs 等）没有按性别/年龄分好的本地音色池，
+ * 用供应商音色目录按标签里的“男声/女声/青年/年长”挑，保证每个角色仍有自己的声音。
+ */
+export function assignDialogueVoicesFromCatalog(
+  speakers: string[],
+  cast: SpeakerLike[],
+  fallbackVoice: string,
+  catalog: Array<{ value: string; label?: string }>,
+): Map<string, string> {
+  const voices = catalog.map((item) => item.value);
+  const used = new Set<string>();
+  const result = new Map<string, string>();
+  for (const speaker of speakers) {
+    const asset = cast.find((item) => item.name === speaker);
+    const explicit = asset?.voice?.trim();
+    if (explicit) {
+      used.add(explicit);
+      result.set(speaker, explicit);
+      continue;
+    }
+    if (voices.length === 0) {
+      result.set(speaker, fallbackVoice);
+      continue;
+    }
+    const description = asset?.description ?? "";
+    const gender = inferVoiceGender(description);
+    const age = inferVoiceAge(description);
+    const scored = catalog
+      .map((item, index) => {
+        const label = item.label ?? "";
+        let score = 0;
+        if (gender !== "unknown" && inferVoiceGender(label) === gender) score += 2;
+        if (age !== "unknown" && inferVoiceAge(label) === age) score += 1;
+        return { item, index, score };
+      })
+      .sort((a, b) => b.score - a.score || a.index - b.index);
+    const preferred = hashName(speaker) % scored.length;
+    let chosen: string | undefined;
+    for (let offset = 0; offset < scored.length; offset += 1) {
+      const candidate = scored[(preferred + offset) % scored.length]!.item.value;
+      if (candidate === fallbackVoice || used.has(candidate)) continue;
+      chosen = candidate;
+      break;
+    }
+    if (!chosen) {
+      chosen = scored.find((entry) => !used.has(entry.item.value))?.item.value ?? voices[0]!;
+    }
+    used.add(chosen);
+    result.set(speaker, chosen);
+  }
+  return result;
+}
+
 /** 给一个分镜里的说话人分配音色（按出现顺序，保证稳定）。 */
 export function assignDialogueVoices(
   speakers: string[],
