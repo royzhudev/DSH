@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import Busboy from "busboy";
+import { TTS_PROVIDER_NAMES } from "../types.js";
 import type {
   AppConfig,
   CastAsset,
@@ -67,8 +68,6 @@ import { PublishStore } from "../publish/store.js";
 const API_VERSION = "0.2.0";
 const JSON_BODY_LIMIT = 1024 * 1024;
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
-const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
-const ALL_TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "elevenlabs", "bailian", "silent"];
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -334,7 +333,7 @@ function parseJobOptions(body: Record<string, unknown>): JobOptions {
   const maxSegments = optionalNumber(body, "maxSegments", "分镜数量");
   if (maxSegments !== undefined) options.maxSegments = maxSegments;
   if (body.ttsProvider !== undefined && body.ttsProvider !== null) {
-    if (!TTS_PROVIDERS.includes(body.ttsProvider as TtsProviderName)) {
+    if (!TTS_PROVIDER_NAMES.includes(body.ttsProvider as TtsProviderName)) {
       throw new AppError(`不支持的配音供应商：${String(body.ttsProvider)}`, {
         code: "INVALID_OPTIONS",
         status: 400,
@@ -1352,7 +1351,7 @@ async function handleRequest(
     const config = structuredClone(ctx.config);
     const provider = url.searchParams.get("provider");
     const model = url.searchParams.get("model");
-    if (provider && ALL_TTS_PROVIDERS.includes(provider as TtsProviderName)) {
+    if (provider && TTS_PROVIDER_NAMES.includes(provider as TtsProviderName)) {
       config.tts.provider = provider as TtsProviderName;
     }
     if (model !== null) config.tts.model = model;

@@ -1,3 +1,4 @@
+import { TTS_PROVIDER_NAMES } from "../types.js";
 import type {
   AppConfig,
   CastAsset,
@@ -59,9 +60,8 @@ export interface SerializedJob {
   video?: VideoInfo;
 }
 
-const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
 
-function validateOptions(options: JobOptions, config: AppConfig): void {
+export function validateOptions(options: JobOptions, config: AppConfig): void {
   if (options.targetDurationSec !== undefined) {
     if (
       !Number.isFinite(options.targetDurationSec) ||
@@ -76,14 +76,14 @@ function validateOptions(options: JobOptions, config: AppConfig): void {
       throw new AppError("分镜数量必须在 2 到 20 之间", { code: "INVALID_OPTIONS", status: 400 });
     }
   }
-  if (options.ttsProvider !== undefined && !TTS_PROVIDERS.includes(options.ttsProvider)) {
+  if (options.ttsProvider !== undefined && !TTS_PROVIDER_NAMES.includes(options.ttsProvider)) {
     throw new AppError(`不支持的配音供应商：${options.ttsProvider}`, {
       code: "INVALID_OPTIONS",
       status: 400,
     });
   }
-  if (options.voice !== undefined && (!options.voice.trim() || options.voice.length > 100)) {
-    throw new AppError("音色名称不能为空且不能超过 100 个字符", {
+  if (options.voice !== undefined && (!options.voice.trim() || options.voice.length > 120)) {
+    throw new AppError("音色名称不能为空且不能超过 120 个字符", {
       code: "INVALID_OPTIONS",
       status: 400,
     });

@@ -1,5 +1,8 @@
 export type ScriptProviderName = "auto" | "openai" | "offline";
 export type TtsProviderName = "edge" | "openai" | "elevenlabs" | "bailian" | "silent";
+
+/** 所有可用的配音供应商；配置校验、任务选项校验、音色列表共用，避免漏加导致“不支持的配音供应商”。 */
+export const TTS_PROVIDER_NAMES: TtsProviderName[] = ["edge", "openai", "elevenlabs", "bailian", "silent"];
 /** 画面来源：none 只使用素材库；http 调用可配置的 AI 视频生成接口。 */
 export type VideoGenProviderName = "none" | "http";
 
