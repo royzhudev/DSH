@@ -116,12 +116,12 @@ function catalogFor(provider: TtsProviderName, model: string): VoiceCatalog {
         allowCustom: true,
       };
     case "bailian": {
-      if (/^qwen-tts/i.test(trimmed)) {
+      if (/^qwen[\w.-]*tts/i.test(trimmed)) {
         return {
           provider,
           model: trimmed || "qwen-tts",
           voices: QWEN_TTS_VOICES,
-          hint: "qwen-tts 官方音色；声音复刻得到的 voice id 也可直接填。",
+          hint: "Qwen TTS 系列（qwen-tts / qwen3-tts-flash）官方音色；声音复刻得到的 voice id 也可直接填。",
           allowCustom: true,
         };
       }
