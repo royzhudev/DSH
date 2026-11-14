@@ -35,6 +35,7 @@ import { STORY_MAX_LENGTH, preflightScript, preflightVideoJob } from "../preflig
 import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
+import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
 import { buildJobConfig, JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
@@ -489,6 +490,60 @@ async function handleUpload(
   }
 }
 
+/**
+ * 角色库试听：用指定音色与人物设定合成一句示例台词，直接返回音频。
+ * 不落任务、不改设置，试听失败也不影响角色保存。
+ */
+async function handleCastVoicePreview(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const config = structuredClone(ctx.config);
+  if (config.tts.provider === "silent") {
+    throw new AppError("当前配音是静音占位，无法试听；请先在设置里选择可发声的配音供应商", {
+      code: "TTS_PREVIEW_UNAVAILABLE",
+      status: 400,
+    });
+  }
+  const voice = typeof body.voice === "string" ? body.voice.trim().slice(0, 120) : "";
+  if (!voice) {
+    throw new AppError("请先选择或填写音色", { code: "TTS_PREVIEW_NO_VOICE", status: 400 });
+  }
+  config.tts.voice = voice;
+  const name = typeof body.name === "string" ? body.name.trim().slice(0, 40) : "";
+  const description = typeof body.description === "string" ? body.description.slice(0, 500) : "";
+  const text = name ? `你好，我是${name}，先听一下我的声音。` : "你好，这是一段角色配音试听。";
+  const rate = voiceRateFor(description, config.tts.rate);
+  const pitch = voicePitchFor(description);
+  const instructions =
+    config.tts.provider === "openai" || config.tts.provider === "elevenlabs"
+      ? voiceStyleFor(description, text)
+      : undefined;
+  const provider = createTtsProvider(config, config.cacheDir, ctx.logger);
+  const result = await provider.synthesize(
+    {
+      text,
+      cacheKey: sha256(
+        ["cast-preview", provider.name, voice, String(rate), pitch, instructions ?? "", text].join("|"),
+      ).slice(0, 40),
+      rate,
+      pitch,
+      ...(instructions ? { instructions } : {}),
+    },
+    AbortSignal.timeout(Math.min(config.tts.timeoutMs, 30_000)),
+  );
+  const buffer = await fsp.readFile(result.audioPath);
+  res.writeHead(200, {
+    ...securityHeaders(),
+    "content-type": "audio/mpeg",
+    "content-length": buffer.length,
+    "cache-control": "no-store",
+  });
+  res.end(buffer);
+}
+
 function castView(asset: CastAsset): Record<string, unknown> {
   return {
     ...asset,
@@ -577,6 +632,7 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       createCast: "POST /api/cast (multipart: kind, name, description?, file?)",
       updateCast: "PATCH /api/cast/:id {name?, description?, kind?}",
       castImage: "GET /api/cast/:id/image",
+      castVoicePreview: "POST /api/cast/voice-preview {voice, name?, description?}",
       replaceCastImage: "POST /api/cast/:id/image (multipart: file)",
       deleteCast: "DELETE /api/cast/:id",
       listMaterials: "GET /api/materials",
@@ -1271,6 +1327,11 @@ async function handleRequest(
 
   if (pathname === "/api/cast" && method === "POST") {
     await handleCastUpload(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/cast/voice-preview" && method === "POST") {
+    await handleCastVoicePreview(req, res, ctx);
     return;
   }
 

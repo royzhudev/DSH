@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../../src/server/server.js";
+import { generateSilentAudio } from "../../src/media/ffmpeg.js";
 import { silentLogger } from "../../src/logger.js";
 import {
   generateTestClip,
@@ -646,3 +647,67 @@ test(
   },
 );
 
+
+test(
+  "角色库：按角色音色试听，返回音频并带上角色设定",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const sample = path.join(dir, "sample.mp3");
+    await generateSilentAudio(sample, 0.8);
+    const audioBuffer = await fs.readFile(sample);
+    let received: Record<string, unknown> = {};
+    const mock = http.createServer();
+    mock.on("request", (req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", () => {
+        received = JSON.parse(raw || "{}") as Record<string, unknown>;
+        res.writeHead(200, { "content-type": "audio/mpeg" });
+        res.end(audioBuffer);
+      });
+    });
+    const port = await new Promise<number>((resolve) =>
+      mock.listen(0, "127.0.0.1", () => {
+        const address = mock.address();
+        resolve(typeof address === "object" && address ? address.port : 0);
+      }),
+    );
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      tts: {
+        provider: "openai",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        rate: 1,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      mock.closeAllConnections?.();
+      await new Promise<void>((resolve) => mock.close(() => resolve()));
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+    const response = await jsonRequest(request, `${app.url}/api/cast/voice-preview`, {
+      voice: "onyx",
+      name: "黄乐",
+      description: "45 岁男性，酒吧老板，说话沉稳",
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.match(String(response.headers.get("content-type")), /audio\/mpeg/);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.ok(bytes.length > 500, "试听应返回可播放的音频");
+    assert.equal(received.voice, "onyx");
+    assert.ok(String(received.input).includes("黄乐"));
+    assert.ok(String(received.instructions).includes("男声"));
+
+    // 没填音色时给出明确提示，而不是报 500。
+    const missing = await jsonRequest(request, `${app.url}/api/cast/voice-preview`, { name: "黄乐" });
+    assert.equal(missing.status, 400);
+  },
+);
