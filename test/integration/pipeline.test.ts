@@ -493,3 +493,37 @@ test(
     }
   },
 );
+
+test(
+  "口型同步总开关关闭：即使传了口型供应商也不调用",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "silent" }, lipsync: { enabled: false } });
+    const library = new CastLibrary(config.castDir, silentLogger);
+    await library.add({ kind: "character", name: "林小满", description: "25 岁女性，齐肩短发" });
+    let calls = 0;
+    const provider: LipsyncProvider = {
+      name: "fake",
+      async sync(request, outputDir) {
+        calls += 1;
+        const target = path.join(outputDir, `fake-lipsync-${calls}.mp4`);
+        await fs.copyFile(request.videoFile, target);
+        return { provider: "fake", model: "fake-lipsync", file: target, durationSec: 1 };
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "外卖员被冤枉",
+        config,
+        logger: silentLogger,
+        dialogue: true,
+        lipsyncProvider: provider,
+      });
+      assert.equal(calls, 0, "总开关关闭后不应调用口型同步");
+      assert.ok(result.segments.every((segment) => segment.lipsync === undefined));
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);

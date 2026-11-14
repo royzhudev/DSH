@@ -97,7 +97,7 @@ node dist/cli.js create --topic "城市夜景"
 - 失败默认回退为未对口型片段并写进 warnings；设置里可改为直接中断。
 - 计费：VideoRetalk 按生成时长 0.08 元/秒；视频/音频需 2–120 秒、视频边长 640–2048、人物正面近景。临时文件 48 小时有效。
 
-相关环境变量：`LIPSYNC_PROVIDER=dashscope`、`LIPSYNC_API_KEY`、`LIPSYNC_BASE_URL`、`LIPSYNC_MODEL`、`LIPSYNC_TIMEOUT_MS`、`LIPSYNC_POLL_INTERVAL_MS`。
+相关环境变量：`LIPSYNC_ENABLED`（总开关，`false` 时成片完全不调用口型校验）、`LIPSYNC_PROVIDER=dashscope`、`LIPSYNC_API_KEY`、`LIPSYNC_BASE_URL`、`LIPSYNC_MODEL`、`LIPSYNC_TIMEOUT_MS`、`LIPSYNC_POLL_INTERVAL_MS`。
 
 ## 创作页的短剧品控
 

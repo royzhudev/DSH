@@ -272,6 +272,8 @@ export interface MaterialSettings {
  */
 /** 口型同步（lip-sync）设置：默认接阿里云百炼 VideoRetalk。 */
 export interface LipsyncSettings {
+  /** 总开关：关闭后成片阶段完全不调用口型同步，即使供应商已配置。 */
+  enabled: boolean;
   provider: "none" | "dashscope";
   baseUrl: string;
   apiKey?: string;

@@ -726,8 +726,10 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     });
 
     throwIfAborted(signal);
-    const lipsyncProvider =
-      options.lipsyncProvider === undefined
+    // 设置里的总开关优先：关闭后即使供应商/Key 都配好，也完全不调用口型同步。
+    const lipsyncProvider = !config.lipsync.enabled
+      ? null
+      : options.lipsyncProvider === undefined
         ? createLipsyncProvider(config.lipsync, logger)
         : options.lipsyncProvider;
     if (config.lipsync.provider === "dashscope" && !config.lipsync.apiKey) {
