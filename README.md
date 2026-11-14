@@ -78,6 +78,7 @@ node dist/cli.js create --topic "城市夜景"
 - 每句配音的时间轴是真实时长，多句按顺序拼接成该分镜的音轨，再接画面。
 - 非 Edge 供应商不支持切换音色时，仍逐句合成，字幕保留说话人；静音占位仅用于演示/测试。
 - Edge 是免费基础音色；要更接近短剧演员的自然表演，可在设置里换成 OpenAI 兼容 TTS（如 `gpt-4o-mini-tts`），系统会为每个角色分配不同音色，并按角色设定传 `instructions` 表演提示（口语化、停顿起伏、不要朗读腔）。
+- 百炼 `MiniMax/speech-2.8-hd` 设置：供应商选「阿里百炼」，接口地址填 `https://dashscope.aliyuncs.com`（专属工作空间填自己的地址），模型填 `MiniMax/speech-2.8-hd`，API Key 填百炼密钥，音色填 MiniMax 音色 id（如 `male-qn-qingse`、`female-shaonv`）。服务端会向 `/api/v1/services/aigc/multimodal-generation/generation` 发送 `model + input.text + input.voice_setting.voice_id`，并解析 `output.data.audio` 返回的十六进制音频。
 - 百炼原生方案：配音供应商选「阿里百炼」，模型填 `qwen-tts` 或 `qwen3-tts-flash`（多模态 HTTP）、`cosyvoice-v3`（WebSocket 流式）或百炼上的第三方模型如 `MiniMax/speech-2.8-hd`（原生 multimodal-generation 接口，入参为 `input.text` + `input.voice_setting.voice_id`，返回 `output.data.audio` 十六进制音频，也兼容 `output.audio` / `output.audio_url` 与 SSE 分段音频）；接口地址填 `https://dashscope.aliyuncs.com`、专属工作空间地址或完整接口地址均可。音色填百炼/模型对应的音色 id。声音复刻得到的 voice id 可直接填到角色库的音色里（复刻本身在百炼控制台完成）。
 - 更自然的方案：配音供应商选 `ElevenLabs`（`eleven_multilingual_v2`），角色库的 voice 填 ElevenLabs `voice_id`，接口地址填 `https://api.elevenlabs.io`、密钥填 `TTS_API_KEY`；合成时按短剧对白给 `stability/style` 表演参数。
 - 对白之间会自动留停顿（首次开口 0.12s、同一人 0.18s、换人 0.32s），并按每句内容补情绪提示（争执/疑问/哭腔/耳语/笑意），避免一句顶一句的念稿感。
