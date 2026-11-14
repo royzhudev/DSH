@@ -53,7 +53,7 @@ TTS 拿到完整上下文；轮次内部再按标点分句（`synthesizeSpeechPi
 | OpenAI 兼容 `gpt-4o-mini-tts` | 支持 instructions，可按角色/台词语气表演 | 按量计费 |
 | ElevenLabs `eleven_multilingual_v2` | 最接近真人演员，支持 style 起伏 | 按量计费 |
 | 阿里百炼 `qwen-tts` / `cosyvoice-v3` | 国内直连、延迟低；音色复刻后的 voice id 直接可用 | 按量计费 |
-| 百炼第三方模型（如 `MiniMax/speech-2.8-turbo`） | 走兼容 OpenAI 的 `/audio/speech`，用百炼 Key 即可 | 按量计费 |
+| 百炼第三方模型（如 `MiniMax/speech-2.8-turbo`） | 走百炼原生 multimodal-generation 接口（`input.audio` + `parameters.voice`），用百炼 Key 即可 | 按量计费 |
 
 要接近其他 AI 短剧的效果，建议 ElevenLabs 或支持 instructions 的模型；Edge 只能作为免费兜底。
 

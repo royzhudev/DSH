@@ -76,8 +76,9 @@ export class BailianTtsProvider implements TtsProvider {
     } else if (/^qwen-tts/i.test(model)) {
       await this.synthesizeViaHttp(request, model, audioFile, signal);
     } else {
-      // 百炼上的第三方语音模型（如 MiniMax/speech-2.8-turbo）走兼容 OpenAI 的 /audio/speech。
-      await this.synthesizeViaCompatibleSpeech(request, model, audioFile, signal);
+      // 百炼上的第三方语音模型（如 MiniMax/speech-2.8-turbo）走百炼原生多模态接口，
+      // 请求体不是 OpenAI TTS 的 {model,input,voice}，而是 input.audio + parameters.voice。
+      await this.synthesizeViaNative(request, model, audioFile, signal);
     }
     const probe = await probeMedia(audioFile);
     const durationSec = probe.durationSec ?? 0;
@@ -94,51 +95,91 @@ export class BailianTtsProvider implements TtsProvider {
     };
   }
 
+  /** 百炼原生多模态接口；baseUrl 允许填域名、兼容模式地址或完整接口地址。 */
+  private get nativeEndpoint(): string {
+    const base = this.baseUrl;
+    if (/\/generation$/.test(base)) return base;
+    if (/\/compatible-mode\/v1$/.test(base)) {
+      return `${base.replace(/\/compatible-mode\/v1$/, "")}/api/v1/services/aigc/multimodal-generation/generation`;
+    }
+    if (/\/api\/v1$/.test(base)) {
+      return `${base}/services/aigc/multimodal-generation/generation`;
+    }
+    return `${base}/api/v1/services/aigc/multimodal-generation/generation`;
+  }
+
   /**
-   * 百炼第三方语音模型（MiniMax/speech-2.8-turbo 等）：兼容 OpenAI 的 /audio/speech。
-   * baseUrl 既可以填 https://dashscope.aliyuncs.com，也可以直接填 .../compatible-mode/v1。
+   * 百炼第三方语音模型（MiniMax/speech-2.8-turbo 等）：原生 multimodal-generation 接口。
+   * 官方示例把台词放在 input.audio、音色放在 parameters.voice；不同模型字段略有差异，
+   * 这里按「input.audio + parameters.voice」优先，兼容旧写法依次重试，避免一次参数不符就整体失败。
    */
-  private async synthesizeViaCompatibleSpeech(
+  private async synthesizeViaNative(
     request: TtsRequest,
     model: string,
     audioFile: string,
     signal?: AbortSignal,
   ): Promise<void> {
-    const endpoint = /\/compatible-mode\/v1$/.test(this.baseUrl)
-      ? `${this.baseUrl}/audio/speech`
-      : `${this.baseUrl}/compatible-mode/v1/audio/speech`;
-    const rate = Math.max(0.25, Math.min(4, request.rate ?? this.settings.rate));
-    const response = await this.fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.settings.apiKey}`,
-      },
-      body: JSON.stringify({
+    const rate = Math.max(0.5, Math.min(2, request.rate ?? this.settings.rate));
+    const candidates: Array<Record<string, unknown>> = [
+      {
         model,
-        input: request.text,
-        voice: this.voice,
-        response_format: "mp3",
-        speed: rate,
-      }),
-      signal: signal ?? AbortSignal.timeout(this.settings.timeoutMs),
+        input: { audio: { text: request.text, voice: this.voice } },
+        parameters: { voice: this.voice, format: "mp3", sample_rate: 24000, rate },
+      },
+      {
+        model,
+        input: { audio: { text: request.text } },
+        parameters: { voice: this.voice, format: "mp3", sample_rate: 24000, rate },
+      },
+      {
+        model,
+        input: { text: request.text, voice: this.voice },
+        parameters: { voice: this.voice, format: "mp3" },
+      },
+    ];
+    const failures: string[] = [];
+    for (const body of candidates) {
+      const response = await this.fetchImpl(this.nativeEndpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.settings.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: signal ?? AbortSignal.timeout(this.settings.timeoutMs),
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        failures.push(`${response.status}：${truncate(text, 120)}`);
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        failures.push("返回的不是 JSON");
+        continue;
+      }
+      const audio = (parsed as { output?: { audio?: { url?: string; data?: string } } })?.output?.audio;
+      if (audio?.data) {
+        await fs.writeFile(audioFile, Buffer.from(audio.data, "base64"));
+        return;
+      }
+      if (audio?.url) {
+        const download = await this.fetchImpl(audio.url);
+        if (!download.ok) {
+          failures.push(`下载音频失败：${download.status}`);
+          continue;
+        }
+        await fs.writeFile(audioFile, Buffer.from(await download.arrayBuffer()));
+        return;
+      }
+      failures.push("响应里没有 output.audio");
+    }
+    throw new AppError(`百炼语音合成（${model}）失败：${failures.join("；")}`, {
+      code: "TTS_API_FAILED",
+      status: 502,
     });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new AppError(`百炼语音合成（${model}）返回 ${response.status}：${truncate(text, 300)}`, {
-        code: "TTS_API_FAILED",
-        status: 502,
-      });
-    }
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const text = await response.text();
-      throw new AppError(`百炼语音合成（${model}）没有返回音频：${truncate(text, 300)}`, {
-        code: "TTS_API_FAILED",
-        status: 502,
-      });
-    }
-    await fs.writeFile(audioFile, Buffer.from(await response.arrayBuffer()));
   }
 
   /** qwen-tts：DashScope 多模态 HTTP，返回音频 URL 或 base64。 */
@@ -156,7 +197,7 @@ export class BailianTtsProvider implements TtsProvider {
         language_type: "Chinese",
       },
     };
-    const response = await this.fetchImpl(`${this.baseUrl}/api/v1/services/aigc/multimodal-generation/generation`, {
+    const response = await this.fetchImpl(this.nativeEndpoint, {
       method: "POST",
       headers: {
         "content-type": "application/json",

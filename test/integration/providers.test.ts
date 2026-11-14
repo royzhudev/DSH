@@ -328,21 +328,27 @@ test("阿里百炼 cosyvoice-v3：WebSocket 流式合成并校验任务参数", 
   }
 });
 
-test("阿里百炼第三方模型：MiniMax/speech-2.8-turbo 走兼容 /audio/speech", async () => {
+test("阿里百炼第三方模型：MiniMax/speech-2.8-turbo 走原生多模态接口", async () => {
   const dir = await makeTempDir();
   const audio = path.join(dir, "sample.mp3");
   await generateSilentAudio(audio, 0.6);
   const audioBuffer = await fs.readFile(audio);
   let received: Record<string, unknown> = {};
   let requestPath = "";
+  let base = "";
   const server = http.createServer((req, res) => {
+    if (req.url === "/audio/sample.mp3") {
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+      return;
+    }
     requestPath = req.url ?? "";
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
       received = JSON.parse(raw || "{}") as Record<string, unknown>;
-      res.writeHead(200, { "content-type": "audio/mpeg" });
-      res.end(audioBuffer);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { audio: { url: `${base}/audio/sample.mp3` } } }));
     });
   });
   const port = await new Promise<number>((resolve) =>
@@ -351,12 +357,13 @@ test("阿里百炼第三方模型：MiniMax/speech-2.8-turbo 走兼容 /audio/sp
       resolve(typeof address === "object" && address ? address.port : 0);
     }),
   );
+  base = `http://127.0.0.1:${port}`;
   try {
     const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
     const config = makeTestConfig(dir, {
       tts: {
         provider: "bailian",
-        baseUrl: `http://127.0.0.1:${port}`,
+        baseUrl: base,
         apiKey: "bailian-key",
         model: "MiniMax/speech-2.8-turbo",
         voice: "male-qn-qingse",
@@ -367,11 +374,63 @@ test("阿里百炼第三方模型：MiniMax/speech-2.8-turbo 走兼容 /audio/sp
     const result = await provider.synthesize({ text: "你站住！", cacheKey: "bailian-minimax-test" });
     assert.equal(result.provider, "bailian");
     assert.ok(result.durationSec > 0.2);
-    assert.equal(requestPath, "/compatible-mode/v1/audio/speech");
+    // 必须走百炼原生多模态接口，不能再拼 compatible-mode/v1/audio/speech。
+    assert.equal(requestPath, "/api/v1/services/aigc/multimodal-generation/generation");
     assert.equal(received.model, "MiniMax/speech-2.8-turbo");
-    assert.equal(received.voice, "male-qn-qingse");
-    assert.equal(received.input, "你站住！");
-    assert.equal(received.response_format, "mp3");
+    const input = received.input as { audio?: { text?: string; voice?: string } };
+    assert.equal(input.audio?.text, "你站住！");
+    const parameters = received.parameters as { voice?: string };
+    assert.equal(parameters.voice, "male-qn-qingse");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼：接口地址填完整 multimodal 地址时不再重复拼接", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let requestPath = "";
+  let base = "";
+  const server = http.createServer(async (req, res) => {
+    if (req.url === "/audio/sample.mp3") {
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+      return;
+    }
+    requestPath = req.url ?? "";
+    for await (const _chunk of req) {
+      // 读完请求体
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ output: { audio: { url: `${base}/audio/sample.mp3` } } }));
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  base = `http://127.0.0.1:${port}`;
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `${base}/api/v1/services/aigc/multimodal-generation/generation`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-turbo",
+        voice: "male-qn-qingse",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "完整地址", cacheKey: "bailian-full-url-test" });
+    assert.ok(result.durationSec > 0.2);
+    assert.equal(requestPath, "/api/v1/services/aigc/multimodal-generation/generation");
   } finally {
     server.closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));
