@@ -435,10 +435,196 @@ test("阿里百炼第三方模型：MiniMax/speech-2.8-turbo 走原生多模态�
     // 必须走百炼原生多模态接口，不能再拼 compatible-mode/v1/audio/speech。
     assert.equal(requestPath, "/api/v1/services/aigc/multimodal-generation/generation");
     assert.equal(received.model, "MiniMax/speech-2.8-turbo");
-    const input = received.input as { audio?: { text?: string; voice?: string } };
-    assert.equal(input.audio?.text, "你站住！");
-    const parameters = received.parameters as { voice?: string };
-    assert.equal(parameters.voice, "male-qn-qingse");
+    // MiniMax 官方入参是 text + voice_setting.voice_id（不再套 input.audio）。
+    const input = received.input as { text?: string; voice_setting?: { voice_id?: string } };
+    assert.equal(input.text, "你站住！");
+    assert.equal(input.voice_setting?.voice_id, "male-qn-qingse");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼 MiniMax/speech-2.8-hd：兼容 output.audio 为 base64 字符串的返回", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let received: Record<string, unknown> = {};
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      received = JSON.parse(raw || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { audio: audioBuffer.toString("base64") } }));
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-hd",
+        voice: "male-qn-qingse",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "这是 HD 语音", cacheKey: "bailian-minimax-hd-b64" });
+    assert.ok(result.durationSec > 0.2);
+    const input = received.input as { text?: string; voice_setting?: { voice_id?: string } };
+    assert.equal(input.text, "这是 HD 语音");
+    assert.equal(input.voice_setting?.voice_id, "male-qn-qingse");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼 MiniMax/speech-2.8-hd：兼容 data.audio 十六进制音频与 base_resp", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  const server = http.createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      // 读完请求体
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        output: {
+          data: { audio: audioBuffer.toString("hex"), status: 2 },
+          extra_info: { audio_format: "mp3", audio_sample_rate: 24000 },
+          base_resp: { status_code: 0, status_msg: "success" },
+        },
+        usage: { characters: 6 },
+      }),
+    );
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-hd",
+        voice: "female-shaonv",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "十六进制音频", cacheKey: "bailian-minimax-hd-hex" });
+    assert.ok(result.durationSec > 0.2);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼 MiniMax/speech-2.8-hd：SSE 分段音频拼接", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.8);
+  const audioBuffer = await fs.readFile(audio);
+  const middle = Math.floor(audioBuffer.length / 2);
+  const first = audioBuffer.subarray(0, middle).toString("base64");
+  const second = audioBuffer.subarray(middle).toString("base64");
+  const server = http.createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      // 读完请求体
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      `data: ${JSON.stringify({ output: { audio: { data: first } } })}\n\n` +
+        `data: ${JSON.stringify({ output: { audio: { data: second } } })}\n\n` +
+        "data: [DONE]\n\n",
+    );
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-hd",
+        voice: "male-qn-qingse",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "流式音频", cacheKey: "bailian-minimax-hd-sse" });
+    assert.ok(result.durationSec > 0.2);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼 MiniMax/speech-2.8-hd：200 但没有音频时带出模型错误信息", async () => {
+  const dir = await makeTempDir();
+  const server = http.createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      // 读完请求体
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        output: { base_resp: { status_code: 2013, status_msg: "invalid params, empty field" } },
+        request_id: "test-request",
+      }),
+    );
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-hd",
+        voice: "male-qn-qingse",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    await assert.rejects(
+      () => provider.synthesize({ text: "空音频", cacheKey: "bailian-minimax-hd-empty" }),
+      /invalid params, empty field/,
+    );
   } finally {
     server.closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));

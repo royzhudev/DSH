@@ -18,6 +18,159 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+interface AudioPayload {
+  url?: string;
+  buffer?: Buffer;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 兼容 base64、data URI 和 MiniMax 原生返回的十六进制音频。 */
+function decodeAudioData(value: string): Buffer | undefined {
+  const text = value.trim();
+  if (!text || /^https?:\/\//i.test(text)) return undefined;
+  const comma = text.indexOf(",");
+  const raw = text.startsWith("data:") && comma >= 0 ? text.slice(comma + 1) : text;
+  const compact = raw.replace(/\s+/g, "");
+  if (!compact) return undefined;
+  if (/^[0-9a-fA-F]+$/.test(compact) && compact.length % 2 === 0 && compact.length >= 32) {
+    return Buffer.from(compact, "hex");
+  }
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(compact)) return undefined;
+  const normalized = compact.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64");
+}
+
+function audioPayloadFrom(value: unknown): AudioPayload | undefined {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return undefined;
+    if (/^https?:\/\//i.test(text)) return { url: text };
+    const buffer = decodeAudioData(text);
+    return buffer && buffer.length >= 64 ? { buffer } : undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  for (const key of ["url", "audio_url", "audioUrl", "download_url"]) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && /^https?:\/\//i.test(candidate.trim())) {
+      return { url: candidate.trim() };
+    }
+  }
+  for (const key of ["data", "audio", "content", "base64"]) {
+    const payload = audioPayloadFrom(value[key]);
+    if (payload) return payload;
+  }
+  return undefined;
+}
+
+/** 从模型返回里找音频：兼容 output.audio{url,data}、output.audio 字符串、output.audio_url、data.audio。 */
+function audioPayloadFromResponse(parsed: unknown): AudioPayload | undefined {
+  if (!isRecord(parsed)) return undefined;
+  const roots = [parsed];
+  if (isRecord(parsed.output)) {
+    roots.push(parsed.output);
+    // MiniMax/speech-2.8-hd 的真实返回是 output.data.audio（十六进制），不是 output.audio。
+    if (isRecord(parsed.output.data)) roots.push(parsed.output.data);
+  }
+  if (isRecord(parsed.data)) {
+    roots.push(parsed.data);
+    if (isRecord(parsed.data.data)) roots.push(parsed.data.data);
+  }
+  for (const root of roots) {
+    if (!isRecord(root)) continue;
+    for (const key of ["audio", "audio_url", "audioUrl", "audioData", "url"]) {
+      const payload = audioPayloadFrom(root[key]);
+      if (payload) return payload;
+    }
+  }
+  return undefined;
+}
+
+function parseSseEvents(text: string): unknown[] {
+  const events: unknown[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      events.push(JSON.parse(data) as unknown);
+    } catch {
+      // 忽略非 JSON 事件
+    }
+  }
+  return events;
+}
+
+/** 同时兼容 JSON 与 SSE：流式时把每段 base64 解码后拼接，URL 则返回最后一个。 */
+function extractAudioPayload(text: string, contentType: string): AudioPayload | undefined {
+  const isSse = /text\/event-stream/i.test(contentType) || /^\s*data:/m.test(text);
+  if (isSse) {
+    const chunks: Buffer[] = [];
+    let url: string | undefined;
+    for (const event of parseSseEvents(text)) {
+      const payload = audioPayloadFromResponse(event);
+      if (payload?.buffer) chunks.push(payload.buffer);
+      if (payload?.url) url = payload.url;
+    }
+    if (chunks.length > 0) return { buffer: Buffer.concat(chunks) };
+    if (url) return { url };
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+  return audioPayloadFromResponse(parsed);
+}
+
+/** 200 但没有音频时，把模型自己的错误信息带出来，避免只报“没有 output.audio”。 */
+function describeEmptyAudio(text: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return truncate(text, 160);
+  }
+  if (!isRecord(parsed)) return undefined;
+  const pieces: string[] = [];
+  const baseResps = [parsed.base_resp];
+  if (isRecord(parsed.output)) baseResps.push(parsed.output.base_resp);
+  for (const baseResp of baseResps) {
+    if (!isRecord(baseResp)) continue;
+    const code = baseResp.status_code;
+    const message = baseResp.status_msg;
+    if (code !== undefined && code !== 0) pieces.push(`status_code=${String(code)}`);
+    if (typeof message === "string" && message && message !== "success") pieces.push(message);
+  }
+  for (const key of ["message", "msg", "code"]) {
+    if (typeof parsed[key] === "string" && parsed[key]) pieces.push(parsed[key] as string);
+  }
+  if (isRecord(parsed.output)) {
+    for (const key of ["message", "code", "finish_reason", "task_status"]) {
+      const value = parsed.output[key];
+      if ((typeof value === "string" || typeof value === "number") && value !== "") {
+        pieces.push(`${key}=${String(value)}`);
+      }
+    }
+  }
+  const unique = [...new Set(pieces)];
+  return unique.length > 0 ? truncate(unique.join("，"), 200) : undefined;
+}
+
+async function hasAudioDuration(file: string): Promise<boolean> {
+  try {
+    const probe = await probeMedia(file);
+    return Boolean(probe.durationSec && probe.durationSec > 0);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 阿里百炼原生语音合成。
  *
@@ -109,9 +262,9 @@ export class BailianTtsProvider implements TtsProvider {
   }
 
   /**
-   * 百炼第三方语音模型（MiniMax/speech-2.8-turbo 等）：原生 multimodal-generation 接口。
-   * 官方示例把台词放在 input.audio、音色放在 parameters.voice；不同模型字段略有差异，
-   * 这里按「input.audio + parameters.voice」优先，兼容旧写法依次重试，避免一次参数不符就整体失败。
+   * 百炼第三方语音模型（MiniMax/speech-2.8-hd、speech-2.8-turbo 等）：原生 multimodal-generation 接口。
+   * MiniMax 系列的官方入参是 text + voice_setting.voice_id；百炼不同模型/版本对 input 的包装略有差异，
+   * 这里按文档顺序逐个尝试，并对返回结构做兼容解析（output.audio 对象/字符串、audio_url、data.audio）。
    */
   private async synthesizeViaNative(
     request: TtsRequest,
@@ -120,21 +273,37 @@ export class BailianTtsProvider implements TtsProvider {
     signal?: AbortSignal,
   ): Promise<void> {
     const rate = Math.max(0.5, Math.min(2, request.rate ?? this.settings.rate));
+    const voiceSetting = { voice_id: this.voice, speed: rate, vol: 1, pitch: 0 };
+    const audioSetting = { sample_rate: 24000, bitrate: 128000, format: "mp3", channel: 1 };
     const candidates: Array<Record<string, unknown>> = [
+      {
+        model,
+        input: { text: request.text, voice_setting: voiceSetting, audio_setting: audioSetting },
+      },
+      {
+        model,
+        input: { text: request.text, voice_setting: { voice_id: this.voice, speed: rate } },
+      },
+      {
+        model,
+        text: request.text,
+        voice_setting: voiceSetting,
+        audio_setting: audioSetting,
+      },
+      {
+        model,
+        input: { text: request.text },
+        parameters: { voice: this.voice, format: "mp3", sample_rate: 24000, rate },
+      },
+      {
+        model,
+        input: { text: request.text },
+        parameters: { voice_setting: voiceSetting, audio_setting: audioSetting },
+      },
       {
         model,
         input: { audio: { text: request.text, voice: this.voice } },
         parameters: { voice: this.voice, format: "mp3", sample_rate: 24000, rate },
-      },
-      {
-        model,
-        input: { audio: { text: request.text } },
-        parameters: { voice: this.voice, format: "mp3", sample_rate: 24000, rate },
-      },
-      {
-        model,
-        input: { text: request.text, voice: this.voice },
-        parameters: { voice: this.voice, format: "mp3" },
       },
     ];
     const failures: string[] = [];
@@ -143,6 +312,7 @@ export class BailianTtsProvider implements TtsProvider {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          accept: "application/json, text/event-stream",
           authorization: `Bearer ${this.settings.apiKey}`,
         },
         body: JSON.stringify(body),
@@ -150,31 +320,29 @@ export class BailianTtsProvider implements TtsProvider {
       });
       const text = await response.text();
       if (!response.ok) {
-        failures.push(`${response.status}：${truncate(text, 120)}`);
+        failures.push(`${response.status}：${truncate(text, 160)}`);
         continue;
       }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        failures.push("返回的不是 JSON");
+      const contentType = response.headers.get("content-type") ?? "";
+      const payload = extractAudioPayload(text, contentType);
+      if (payload?.buffer) {
+        await fs.writeFile(audioFile, payload.buffer);
+        if (await hasAudioDuration(audioFile)) return;
+        failures.push("返回的音频无法读取时长");
         continue;
       }
-      const audio = (parsed as { output?: { audio?: { url?: string; data?: string } } })?.output?.audio;
-      if (audio?.data) {
-        await fs.writeFile(audioFile, Buffer.from(audio.data, "base64"));
-        return;
-      }
-      if (audio?.url) {
-        const download = await this.fetchImpl(audio.url);
+      if (payload?.url) {
+        const download = await this.fetchImpl(payload.url, { signal });
         if (!download.ok) {
           failures.push(`下载音频失败：${download.status}`);
           continue;
         }
         await fs.writeFile(audioFile, Buffer.from(await download.arrayBuffer()));
-        return;
+        if (await hasAudioDuration(audioFile)) return;
+        failures.push("下载到的音频无法读取时长");
+        continue;
       }
-      failures.push("响应里没有 output.audio");
+      failures.push(describeEmptyAudio(text) || "响应里没有 output.audio");
     }
     throw new AppError(`百炼语音合成（${model}）失败：${failures.join("；")}`, {
       code: "TTS_API_FAILED",
