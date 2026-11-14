@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mergeDialogueTurns } from "../../src/pipeline.js";
 import {
   assignDialogueVoices,
   OPENAI_VOICE_POOL,
@@ -146,4 +147,16 @@ test("对话音色：OpenAI 兼容 TTS 用同一套男女声池，并按角色�
   assert.ok(style.includes("男声"), style);
   assert.ok(voiceStyleFor("", "你站住！").includes("争执"));
   assert.ok(voiceStyleFor("", "你是谁？").includes("疑问"));
+});
+
+test("对白轮次：同一角色连续台词合并为一次合成，换人才断开", () => {
+  const turns = mergeDialogueTurns([
+    { speaker: "黄乐", text: "合同里写着我陪。" },
+    { speaker: "黄乐", text: "我认。" },
+    { speaker: "林小满", text: "你走吧。" },
+  ]);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]!.text, "合同里写着我陪，我认。");
+  assert.equal(turns[0]!.items.length, 2);
+  assert.equal(turns[1]!.text, "你走吧。");
 });
