@@ -846,6 +846,22 @@ svg {
   margin-top: 10px;
 }
 
+.preview-edit-hint {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--brand, #4f6ef7);
+  border-radius: 8px;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--brand, #4f6ef7) 6%, transparent);
+}
+
+.preview-stale {
+  margin: 0 16px 12px;
+  color: #b45309;
+}
+
 .script-edit-input {
   font-size: 17px;
   font-weight: 700;
