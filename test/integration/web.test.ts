@@ -778,6 +778,68 @@ test(
 );
 
 test(
+  "配音试听：页面残留别的模型音色时自动换成当前模型音色",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const sample = path.join(dir, "sample.mp3");
+    await generateSilentAudio(sample, 0.6);
+    const audioBuffer = await fs.readFile(sample);
+    let base = "";
+    let sawVoice = "";
+    const mock = http.createServer(async (req, res) => {
+      if (req.url === "/audio/sample.mp3") {
+        res.writeHead(200, { "content-type": "audio/mpeg" });
+        res.end(audioBuffer);
+        return;
+      }
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const parsed = JSON.parse(raw || "{}") as { input?: { voice?: string } };
+      sawVoice = parsed.input?.voice ?? "";
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { audio: { url: `${base}/audio/sample.mp3` } } }));
+    });
+    const port = await new Promise<number>((resolve) =>
+      mock.listen(0, "127.0.0.1", () => {
+        const address = mock.address();
+        resolve(typeof address === "object" && address ? address.port : 0);
+      }),
+    );
+    base = `http://127.0.0.1:${port}`;
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      tts: {
+        provider: "bailian",
+        baseUrl: base,
+        apiKey: "bailian-key",
+        model: "qwen-tts",
+        voice: "Cherry",
+        rate: 1,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      mock.closeAllConnections?.();
+      await new Promise<void>((resolve) => mock.close(() => resolve()));
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+
+    // 角色库可能还显示着上一个模型（MiniMax）的音色，选择后应自动换成当前 qwen-tts 的音色。
+    const preview = await jsonRequest(request, `${app.url}/api/cast/voice-preview`, {
+      voice: "male-qn-qingse",
+      name: "黄乐",
+    });
+    assert.equal(preview.status, 200, await preview.clone().text());
+    assert.equal(decodeURIComponent(String(preview.headers.get("x-preview-voice"))), "Cherry");
+    assert.equal(sawVoice, "Cherry");
+  },
+);
+
+test(
   "配音试听：Edge 供应商收到非 Edge 音色时返回明确原因",
   { timeout: 120_000 },
   async (t) => {

@@ -704,7 +704,11 @@ async function renderCreate() {
   );
   const videoGenReady = settings.videoGen.provider === "http";
   const castWithImages = cast.filter((asset) => asset.imageFile).length;
-  const voiceCatalog = await loadVoiceCatalog();
+  const voiceCatalog = await loadVoiceCatalog(
+    true,
+    settings.tts.provider,
+    settings.tts.model,
+  );
 
   view.innerHTML = `
     <section class="page-head">
@@ -1637,11 +1641,12 @@ function castUploadCardHtml(voiceCatalog = null) {
         <div class="input-with-action">
           <input class="input" id="cast-voice" list="cast-voice-options" placeholder="留空自动分配；或选择当前供应商的音色" maxlength="120" />
           <button class="btn btn-ghost btn-sm" type="button" id="cast-voice-preview">试听</button>
+          <button class="btn btn-ghost btn-sm" type="button" id="cast-voice-refresh">刷新音色</button>
         </div>
         <datalist id="cast-voice-options">
           ${castVoiceOptions.map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`).join("")}
         </datalist>
-        <span class="hint">${esc(castVoiceHint)}</span>
+        <span class="hint" id="cast-voice-hint">${esc(castVoiceHint)}</span>
         <span class="hint" id="cast-voice-preview-status"></span>
       </div>
       <div class="dropzone" id="cast-dropzone">
@@ -1695,11 +1700,12 @@ function castDialogHtml(voiceCatalog = null) {
           <div class="input-with-action">
             <input class="input" id="cast-edit-voice" list="cast-edit-voice-options" maxlength="120" placeholder="留空自动分配；或选择当前供应商的音色" />
             <button class="btn btn-ghost btn-sm" type="button" id="cast-edit-voice-preview">试听</button>
+            <button class="btn btn-ghost btn-sm" type="button" id="cast-edit-voice-refresh">刷新音色</button>
           </div>
           <datalist id="cast-edit-voice-options">
             ${castVoiceOptions.map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`).join("")}
           </datalist>
-          <span class="hint">${esc(castVoiceHint)}</span>
+          <span class="hint" id="cast-edit-voice-hint">${esc(castVoiceHint)}</span>
           <span class="hint" id="cast-edit-voice-preview-status"></span>
         </div>
         <div class="dialog-error" id="cast-form-error" hidden></div>
@@ -1827,7 +1833,12 @@ async function renderCast() {
   if (state.route.name !== "cast") return;
   const cast = data.cast ?? [];
   state.cast = cast;
-  const voiceCatalog = await loadVoiceCatalog();
+  // 每次都按设置里保存的供应商/模型重新拉一次，避免角色库停留在旧模型的音色列表。
+  const voiceCatalog = await loadVoiceCatalog(
+    true,
+    state.settings?.tts?.provider,
+    state.settings?.tts?.model,
+  );
   view.innerHTML = `
     <section class="page-head">
       <p class="eyebrow">Cast & Props</p>
@@ -1856,6 +1867,41 @@ async function renderCast() {
   const nameInput = document.getElementById("cast-name");
   const descInput = document.getElementById("cast-desc");
   const imageInput = document.getElementById("cast-image-input");
+  const voiceCatalogHint = (catalog) => `${voiceSourcePrefix(catalog)}${catalog.hint}`;
+  async function refreshCastVoices(button, datalistId, hintId, statusId) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "刷新中…";
+    try {
+      const catalog = await loadVoiceCatalog(
+        true,
+        state.settings?.tts?.provider,
+        state.settings?.tts?.model,
+      );
+      const datalist = document.getElementById(datalistId);
+      if (datalist) {
+        datalist.innerHTML = catalog.voices
+          .map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`)
+          .join("");
+      }
+      const hint = document.getElementById(hintId);
+      if (hint) hint.textContent = voiceCatalogHint(catalog);
+      const status = document.getElementById(statusId);
+      if (status) status.textContent = `已按 ${catalog.model || catalog.provider} 刷新音色列表`;
+    } catch (error) {
+      toast(`刷新音色失败：${error.message}`, "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+  document.getElementById("cast-voice-refresh")?.addEventListener("click", (event) => {
+    void refreshCastVoices(event.currentTarget, "cast-voice-options", "cast-voice-hint", "cast-voice-preview-status");
+  });
+  document.getElementById("cast-edit-voice-refresh")?.addEventListener("click", (event) => {
+    void refreshCastVoices(event.currentTarget, "cast-edit-voice-options", "cast-edit-voice-hint", "cast-edit-voice-preview-status");
+  });
+
   const voicePreview = document.getElementById("cast-voice-preview");
   const voiceInput = document.getElementById("cast-voice");
   const editVoicePreview = document.getElementById("cast-edit-voice-preview");
