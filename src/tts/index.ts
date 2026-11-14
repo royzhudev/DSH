@@ -1,6 +1,7 @@
 import type { AppConfig, TtsProvider, TtsRequest, TtsResult } from "../types.js";
 import type { Logger } from "../logger.js";
 import { EdgeTtsProvider } from "./edge.js";
+import { BailianTtsProvider } from "./bailian.js";
 import { ElevenLabsTtsProvider } from "./elevenlabs.js";
 import { OpenAiTtsProvider } from "./openai.js";
 import { SilentTtsProvider } from "./silent.js";
@@ -43,6 +44,13 @@ export function createTtsProvider(config: AppConfig, cacheDir: string, logger: L
         ? new FallbackTtsProvider(primary, silent, logger)
         : primary;
     }
+    case "bailian": {
+      const primary = new BailianTtsProvider(config.tts, cacheDir, logger);
+      logger.info(`配音供应商：bailian（${config.tts.model} / ${config.tts.voice}）`);
+      return config.tts.fallback === "silent"
+        ? new FallbackTtsProvider(primary, silent, logger)
+        : primary;
+    }
     case "elevenlabs": {
       const primary = new ElevenLabsTtsProvider(config.tts, cacheDir, logger);
       logger.info(`配音供应商：elevenlabs（${config.tts.voice}）`);
@@ -62,6 +70,7 @@ export function createTtsProvider(config: AppConfig, cacheDir: string, logger: L
 }
 
 export { EdgeTtsProvider } from "./edge.js";
+export { BailianTtsProvider } from "./bailian.js";
 export { ElevenLabsTtsProvider } from "./elevenlabs.js";
 export { OpenAiTtsProvider } from "./openai.js";
 export { SilentTtsProvider } from "./silent.js";

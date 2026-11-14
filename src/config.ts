@@ -107,7 +107,7 @@ export interface LoadConfigOptions {
 }
 
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
-const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "elevenlabs", "silent"];
+const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "elevenlabs", "bailian", "silent"];
 const VIDEO_GEN_PROVIDERS = ["none", "http"] as const;
 
 /** AI 画面是否真的可用：启用了 HTTP 供应商并且填写了 API Key，否则走素材库。 */
