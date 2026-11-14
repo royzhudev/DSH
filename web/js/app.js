@@ -106,6 +106,7 @@ const state = {
   douyin: null,
   publishes: [],
   scriptPreview: null,
+  previewStale: false,
   createDialogue: false,
   createTopic: "",
   createStory: "",
@@ -598,6 +599,7 @@ function renderPreview(data) {
     pill.className = "pill pill-brand";
   }
   body.innerHTML = `<div class="script-preview">
+    <p class="preview-edit-hint">${icon("wand", 14)} 下面的标题、摘要、旁白/台词、场景、镜头和关键词都可以直接点击修改；开始生成视频会按修改后的脚本执行。</p>
     <div class="script-head">
       <input class="input script-edit-input" data-preview="title" value="${attr(script.title)}" maxlength="80" aria-label="脚本标题" />
       <textarea class="input script-edit-area" data-preview="summary" rows="2" maxlength="300" aria-label="脚本摘要">${esc(script.summary)}</textarea>
@@ -645,6 +647,15 @@ function renderPreview(data) {
 }
 
 /** 把预览里的手工修改同步回 state，生成视频时随任务一起提交。 */
+/** 主题改了以后，右侧预览就不再对应当前主题；明确提示并暂时禁止开拍，避免成片和预览对不上。 */
+function setPreviewStale(stale) {
+  state.previewStale = stale;
+  const note = document.getElementById("preview-stale");
+  if (note) note.hidden = !stale;
+  const button = document.getElementById("create-btn");
+  if (button && !button.dataset.busy) button.disabled = stale;
+}
+
 function updatePreviewFromInput(input) {
   const preview = state.scriptPreview;
   if (!preview?.script) return;
@@ -857,24 +868,18 @@ async function renderCreate() {
           </div>
           <span class="pill pill-soft" id="preview-provider">待生成</span>
         </div>
+        <div class="hint preview-stale" id="preview-stale" hidden>主题已修改，右侧脚本对应的是旧主题。请重新生成脚本预览，或把主题改回去再生成视频。</div>
         <div class="card-body" id="preview-body">${state.scriptPreview ? "" : previewEmpty()}</div>
       </aside>
     </div>`;
 
   if (state.scriptPreview) renderPreview(state.scriptPreview);
 
-  // 预览里的手工修改实时写回 state；输入事件用委托，避免每次重渲染重复绑定。
-  document.getElementById("preview-body")?.addEventListener("input", (event) => {
-    const input = event.target;
-    if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
-      if (input.dataset.preview) updatePreviewFromInput(input);
-    }
-  });
-
   const topicInput = document.getElementById("topic");
   const topicCount = document.getElementById("topic-count");
   topicInput.addEventListener("input", () => {
     state.createTopic = topicInput.value;
+    setPreviewStale(Boolean(state.scriptPreview) && state.scriptPreview.topic !== topicInput.value.trim());
     topicCount.textContent = `${topicInput.value.length} / 200`;
   });
 
@@ -971,6 +976,7 @@ async function previewScript() {
       },
     });
     state.scriptPreview = { ...data, topic: values.topic, edited: false };
+    setPreviewStale(false);
     renderPreview(state.scriptPreview);
   } catch (error) {
     toast(error.message, "error");
@@ -982,6 +988,10 @@ async function previewScript() {
 
 async function createVideo() {
   const values = readCreateForm();
+  if (state.previewStale) {
+    toast("主题已修改，请重新生成脚本预览后再开始生成", "error");
+    return;
+  }
   if (!values.topic) {
     toast("请先填写视频主题", "error");
     document.getElementById("topic")?.focus();
@@ -3197,6 +3207,12 @@ function handleDouyinQuery() {
 
 async function init() {
   hydrateIcons();
+  // 预览编辑用文档级委托：预览区域会被重新渲染，绑在旧容器上的监听会丢。
+  document.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) && !(input instanceof HTMLTextAreaElement)) return;
+    if (input.dataset.preview && input.closest("#preview-body")) updatePreviewFromInput(input);
+  });
   window.addEventListener("hashchange", () => {
     if (state.user) void render();
   });
