@@ -10,6 +10,7 @@ import type {
   LipsyncProvider,
   PipelineResult,
   ProgressReporter,
+  Script,
   ScriptProvider,
   ScriptSegment,
   SegmentPlan,
@@ -39,6 +40,7 @@ import { createLipsyncProvider } from "./lipsync/dashscope.js";
 import { synthesizeNaturalSpeech, synthesizeSpeechPieces } from "./tts/speech.js";
 import { masterVoiceTrack, masteredVoicePath } from "./audio/mix.js";
 import { estimateSentences } from "./tts/estimate.js";
+import { normalizeDraftScript } from "./script/draft.js";
 import { catalogVoiceOptions } from "./tts/voice-catalog.js";
 import {
   assignDialogueVoices,
@@ -79,6 +81,8 @@ export interface RunPipelineOptions {
   story?: string;
   /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定。 */
   castIds?: string[];
+  /** 用户在脚本预览里编辑过的脚本；提供时跳过脚本模型，直接按这份分镜成片。 */
+  script?: Script;
   /** 对话模式：分镜按人物台词生成，并按说话人分配音色。 */
   dialogue?: boolean;
 }
@@ -401,7 +405,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     });
     throwIfAborted(signal);
 
-    report({ stage: "script", percent: 5, message: "读取素材库并生成脚本" });
+    report({
+      stage: "script",
+      percent: 5,
+      message: options.script ? "使用修改后的脚本" : "读取素材库并生成脚本",
+    });
     const library = options.library ?? new MaterialLibrary(config.libraryDir, logger);
     const materials = await library.list();
     const scriptProvider = options.scriptProvider ?? createScriptProvider(config, logger);
@@ -415,6 +423,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       ...(cast.length > 0 ? { cast: castPromptInput(cast) } : {}),
     };
     let script;
+    if (options.script) {
+      // 预览页允许直接改标题、台词和画面描述；用户点生成后按改过的版本成片，不再二次创作。
+      script = normalizeDraftScript(options.script);
+      logger.info(`使用用户在预览中修改的脚本：${script.title}（${script.segments.length} 段）`);
+    } else
     try {
       script = await scriptProvider.generate(scriptRequest, signal);
     } catch (error) {

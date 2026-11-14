@@ -54,6 +54,13 @@ test(
     const materials = (await materialsResponse.json()) as { materials: unknown[] };
     assert.equal(materials.materials.length, 1);
 
+    const badScriptResponse = await request(`${app.url}/api/videos`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ topic: "城市夜景", script: { title: "t", summary: "", segments: [] } }),
+    });
+    assert.equal(badScriptResponse.status, 400);
+
     const createResponse = await request(`${app.url}/api/videos`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -102,5 +109,52 @@ test(
 
     const missingResponse = await request(`${app.url}/api/videos/not-found`);
     assert.equal(missingResponse.status, 404);
+  },
+);
+test(
+  "HTTP API：创建任务时带上用户在预览里编辑过的脚本，成片按改后的内容走",
+  { timeout: 180_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { server: { port: 0 } });
+    const app = await startServer(config, silentLogger);
+    t.after(async () => {
+      await app.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+    const createResponse = await request(`${app.url}/api/videos`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        topic: "钟表店编辑测试",
+        videoGenEnabled: false,
+        script: {
+          title: "我改过的标题",
+          summary: "手动修改后成片",
+          segments: [
+            { narration: "林小满推门进店，雨水滴下来。", keywords: ["钟表店"] },
+            { narration: "黄乐把表推回柜台。", keywords: ["柜台"] },
+          ],
+        },
+      }),
+    });
+    assert.equal(createResponse.status, 202, await createResponse.clone().text());
+    const created = (await createResponse.json()) as JobView;
+    let job: JobView | undefined;
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      job = (await (await request(`${app.url}/api/videos/${created.id}`)).json()) as JobView;
+      if (job.state === "succeeded" || job.state === "failed") break;
+      await sleep(200);
+    }
+    assert.equal(job?.state, "succeeded", job?.error);
+    const script = (await (await request(`${app.url}/api/videos/${created.id}/script`)).json()) as {
+      title: string;
+      segments: Array<{ narration: string }>;
+    };
+    assert.equal(script.title, "我改过的标题");
+    assert.equal(script.segments.length, 2);
+    assert.equal(script.segments[0]!.narration, "林小满推门进店，雨水滴下来。");
   },
 );

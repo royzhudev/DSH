@@ -846,6 +846,53 @@ svg {
   margin-top: 10px;
 }
 
+.script-edit-input {
+  font-size: 17px;
+  font-weight: 700;
+  padding: 6px 10px;
+}
+
+.script-edit-area {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.script-edit-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.seg-lines-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.seg-line-edit {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.seg-speaker-input {
+  font-size: 12px;
+}
+
+.seg-edit-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.script-preview .input {
+  background: var(--surface);
+}
+
 .script-segment {
   display: flex;
   gap: 12px;
