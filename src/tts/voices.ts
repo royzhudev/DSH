@@ -149,8 +149,13 @@ export function resolveSpeakerVoice(
     used.add(candidate);
     return candidate;
   }
-  // 候选都被占满时退而求其次：和旁白不同即可。
-  const any = EDGE_VOICE_POOL.find((voice) => voice !== fallbackVoice) ?? EDGE_VOICE_POOL[0]!;
+  // 候选都被占满时（同性别/同龄角色特别多）先在整池里找没人用过的音色，
+  // 实在没有才允许重复——两个角色同一个声音，观众会以为是同一个人在自言自语。
+  const free =
+    pool === "edge"
+      ? EDGE_VOICE_POOL.find((voice) => voice !== fallbackVoice && !used.has(voice))
+      : undefined;
+  const any = free ?? EDGE_VOICE_POOL.find((voice) => voice !== fallbackVoice) ?? EDGE_VOICE_POOL[0]!;
   used.add(any);
   return any;
 }

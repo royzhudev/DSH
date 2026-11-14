@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { concatAudio, probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
+import { masterVoiceTrack, VOICE_MASTER_CHAIN } from "../../src/audio/mix.js";
 import { makeTempDir } from "../helpers.js";
 
 /** 生成一段固定频率、指定音量的音频。 */
@@ -85,3 +86,33 @@ test("多角色配音拼接：逐句做响度归一，音量差被抹平且总�
 
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test(
+  "人声后期：过小的干声被拉到成片响度，时长基本不变",
+  { timeout: 60_000 },
+  async () => {
+    const dir = await makeTempDir();
+    try {
+      const input = path.join(dir, "voice.mp3");
+      await makeTone(input, 2, 0.03);
+      const output = path.join(dir, "voice-master.mp3");
+      const mastered = await masterVoiceTrack(input, output);
+      assert.equal(mastered.file, output);
+      assert.ok(mastered.durationSec && Math.abs(mastered.durationSec - 2) < 0.4);
+
+      const mean = async (file: string): Promise<number> => {
+        const { stderr } = await runFfmpeg(["-hide_banner", "-i", file, "-af", "volumedetect", "-f", "null", "-"]);
+        const match = stderr.match(/mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/);
+        assert.ok(match, `没有读到响度：${stderr.slice(-200)}`);
+        return Number(match![1]);
+      };
+      const beforeDb = await mean(input);
+      const afterDb = await mean(output);
+      assert.ok(afterDb > beforeDb + 5, `后期处理没有提升响度：${beforeDb} → ${afterDb}`);
+      assert.match(VOICE_MASTER_CHAIN, /loudnorm=I=-16/);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+

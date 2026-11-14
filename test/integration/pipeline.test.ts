@@ -334,3 +334,67 @@ test(
   },
 );
 
+test(
+  "配音混音：分镜音轨会生成后期处理版本，且成片用的是处理后的音轨",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "edge" } });
+    let calls = 0;
+    const ttsProvider = {
+      name: "edge" as const,
+      voice: "zh-CN-XiaoxiaoNeural",
+      synthesize: async () => {
+        calls += 1;
+        const file = path.join(dir, "tts", `line-${calls}.mp3`);
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        // 很小的干声：正常 TTS 的输出响度，混音后应该被拉到成片水平。
+        await runFfmpeg([
+          "-y",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=frequency=440:duration=1.2",
+          "-af",
+          "volume=0.03",
+          "-c:a",
+          "libmp3lame",
+          "-b:a",
+          "48k",
+          file,
+        ]);
+        return {
+          provider: "edge" as const,
+          voice: "zh-CN-XiaoxiaoNeural",
+          audioPath: file,
+          durationSec: 1.2,
+          sentences: [{ text: "第一句台词。", startSec: 0, endSec: 1.2 }],
+          cached: false,
+        };
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "混音校验",
+        config,
+        logger: silentLogger,
+        ttsProvider: ttsProvider as never,
+        videoGenProvider: null,
+      });
+      const audioDir = path.join(config.outputDir, result.jobId, "audio");
+      const voices = (await fs.readdir(audioDir)).filter((name) => name.endsWith("-voice-master.mp3"));
+      assert.ok(voices.length >= 1, `没有生成人声后期文件：${(await fs.readdir(audioDir)).join(", ")}`);
+      const mastered = path.join(audioDir, voices[0]!);
+      const { stderr } = await runFfmpeg(["-hide_banner", "-i", mastered, "-af", "volumedetect", "-f", "null", "-"]);
+      const match = stderr.match(/mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/);
+      assert.ok(match, "没有读到混音后响度");
+      assert.ok(Number(match![1]) > -24, `混音后仍然过小：${match![1]}dB`);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
