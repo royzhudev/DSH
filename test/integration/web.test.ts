@@ -711,3 +711,91 @@ test(
     assert.equal(missing.status, 400);
   },
 );
+
+test(
+  "配音音色列表：按供应商/模型返回，并修正跨供应商的旧音色",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const sample = path.join(dir, "sample.mp3");
+    await generateSilentAudio(sample, 0.6);
+    const audioBuffer = await fs.readFile(sample);
+    const mock = http.createServer(async (req, res) => {
+      for await (const _chunk of req) {
+        // 读完请求体再响应
+      }
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+    });
+    const port = await new Promise<number>((resolve) =>
+      mock.listen(0, "127.0.0.1", () => {
+        const address = mock.address();
+        resolve(typeof address === "object" && address ? address.port : 0);
+      }),
+    );
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-turbo",
+        voice: "female-shaonv",
+        rate: 1,
+      },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      mock.closeAllConnections?.();
+      await new Promise<void>((resolve) => mock.close(() => resolve()));
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+
+    const catalog = (await (await request(`${app.url}/api/tts/voices`)).json()) as {
+      catalog: { provider: string; model: string; voices: Array<{ value: string }> };
+    };
+    assert.equal(catalog.catalog.provider, "bailian");
+    assert.equal(catalog.catalog.model, "MiniMax/speech-2.8-turbo");
+    assert.ok(catalog.catalog.voices.some((item) => item.value === "female-shaonv"));
+
+    const qwen = (await (
+      await request(`${app.url}/api/tts/voices?provider=bailian&model=qwen-tts`)
+    ).json()) as { catalog: { voices: Array<{ value: string }> } };
+    assert.ok(qwen.catalog.voices.some((item) => item.value === "Cherry"));
+
+    // 旧角色还存着 Edge 音色：试听时按当前百炼音色替换，并告知实际使用的音色。
+    const preview = await jsonRequest(request, `${app.url}/api/cast/voice-preview`, {
+      voice: "zh-CN-XiaoxiaoNeural",
+      name: "黄乐",
+    });
+    assert.equal(preview.status, 200, await preview.clone().text());
+    assert.equal(decodeURIComponent(String(preview.headers.get("x-preview-voice"))), "male-qn-qingse");
+    assert.equal(preview.headers.get("x-preview-provider"), "bailian");
+  },
+);
+
+test(
+  "配音试听：Edge 供应商收到非 Edge 音色时返回明确原因",
+  { timeout: 120_000 },
+  async (t) => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, {
+      server: { port: 0 },
+      tts: { provider: "edge", voice: "zh-CN-XiaoxiaoNeural" },
+    });
+    const app = await startServer(config, silentLogger, { cwd: dir, env: {}, webDir: WEB_DIR });
+    t.after(async () => {
+      await app.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const session = await setupTestAdmin(app.url);
+    const request = withCookie(session.cookie);
+    const response = await jsonRequest(request, `${app.url}/api/cast/voice-preview`, { voice: "Cherry" });
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error?: { message?: string } };
+    assert.match(String(body.error?.message), /Edge TTS/);
+  },
+);

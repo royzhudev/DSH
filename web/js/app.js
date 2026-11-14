@@ -467,6 +467,33 @@ async function ensureSettings(force = false) {
   return state.settings;
 }
 
+const voiceCatalogCache = new Map();
+
+/** 拉取当前配音供应商/模型的音色列表；失败时退回 Edge 常用音色，保证输入框仍能用。 */
+async function loadVoiceCatalog(force = false, provider, model) {
+  const key = `${provider ?? ""}|${model ?? ""}`;
+  if (!force && voiceCatalogCache.has(key)) return voiceCatalogCache.get(key);
+  const query = new URLSearchParams();
+  if (provider) query.set("provider", provider);
+  if (model) query.set("model", model);
+  const suffix = query.toString() ? `?${query}` : "";
+  try {
+    const data = await api(`/api/tts/voices${suffix}`);
+    const catalog = data.catalog;
+    voiceCatalogCache.set(key, catalog);
+    return catalog;
+  } catch {
+    const fallback = {
+      provider: provider ?? "edge",
+      model: model ?? "",
+      allowCustom: true,
+      hint: "读取音色列表失败，可手动输入音色 ID。",
+      voices: EDGE_VOICES.map(([value, label]) => ({ value, label })),
+    };
+    return fallback;
+  }
+}
+
 function updateModelPill() {
   const pill = document.getElementById("model-pill");
   const settings = state.settings;
@@ -672,6 +699,7 @@ async function renderCreate() {
   );
   const videoGenReady = settings.videoGen.provider === "http";
   const castWithImages = cast.filter((asset) => asset.imageFile).length;
+  const voiceCatalog = await loadVoiceCatalog();
 
   view.innerHTML = `
     <section class="page-head">
@@ -729,9 +757,9 @@ async function renderCreate() {
               <label for="voice">配音音色</label>
               <input class="input" id="voice" list="voice-options" value="${attr(settings.tts.voice)}" />
               <datalist id="voice-options">
-                ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
+                ${voiceCatalog.voices.map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`).join("")}
               </datalist>
-              <span class="hint">${settings.tts.provider === "edge" ? "Edge TTS 中文音色，可直接输入其他音色 ID" : `当前配音供应商：${esc(settings.tts.provider)}`}</span>
+              <span class="hint">${esc(voiceCatalog.hint)}</span>
             </div>
             <div class="field">
               <span class="field-label">字幕与画面</span>
@@ -1444,6 +1472,7 @@ async function renderMaterials() {
       voice: voiceInput?.value.trim() ?? "",
       name: nameInput.value.trim(),
       description: descInput.value.trim(),
+      statusId: "cast-voice-preview-status",
     });
   });
   editVoicePreview?.addEventListener("click", () => {
@@ -1451,6 +1480,7 @@ async function renderMaterials() {
       voice: document.getElementById("cast-edit-voice")?.value.trim() ?? "",
       name: document.getElementById("cast-edit-name")?.value.trim() ?? "",
       description: document.getElementById("cast-edit-desc")?.value.trim() ?? "",
+      statusId: "cast-edit-voice-preview-status",
     });
   });
   dropzone.addEventListener("click", (event) => {
@@ -1551,7 +1581,12 @@ function castCardHtml(asset) {
   </article>`;
 }
 
-function castUploadCardHtml() {
+function castUploadCardHtml(voiceCatalog = null) {
+  const castVoiceOptions = voiceCatalog?.voices?.length
+    ? voiceCatalog.voices
+    : EDGE_VOICES.map(([value, label]) => ({ value, label }));
+  const castVoiceHint =
+    voiceCatalog?.hint ?? "开启「人物对话」时，这个角色用该音色；留空时按设定里的性别自动挑男声/女声。";
   return `<section class="card">
     <div class="card-head">
       <div><div class="card-title">添加角色或道具</div><div class="card-sub">名称 + 外观设定 + 参考图；参考图会用于图生视频，让后续镜头保持同一形象</div></div>
@@ -1579,13 +1614,14 @@ function castUploadCardHtml() {
       <div class="field">
         <label for="cast-voice">对话配音音色 <span class="optional">可选</span></label>
         <div class="input-with-action">
-          <input class="input" id="cast-voice" list="cast-voice-options" placeholder="留空自动分配；例如 zh-CN-YunxiNeural" maxlength="60" />
+          <input class="input" id="cast-voice" list="cast-voice-options" placeholder="留空自动分配；或选择当前供应商的音色" maxlength="120" />
           <button class="btn btn-ghost btn-sm" type="button" id="cast-voice-preview">试听</button>
         </div>
         <datalist id="cast-voice-options">
-          ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
+          ${castVoiceOptions.map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`).join("")}
         </datalist>
-        <span class="hint">开启「人物对话」时，这个角色用该音色；留空时按设定里的性别（如“25 岁女性”“中年男声”）自动挑男声/女声，同一角色全片用同一个声音</span>
+        <span class="hint">${esc(castVoiceHint)}</span>
+        <span class="hint" id="cast-voice-preview-status"></span>
       </div>
       <div class="dropzone" id="cast-dropzone">
         ${icon("upload", 26)}
@@ -1600,7 +1636,11 @@ function castUploadCardHtml() {
   </section>`;
 }
 
-function castDialogHtml() {
+function castDialogHtml(voiceCatalog = null) {
+  const castVoiceOptions = voiceCatalog?.voices?.length
+    ? voiceCatalog.voices
+    : EDGE_VOICES.map(([value, label]) => ({ value, label }));
+  const castVoiceHint = voiceCatalog?.hint ?? "留空自动分配。";
   return `<dialog class="user-dialog" id="cast-dialog">
     <form id="cast-form" novalidate>
       <div class="dialog-head">
@@ -1632,12 +1672,14 @@ function castDialogHtml() {
         <div class="field">
           <label for="cast-edit-voice">对话配音音色</label>
           <div class="input-with-action">
-            <input class="input" id="cast-edit-voice" list="cast-edit-voice-options" maxlength="60" placeholder="留空自动分配" />
+            <input class="input" id="cast-edit-voice" list="cast-edit-voice-options" maxlength="120" placeholder="留空自动分配；或选择当前供应商的音色" />
             <button class="btn btn-ghost btn-sm" type="button" id="cast-edit-voice-preview">试听</button>
           </div>
           <datalist id="cast-edit-voice-options">
-            ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
+            ${castVoiceOptions.map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`).join("")}
           </datalist>
+          <span class="hint">${esc(castVoiceHint)}</span>
+          <span class="hint" id="cast-edit-voice-preview-status"></span>
         </div>
         <div class="dialog-error" id="cast-form-error" hidden></div>
       </div>
@@ -1719,11 +1761,9 @@ async function deleteCast(id) {
 let castPreviewAudio = null;
 
 /** 试听角色音色：用当前填写的音色与设定合成一句示例台词。 */
-async function previewCastVoice(button, { voice, name, description }) {
-  if (!voice) {
-    toast("先选择或填写音色再试听", "error");
-    return;
-  }
+async function previewCastVoice(button, { voice, name, description, statusId }) {
+  const status = statusId ? document.getElementById(statusId) : null;
+  if (status) status.textContent = "";
   const original = button.textContent;
   button.disabled = true;
   button.textContent = "试听中…";
@@ -1738,6 +1778,9 @@ async function previewCastVoice(button, { voice, name, description }) {
       throw new Error(data?.error?.message ?? `试听失败（${response.status}）`);
     }
     const blob = await response.blob();
+    const actualVoice = response.headers.get("x-preview-voice");
+    const played = actualVoice ? decodeURIComponent(actualVoice) : voice;
+    if (status) status.textContent = `正在播放：${played}（${state.settings?.tts?.provider ?? ""}）`;
     if (castPreviewAudio) {
       castPreviewAudio.pause();
       URL.revokeObjectURL(castPreviewAudio.src);
@@ -1745,7 +1788,11 @@ async function previewCastVoice(button, { voice, name, description }) {
     castPreviewAudio = new Audio(URL.createObjectURL(blob));
     await castPreviewAudio.play();
   } catch (error) {
-    toast(error.message, "error");
+    const provider = state.settings?.tts?.provider ?? "当前";
+    const model = state.settings?.tts?.model ?? "";
+    const detail = `${provider}${model ? ` / ${model}` : ""} 试听失败：${error.message}`;
+    if (status) status.textContent = detail;
+    toast(detail, "error");
   } finally {
     button.disabled = false;
     button.textContent = original;
@@ -1759,13 +1806,14 @@ async function renderCast() {
   if (state.route.name !== "cast") return;
   const cast = data.cast ?? [];
   state.cast = cast;
+  const voiceCatalog = await loadVoiceCatalog();
   view.innerHTML = `
     <section class="page-head">
       <p class="eyebrow">Cast & Props</p>
       <h2>角色与道具</h2>
       <p>给人物和关键物品建立设定与参考图。生成短剧时，同一角色/道具会复用同一套外观描述和参考图，保证跨镜头、甚至跨视频延续同一形象。</p>
     </section>
-    ${castUploadCardHtml()}
+    ${castUploadCardHtml(voiceCatalog)}
     <div class="materials-toolbar mt-24">
       <span class="muted small">共 ${cast.length} 个设定${cast.filter((asset) => asset.imageFile).length ? ` · ${cast.filter((asset) => asset.imageFile).length} 个有参考图` : ""}</span>
       <a class="btn btn-ghost btn-sm" href="#/create">${icon("plus", 15)} 去创作</a>
@@ -1776,7 +1824,7 @@ async function renderCast() {
         : emptyState("users", "还没有角色或道具", "添加人物或物品的参考图与外观设定，之后的分镜会保持同一形象。")
     }
     <input type="file" id="cast-image-input" accept="image/*,.jpg,.jpeg,.png,.webp" hidden />
-    ${castDialogHtml()}`;
+    ${castDialogHtml(voiceCatalog)}`;
 
   const kindPicker = document.getElementById("cast-kind");
   const fileInput = document.getElementById("cast-file-input");
@@ -1812,6 +1860,7 @@ async function renderCast() {
       voice: voiceInput?.value.trim() ?? "",
       name: nameInput.value.trim(),
       description: descInput.value.trim(),
+      statusId: "cast-voice-preview-status",
     });
   });
   editVoicePreview?.addEventListener("click", () => {
@@ -1819,6 +1868,7 @@ async function renderCast() {
       voice: document.getElementById("cast-edit-voice")?.value.trim() ?? "",
       name: document.getElementById("cast-edit-name")?.value.trim() ?? "",
       description: document.getElementById("cast-edit-desc")?.value.trim() ?? "",
+      statusId: "cast-edit-voice-preview-status",
     });
   });
   dropzone.addEventListener("click", (event) => {
@@ -2393,6 +2443,7 @@ async function renderSettings() {
   state.douyin = douyin;
   state.users = usersData.users ?? [];
   updateModelPill();
+  const voiceCatalog = await loadVoiceCatalog(false, s.tts.provider, s.tts.model);
   const redirectUri = s.douyin.effectiveRedirectUri;
 
   view.innerHTML = `
@@ -2456,8 +2507,9 @@ async function renderSettings() {
               <label for="tts-voice">音色</label>
               <input class="input" id="tts-voice" list="tts-voice-options" value="${attr(s.tts.voice)}" />
               <datalist id="tts-voice-options">
-                ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
+                ${voiceCatalog.voices.map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`).join("")}
               </datalist>
+              <span class="hint" id="tts-voice-hint">${esc(voiceCatalog.hint)}</span>
             </div>
             ${numberField("tts-rate", "语速", s.tts.rate, { min: 0.5, max: 2, step: 0.1 })}
           </div>
@@ -2694,6 +2746,21 @@ async function renderSettings() {
   view.oninput = markDirty;
   view.onchange = markDirty;
 
+  const refreshVoiceOptions = async () => {
+    const provider = document.getElementById("tts-provider")?.value ?? s.tts.provider;
+    const model = document.getElementById("tts-model")?.value ?? s.tts.model;
+    const next = await loadVoiceCatalog(true, provider, model);
+    const datalist = document.getElementById("tts-voice-options");
+    if (datalist) {
+      datalist.innerHTML = next.voices
+        .map((item) => `<option value="${attr(item.value)}">${esc(item.label)}</option>`)
+        .join("");
+    }
+    const hint = document.getElementById("tts-voice-hint");
+    if (hint) hint.textContent = next.hint;
+  };
+  document.getElementById("tts-provider")?.addEventListener("change", () => void refreshVoiceOptions());
+  document.getElementById("tts-model")?.addEventListener("change", () => void refreshVoiceOptions());
   document.getElementById("save-settings").addEventListener("click", () => {
     void saveSettings();
   });

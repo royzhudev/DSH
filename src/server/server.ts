@@ -36,6 +36,7 @@ import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
 import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
+import { voiceCatalog } from "../tts/voice-catalog.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
 import { buildJobConfig, JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
@@ -67,6 +68,7 @@ const API_VERSION = "0.2.0";
 const JSON_BODY_LIMIT = 1024 * 1024;
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
 const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "silent"];
+const ALL_TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "elevenlabs", "bailian", "silent"];
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -507,9 +509,21 @@ async function handleCastVoicePreview(
       status: 400,
     });
   }
-  const voice = typeof body.voice === "string" ? body.voice.trim().slice(0, 120) : "";
-  if (!voice) {
+  const requestedVoice = typeof body.voice === "string" ? body.voice.trim().slice(0, 120) : "";
+  if (!requestedVoice) {
     throw new AppError("请先选择或填写音色", { code: "TTS_PREVIEW_NO_VOICE", status: 400 });
+  }
+  let voice = requestedVoice;
+  const catalog = await voiceCatalog(config.tts, ctx.logger);
+  const known = catalog.voices.some((item) => item.value === voice);
+  if (!known && config.tts.provider !== "edge" && /Neural$/i.test(voice) && catalog.voices.length > 0) {
+    // 设置里换了供应商，角色库还留着 Edge 音色：直接拿旧音色去合成只会报错或没声。
+    voice = catalog.voices[0]!.value;
+  } else if (!known && config.tts.provider === "edge" && !/Neural$/i.test(voice)) {
+    throw new AppError(`Edge TTS 不支持音色「${voice}」：请选列表里的 Edge 音色，或在设置里切换配音供应商后再试听`, {
+      code: "TTS_PREVIEW_VOICE_MISMATCH",
+      status: 400,
+    });
   }
   config.tts.voice = voice;
   const name = typeof body.name === "string" ? body.name.trim().slice(0, 40) : "";
@@ -540,6 +554,8 @@ async function handleCastVoicePreview(
     "content-type": "audio/mpeg",
     "content-length": buffer.length,
     "cache-control": "no-store",
+    "x-preview-voice": encodeURIComponent(voice),
+    "x-preview-provider": encodeURIComponent(config.tts.provider),
   });
   res.end(buffer);
 }
@@ -633,6 +649,7 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       updateCast: "PATCH /api/cast/:id {name?, description?, kind?}",
       castImage: "GET /api/cast/:id/image",
       castVoicePreview: "POST /api/cast/voice-preview {voice, name?, description?}",
+      ttsVoices: "GET /api/tts/voices?provider=&model=",
       replaceCastImage: "POST /api/cast/:id/image (multipart: file)",
       deleteCast: "DELETE /api/cast/:id",
       listMaterials: "GET /api/materials",
@@ -1327,6 +1344,19 @@ async function handleRequest(
 
   if (pathname === "/api/cast" && method === "POST") {
     await handleCastUpload(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/tts/voices" && method === "GET") {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const config = structuredClone(ctx.config);
+    const provider = url.searchParams.get("provider");
+    const model = url.searchParams.get("model");
+    if (provider && ALL_TTS_PROVIDERS.includes(provider as TtsProviderName)) {
+      config.tts.provider = provider as TtsProviderName;
+    }
+    if (model !== null) config.tts.model = model;
+    sendJson(res, 200, { catalog: await voiceCatalog(config.tts, ctx.logger) });
     return;
   }
 
