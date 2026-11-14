@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateOptions } from "../../src/server/jobs.js";
-import { makeTestConfig, makeTempDir } from "../helpers.js";
+import { makeTempDir, makeTestConfig } from "../helpers.js";
 
 test("任务选项：百炼与 ElevenLabs 配音供应商都能通过校验", async () => {
   const dir = await makeTempDir();
@@ -18,4 +18,13 @@ test("任务选项：百炼与 ElevenLabs 配音供应商都能通过校验", as
   );
   assert.doesNotThrow(() => validateOptions({ voice: "x".repeat(120) }, config));
   assert.throws(() => validateOptions({ voice: "x".repeat(121) }, config), /音色名称/);
+});
+
+test("任务选项：一镜到底允许 1 个分镜，0 个仍拒绝", async () => {
+  const dir = await makeTempDir();
+  const config = makeTestConfig(dir);
+  assert.doesNotThrow(() => validateOptions({ maxSegments: 1 }, config));
+  assert.doesNotThrow(() => validateOptions({ maxSegments: 20 }, config));
+  assert.throws(() => validateOptions({ maxSegments: 0 }, config), /分镜数量/);
+  assert.throws(() => validateOptions({ maxSegments: 21 }, config), /分镜数量/);
 });

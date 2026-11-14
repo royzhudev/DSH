@@ -81,11 +81,21 @@ function buildUserPrompt(request: ScriptRequest): string {
   return `请围绕主题「${request.topic}」写一条竖屏短剧脚本。${storySection(request)}${castSection(request)}
 
 硬性要求：
-1. 目标总时长约 ${request.targetDurationSec} 秒，拆成 3 到 ${request.maxSegments} 个分镜。
+${
+    request.maxSegments <= 1
+      ? `1. 目标总时长约 ${request.targetDurationSec} 秒，只写 1 个分镜：一镜到底，全程不切镜，画面在同一个场景里连续推进。`
+      : request.maxSegments === 2
+        ? `1. 目标总时长约 ${request.targetDurationSec} 秒，拆成 2 个分镜。`
+        : `1. 目标总时长约 ${request.targetDurationSec} 秒，拆成 3 到 ${request.maxSegments} 个分镜。`
+  }
 ${speech}
 3. 每个分镜给出 2 到 4 个画面检索关键词，优先从以下素材标签中选择：${tags}
 4. 每个分镜补全 scene（场景：地点/时间/光线）和 shot（镜头：景别、人物动作、构图），用于画面生成。
-5. 每个分镜必须推进剧情：不要重复前面分镜的台词、场景或镜头描述，相邻分镜的景别/机位要有变化，避免成片看起来是同一个镜头反复播放。
+${
+    request.maxSegments <= 1
+      ? "5. 一镜到底：画面只用一个连续镜头，不切换机位或场景；用人物动作、走位和光线变化推进剧情。"
+      : "5. 每个分镜必须推进剧情：不要重复前面分镜的台词、场景或镜头描述，相邻分镜的景别/机位要有变化，避免成片看起来是同一个镜头反复播放。"
+  }
 6. 不要出现 Markdown、序号、括号说明、表情符号或英文标签。
 ${format}`;
 }
