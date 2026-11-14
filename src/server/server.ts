@@ -37,7 +37,7 @@ import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
 import { createTtsProvider } from "../tts/index.js";
 import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
-import { voiceCatalog } from "../tts/voice-catalog.js";
+import { isStaleVoiceId, voiceCatalog } from "../tts/voice-catalog.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
 import { buildJobConfig, JobManager } from "./jobs.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
@@ -523,6 +523,10 @@ async function handleCastVoicePreview(
       code: "TTS_PREVIEW_VOICE_MISMATCH",
       status: 400,
     });
+  } else if (!known && catalog.voices.length > 0 && isStaleVoiceId(config.tts.provider, config.tts.model, voice)) {
+    // 页面可能还缓存着别的模型的音色（例如从 MiniMax 换到 qwen-tts）：换成当前模型第一个音色再试，
+    // 并通过 x-preview-voice 告知实际使用的音色。
+    voice = catalog.voices[0]!.value;
   }
   config.tts.voice = voice;
   const name = typeof body.name === "string" ? body.name.trim().slice(0, 40) : "";

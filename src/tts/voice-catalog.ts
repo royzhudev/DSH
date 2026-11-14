@@ -178,6 +178,23 @@ async function elevenLabsVoices(
   }
 }
 
+/** 是否是该供应商/模型之外、但属于我们内置音色库的旧音色（换供应商后残留）。 */
+export function isStaleVoiceId(provider: TtsProviderName, model: string, voice: string): boolean {
+  const current = catalogFor(provider, model);
+  if (current.voices.some((item) => item.value === voice)) return false;
+  for (const candidate of [
+    ...EDGE_VOICES,
+    ...OPENAI_VOICES,
+    ...ELEVENLABS_VOICES,
+    ...QWEN_TTS_VOICES,
+    ...COSYVOICE_VOICES,
+    ...MINIMAX_VOICES,
+  ]) {
+    if (candidate.value === voice) return true;
+  }
+  return false;
+}
+
 export async function voiceCatalog(
   settings: TtsSettings,
   logger: Logger,
