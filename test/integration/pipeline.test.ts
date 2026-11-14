@@ -527,3 +527,44 @@ test(
     }
   },
 );
+
+test(
+  "创作页改过的脚本：成片严格按修改后的内容生成，不再调用脚本模型",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { provider: "silent" } });
+    let generated = 0;
+    const scriptProvider = {
+      name: "fake",
+      async generate() {
+        generated += 1;
+        throw new Error("不应调用脚本模型");
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "钟表店",
+        config,
+        logger: silentLogger,
+        scriptProvider,
+        script: {
+          title: "改过的标题",
+          summary: "外卖员被冤枉",
+          provider: "edited",
+          segments: [
+            { id: 1, narration: "林小满推门而入，雨还没停。", keywords: ["钟表店", "雨夜"] },
+            { id: 2, narration: "黄乐把表推回柜台。", keywords: ["柜台", "特写"] },
+          ],
+        },
+      });
+      assert.equal(generated, 0, "用户已经改好脚本时不应重新生成");
+      assert.equal(result.script.title, "改过的标题");
+      assert.equal(result.script.segments.length, 2);
+      const srt = await fs.readFile(result.srtPath, "utf8");
+      assert.match(srt, /雨还没停/);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);

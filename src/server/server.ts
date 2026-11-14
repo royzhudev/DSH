@@ -35,6 +35,7 @@ import {
 import { STORY_MAX_LENGTH, preflightScript, preflightVideoJob } from "../preflight.js";
 import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
+import { normalizeDraftScript } from "../script/draft.js";
 import { createTtsProvider } from "../tts/index.js";
 import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
 import { isStaleVoiceId, voiceCatalog } from "../tts/voice-catalog.js";
@@ -353,6 +354,9 @@ function parseJobOptions(body: Record<string, unknown>): JobOptions {
   const castIds = optionalCastIds(body);
   if (castIds !== undefined) options.castIds = castIds;
   if (body.dialogue === true) options.dialogue = true;
+  if (body.script !== undefined && body.script !== null) {
+    options.script = normalizeDraftScript(body.script);
+  }
   return options;
 }
 

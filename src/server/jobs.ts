@@ -234,6 +234,7 @@ export class JobManager {
             story: record.options.story,
             castIds: record.options.castIds,
             dialogue: record.options.dialogue,
+            script: record.options.script,
             onProgress: (progress) => {
               record.progress = progress;
             },

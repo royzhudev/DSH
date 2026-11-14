@@ -382,6 +382,8 @@ export interface JobOptions {
   story?: string;
   /** 本片使用的角色/道具 id；未提供表示使用角色库全部设定，空数组表示不使用。 */
   castIds?: string[];
+  /** 用户在预览里改过的脚本；提供时成片严格按它执行，不再重新生成。 */
+  script?: Script;
 }
 
 export interface ScriptRequest {

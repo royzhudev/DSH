@@ -599,35 +599,40 @@ function renderPreview(data) {
   }
   body.innerHTML = `<div class="script-preview">
     <div class="script-head">
-      <h3>${esc(script.title)}</h3>
-      <p>${esc(script.summary)}</p>
+      <input class="input script-edit-input" data-preview="title" value="${attr(script.title)}" maxlength="80" aria-label="脚本标题" />
+      <textarea class="input script-edit-area" data-preview="summary" rows="2" maxlength="300" aria-label="脚本摘要">${esc(script.summary)}</textarea>
       <div class="script-meta">
         <span class="pill pill-soft">目标 ${esc(data.targetDurationSec)} 秒</span>
         <span class="pill pill-soft">${esc(script.segments.length)} 个分镜</span>
         ${(data.cast ?? []).length ? `<span class="pill pill-soft">${esc(data.cast.length)} 个角色/道具</span>` : ""}
+        <span class="pill pill-brand">可直接修改</span>
       </div>
     </div>
     ${script.segments
       .map(
-        (segment) => `<div class="script-segment">
+        (segment, index) => `<div class="script-segment" data-seg="${index}">
           <span class="seg-index">${esc(segment.id)}</span>
-          <div>
+          <div class="script-edit-main">
             ${
               (segment.lines ?? []).length
-                ? `<ul class="seg-lines">${segment.lines
-                    .map((line) => `<li><span class="seg-speaker">${esc(line.speaker)}</span>${esc(line.text)}</li>`)
-                    .join("")}</ul>`
-                : `<p class="seg-text">${esc(segment.narration)}</p>`
+                ? `<div class="seg-lines-edit">${segment.lines
+                    .map(
+                      (line, lineIndex) => `<div class="seg-line-edit" data-line="${lineIndex}">
+                        <input class="input seg-speaker-input" data-preview="line-speaker" data-seg="${index}" data-line="${lineIndex}" value="${attr(line.speaker)}" maxlength="24" aria-label="说话人" />
+                        <input class="input" data-preview="line-text" data-seg="${index}" data-line="${lineIndex}" value="${attr(line.text)}" maxlength="300" aria-label="台词" />
+                      </div>`,
+                    )
+                    .join("")}</div>`
+                : `<textarea class="input script-edit-area" data-preview="narration" data-seg="${index}" rows="3" maxlength="800" aria-label="分镜旁白">${esc(segment.narration)}</textarea>`
             }
-            ${segment.scene || segment.shot ? `<p class="seg-shot">${[segment.scene, segment.shot].filter(Boolean).map((text) => esc(text)).join(" · ")}</p>` : ""}
+            <div class="seg-edit-row">
+              <input class="input" data-preview="scene" data-seg="${index}" value="${attr(segment.scene ?? "")}" placeholder="场景：地点/时间/光线" maxlength="300" aria-label="场景" />
+              <input class="input" data-preview="shot" data-seg="${index}" value="${attr(segment.shot ?? "")}" placeholder="镜头：景别/动作/构图" maxlength="300" aria-label="镜头" />
+            </div>
+            <input class="input" data-preview="keywords" data-seg="${index}" value="${attr((segment.keywords ?? []).join("、"))}" placeholder="画面关键词，用、或逗号分隔" maxlength="300" aria-label="画面关键词" />
             ${
               (segment.cast ?? []).length
                 ? `<div class="seg-tags">${segment.cast.map((name) => `<span class="tag tag-brand">${esc(name)}</span>`).join("")}</div>`
-                : ""
-            }
-            ${
-              segment.keywords?.length
-                ? `<div class="seg-tags">${segment.keywords.map((keyword) => `<span class="tag">${esc(keyword)}</span>`).join("")}</div>`
                 : ""
             }
           </div>
@@ -635,8 +640,38 @@ function renderPreview(data) {
       )
       .join("")}
     ${renderCreationReview(data.review)}
-    <p class="fineprint">预览和正式生成会各自调用一次模型，分镜内容可能略有差异。</p>
+    <p class="fineprint">标题、摘要、旁白/台词、场景、镜头和画面关键词都可以直接改；点「开始生成视频」会按改后的脚本成片，不再重新生成剧本。修改后这里显示的品控评分仍是原生成结果。</p>
   </div>`;
+}
+
+/** 把预览里的手工修改同步回 state，生成视频时随任务一起提交。 */
+function updatePreviewFromInput(input) {
+  const preview = state.scriptPreview;
+  if (!preview?.script) return;
+  const field = input.dataset.preview;
+  const segmentIndex = input.dataset.seg === undefined ? -1 : Number(input.dataset.seg);
+  if (field === "title") preview.script.title = input.value;
+  else if (field === "summary") preview.script.summary = input.value;
+  else if (segmentIndex >= 0) {
+    const segment = preview.script.segments[segmentIndex];
+    if (!segment) return;
+    if (field === "narration") segment.narration = input.value;
+    else if (field === "scene") segment.scene = input.value;
+    else if (field === "shot") segment.shot = input.value;
+    else if (field === "keywords") {
+      segment.keywords = input.value
+        .split(/[、,，\s]+/)
+        .map((keyword) => keyword.trim())
+        .filter(Boolean);
+    } else if (field === "line-speaker" || field === "line-text") {
+      const line = segment.lines?.[Number(input.dataset.line)];
+      if (!line) return;
+      if (field === "line-speaker") line.speaker = input.value;
+      else line.text = input.value;
+      segment.narration = segment.lines.map((item) => `${item.speaker}：${item.text}`).join("");
+    }
+  }
+  preview.edited = true;
 }
 
 function castPickerHtml(cast, denied = false) {
@@ -828,6 +863,14 @@ async function renderCreate() {
 
   if (state.scriptPreview) renderPreview(state.scriptPreview);
 
+  // 预览里的手工修改实时写回 state；输入事件用委托，避免每次重渲染重复绑定。
+  document.getElementById("preview-body")?.addEventListener("input", (event) => {
+    const input = event.target;
+    if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
+      if (input.dataset.preview) updatePreviewFromInput(input);
+    }
+  });
+
   const topicInput = document.getElementById("topic");
   const topicCount = document.getElementById("topic-count");
   topicInput.addEventListener("input", () => {
@@ -927,8 +970,8 @@ async function previewScript() {
         ...(values.dialogue ? { dialogue: true } : {}),
       },
     });
-    state.scriptPreview = data;
-    renderPreview(data);
+    state.scriptPreview = { ...data, topic: values.topic, edited: false };
+    renderPreview(state.scriptPreview);
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -957,6 +1000,10 @@ async function createVideo() {
   };
   if (values.story) body.story = values.story;
   if (values.voice) body.voice = values.voice;
+  // 只有预览对应的主题没变时才带上编辑过的脚本，避免改了主题还按旧脚本成片。
+  if (state.scriptPreview?.script && state.scriptPreview.topic === values.topic) {
+    body.script = state.scriptPreview.script;
+  }
   const button = document.getElementById("create-btn");
   button.disabled = true;
   button.innerHTML = `<span class="spinner"></span> 正在检查并创建…`;
