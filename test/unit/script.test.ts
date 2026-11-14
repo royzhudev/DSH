@@ -107,15 +107,33 @@ test("离线脚本在给定角色/剧本时保持出场设定", async () => {
   assert.ok(script.segments.every((segment) => typeof segment.shot === "string" && segment.shot));
 });
 
+test("normalizeScript 支持一镜到底的单个分镜", () => {
+  const script = normalizeScript(
+    {
+      title: "一镜到底",
+      segments: [{ narration: "镜头从门口一路跟到窗边。", keywords: ["室内"], scene: "咖啡馆 白天", shot: "一镜到底 跟拍" }],
+    },
+    { provider: "test", topic: "一镜到底", maxSegments: 1 },
+  );
+  assert.equal(script.segments.length, 1);
+  assert.equal(script.segments[0]!.id, 1);
+});
+
 test("normalizeScript 拒绝无效结构", () => {
   assert.throws(
-    () => normalizeScript({ title: "只有一段", segments: [{ narration: "唯一一段" }] }, {
+    () => normalizeScript({ title: "空脚本", segments: [] }, {
       provider: "test",
       topic: "主题",
       maxSegments: 5,
     }),
     (error: unknown) => error instanceof AppError && error.code === "SCRIPT_INVALID",
   );
+});
+
+test("离线脚本支持一镜到底", async () => {
+  const provider = new OfflineScriptProvider();
+  const script = await provider.generate({ ...BASE_REQUEST, maxSegments: 1 });
+  assert.equal(script.segments.length, 1);
 });
 
 test("离线脚本优先使用素材库标签作为关键词", async () => {

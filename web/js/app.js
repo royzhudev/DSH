@@ -694,7 +694,7 @@ async function renderCreate() {
   }
   const target = Number(settings.script.targetDurationSec) || 45;
   const durations = [...new Set([15, 30, 45, 60, target])].sort((a, b) => a - b);
-  const segmentOptions = [...new Set([3, 4, 5, 6, Number(settings.script.maxSegments) || 6])].sort(
+  const segmentOptions = [...new Set([1, 3, 4, 5, 6, Number(settings.script.maxSegments) || 6])].sort(
     (a, b) => a - b,
   );
   const videoGenReady = settings.videoGen.provider === "http";
@@ -747,7 +747,7 @@ async function renderCreate() {
             <div class="field">
               <label for="segments">分镜数量</label>
               <select class="select" id="segments">
-                ${segmentOptions.map((value) => `<option value="${value}" ${value === Number(settings.script.maxSegments) ? "selected" : ""}>${value} 个分镜</option>`).join("")}
+                ${segmentOptions.map((value) => `<option value="${value}" ${value === Number(settings.script.maxSegments) ? "selected" : ""}>${value === 1 ? "1 个分镜（一镜到底）" : `${value} 个分镜`}</option>`).join("")}
               </select>
             </div>
           </div>
@@ -2480,7 +2480,7 @@ async function renderSettings() {
           <div class="field-grid-3">
             ${numberField("script-temperature", "温度", s.script.temperature, { min: 0, max: 2, step: 0.1 })}
             ${numberField("script-duration", "目标时长（秒）", s.script.targetDurationSec, { min: 5, max: 600 })}
-            ${numberField("script-segments", "分镜数量", s.script.maxSegments, { min: 2, max: 20 })}
+            ${numberField("script-segments", "分镜数量", s.script.maxSegments, { min: 1, max: 20 })}
           </div>
           ${switchField("script-fallback", "大模型失败时回退离线模板", s.script.fallbackToOffline)}
           <div class="test-row">

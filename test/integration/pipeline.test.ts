@@ -398,3 +398,23 @@ test(
   },
 );
 
+
+test(
+  "一镜到底：分镜数量 1 也能产出完整成片",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir);
+    config.script.maxSegments = 1;
+    try {
+      const result = await runPipeline({ topic: "雨夜便利店", config, logger: silentLogger });
+      assert.equal(result.segments.length, 1);
+      assert.ok(result.durationSec > 3, `成片时长异常：${result.durationSec}`);
+      const probe = await probeMedia(result.videoPath);
+      assert.equal(probe.hasVideo, true);
+      assert.equal(probe.hasAudio, true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);

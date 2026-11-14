@@ -22,7 +22,7 @@ const segmentSchema = z.object({
 const scriptSchema = z.object({
   title: z.string().min(1),
   summary: z.string().optional(),
-  segments: z.array(segmentSchema).min(2).max(12),
+  segments: z.array(segmentSchema).min(1).max(12),
 });
 
 export interface NormalizeOptions {
@@ -179,11 +179,11 @@ export function normalizeScript(value: unknown, options: NormalizeOptions): Scri
     segments.push(...uniqueSegments);
   }
 
-  if (segments.length < 2) {
-    throw new AppError("脚本至少需要 2 个有效分镜", { code: "SCRIPT_INVALID" });
+  if (segments.length < 1) {
+    throw new AppError("脚本至少需要 1 个有效分镜", { code: "SCRIPT_INVALID" });
   }
 
-  const limited = segments.slice(0, Math.max(2, options.maxSegments)).map((segment, index) => ({
+  const limited = segments.slice(0, Math.max(1, options.maxSegments)).map((segment, index) => ({
     ...segment,
     id: index + 1,
   }));

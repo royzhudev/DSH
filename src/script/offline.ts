@@ -27,7 +27,7 @@ export class OfflineScriptProvider implements ScriptProvider {
       `关于${topic}，你最先想到的是什么？评论区聊聊。`,
     ];
 
-    const count = Math.max(2, Math.min(5, request.maxSegments));
+    const count = Math.max(1, Math.min(5, request.maxSegments));
     const cast = request.cast ?? [];
     const dialogue = request.dialogue === true;
     const speakers = cast.filter((item) => item.kind === "character").map((item) => item.name);

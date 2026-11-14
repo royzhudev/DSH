@@ -1115,8 +1115,8 @@ async function handleGenerateScript(
   if (config.script.targetDurationSec < 5 || config.script.targetDurationSec > 600) {
     throw new AppError("目标时长必须在 5 到 600 秒之间", { code: "INVALID_OPTIONS", status: 400 });
   }
-  if (config.script.maxSegments < 2 || config.script.maxSegments > 20) {
-    throw new AppError("分镜数量必须在 2 到 20 之间", { code: "INVALID_OPTIONS", status: 400 });
+  if (config.script.maxSegments < 1 || config.script.maxSegments > 20) {
+    throw new AppError("分镜数量必须在 1 到 20 之间（1 表示一镜到底）", { code: "INVALID_OPTIONS", status: 400 });
   }
   const story = optionalStory(body);
   const castIds = optionalCastIds(body);

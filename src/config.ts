@@ -299,7 +299,7 @@ function validateConfig(config: AppConfig): void {
   requireRange("video.tailPaddingSec", config.video.tailPaddingSec, 0, 5);
   requireRange("script.temperature", config.script.temperature, 0, 2);
   requireRange("script.targetDurationSec", config.script.targetDurationSec, 5, 600);
-  requireRange("script.maxSegments", config.script.maxSegments, 2, 20);
+  requireRange("script.maxSegments", config.script.maxSegments, 1, 20);
   requireRange("script.timeoutMs", config.script.timeoutMs, 1000, 600_000);
   requireRange("tts.rate", config.tts.rate, 0.5, 2);
   requireRange("tts.timeoutMs", config.tts.timeoutMs, 1000, 600_000);

@@ -72,8 +72,8 @@ export function validateOptions(options: JobOptions, config: AppConfig): void {
     }
   }
   if (options.maxSegments !== undefined) {
-    if (!Number.isFinite(options.maxSegments) || options.maxSegments < 2 || options.maxSegments > 20) {
-      throw new AppError("分镜数量必须在 2 到 20 之间", { code: "INVALID_OPTIONS", status: 400 });
+    if (!Number.isFinite(options.maxSegments) || options.maxSegments < 1 || options.maxSegments > 20) {
+      throw new AppError("分镜数量必须在 1 到 20 之间（1 表示一镜到底）", { code: "INVALID_OPTIONS", status: 400 });
     }
   }
   if (options.ttsProvider !== undefined && !TTS_PROVIDER_NAMES.includes(options.ttsProvider)) {

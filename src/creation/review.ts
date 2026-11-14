@@ -97,6 +97,15 @@ function dialogueCheck(segments: ReviewSegment[]): ReviewItem {
 }
 
 function shotCheck(segments: ReviewSegment[]): ReviewItem {
+  if (segments.length === 1) {
+    return {
+      id: "shots",
+      stage: "storyboard",
+      level: "ok",
+      title: "一镜到底",
+      detail: "只安排了一个连续镜头，不切机位；用人物动作、走位和光线变化保持画面信息量。",
+    };
+  }
   const sizes = new Set<string>();
   for (const segment of segments) {
     const match = (segment.shot ?? "").match(SHOT_SIZE);
