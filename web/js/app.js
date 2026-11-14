@@ -2641,11 +2641,11 @@ async function renderSettings() {
             <div class="field">
               <label for="tts-base-url">接口地址</label>
               <input class="input" id="tts-base-url" value="${attr(s.tts.baseUrl)}" placeholder="https://api.openai.com/v1" />
-              <span class="hint">阿里百炼填 https://dashscope.aliyuncs.com 即可；也可以填完整接口地址（.../multimodal-generation/generation）</span>
+              <span class="hint">阿里百炼填 https://dashscope.aliyuncs.com、专属工作空间地址或完整接口地址（.../multimodal-generation/generation）均可</span>
             </div>
             <div class="field">
               <label for="tts-model">模型</label>
-              <input class="input" id="tts-model" value="${attr(s.tts.model)}" placeholder="tts-1 / qwen-tts / qwen3-tts-flash / MiniMax/speech-2.8-turbo" />
+              <input class="input" id="tts-model" value="${attr(s.tts.model)}" placeholder="tts-1 / qwen-tts / qwen3-tts-flash / MiniMax/speech-2.8-hd" />
             </div>
             <div class="field">
               <label for="tts-fallback">失败处理</label>
