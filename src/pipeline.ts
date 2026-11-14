@@ -126,6 +126,38 @@ function withStageLabel(stage: JobStage, error: unknown): unknown {
   });
 }
 
+export interface DialogueTurn {
+  speaker: string;
+  items: DialogueLine[];
+  text: string;
+}
+
+/**
+ * 把同一角色连续说的台词合并成一个说话轮次：一次合成拿到完整上下文，
+ * 语气连贯；字幕仍按原句切分。每句单独合成会让每句都有句尾收束，
+ * 听起来像一板一眼念稿。
+ */
+export function mergeDialogueTurns(lines: DialogueLine[]): DialogueTurn[] {
+  const turns: DialogueTurn[] = [];
+  for (const line of lines) {
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === line.speaker) {
+      last.items.push(line);
+    } else {
+      turns.push({ speaker: line.speaker, items: [line], text: "" });
+    }
+  }
+  for (const turn of turns) {
+    turn.text = turn.items
+      .map((item) => item.text.trim())
+      .map((text, position, all) =>
+        position < all.length - 1 ? text.replace(/[。！!？?；;]+$/, "，") : text,
+      )
+      .join("");
+  }
+  return turns;
+}
+
 interface DialogueSynthesisInput {
   lines: DialogueLine[];
   cast: CastAsset[];
@@ -158,6 +190,10 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
     ? (input.voices ??
       assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice, voicePool))
     : new Map<string, string>();
+  // 按“说话轮次”合成：同一个人连续说的几句合并成一段再来配音。
+  // 合并后 TTS 能拿到完整上下文，语气连贯，字幕再按原句比例切分。
+  const turns = mergeDialogueTurns(lines);
+
   const providers = new Map<string, TtsProvider>();
   const audioFiles: string[] = [];
   const synthesized: Array<DialogueLine & { voice: string; durationSec: number }> = [];
@@ -178,17 +214,17 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   let allCached = true;
   let previousSpeaker: string | undefined;
 
-  for (const [lineIndex, line] of lines.entries()) {
+  for (const [turnIndex, turn] of turns.entries()) {
     if (signal?.aborted) throw new AppError("任务已取消", { code: "ABORTED", status: 499 });
-    const voice = voices.get(line.speaker) ?? config.tts.voice;
+    const voice = voices.get(turn.speaker) ?? config.tts.voice;
     // 语速跟着人物设定微调（年长慢一点、年轻快一点），比全片一个速度自然。
-    const description = cast.find((asset) => asset.name === line.speaker)?.description ?? "";
+    const description = cast.find((asset) => asset.name === turn.speaker)?.description ?? "";
     const rate = voiceRateFor(description, config.tts.rate);
     const pitch = voicePitchFor(description);
-    const volume = voiceVolumeFor(description, line.text);
+    const volume = voiceVolumeFor(description, turn.text);
     const instructions =
       config.tts.provider === "openai" || config.tts.provider === "elevenlabs"
-        ? voiceStyleFor(description, line.text)
+        ? voiceStyleFor(description, turn.text)
         : undefined;
     let provider = ttsProvider;
     const providerKey = `${voice}|${rate}`;
@@ -200,36 +236,49 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
       );
       providers.set(providerKey, provider);
     }
-    // 对白之间留出自然停顿：换人说话停久一点，同一人连续说停短一点。
+    // 对白之间留出自然停顿：首次开口短一点，换人说话停久一点。
     // 没有停顿会让配音一句顶一句，听起来像念稿。
-    const pause = lineIndex === 0 ? 0.12 : previousSpeaker === line.speaker ? 0.18 : 0.32;
+    const pause = turnIndex === 0 ? 0.12 : previousSpeaker === turn.speaker ? 0.18 : 0.32;
     if (pause > 0) {
       audioFiles.push(await silenceFor(pause));
       offset += pause;
     }
-    previousSpeaker = line.speaker;
-    // 一句话内部也按标点分句合成：整段一口气念完是“播音腔”的主要来源，
+    previousSpeaker = turn.speaker;
+    // 整轮内部再按标点分句合成：一口气念完是“播音腔”的主要来源，
     // 分句后句与句之间才有呼吸，也能按语气单独调快慢高低。
     const planned = await synthesizeSpeechPieces({
       provider,
-      text: line.text,
+      text: turn.text,
       base: { rate, pitch, volume },
       silenceFor,
       signal,
     });
     audioFiles.push(...planned.pieces);
     allCached = allCached && planned.cached;
-    synthesized.push({
-      speaker: line.speaker,
-      text: line.text,
-      voice: provider.voice,
-      durationSec: round3(planned.durationSec),
-    });
-    cues.push({
-      startSec: round3(offset),
-      endSec: round3(offset + planned.durationSec),
-      text: `${line.speaker}：${line.text}`,
-    });
+
+    // 按原句字数比例切分这一轮的总时长，字幕仍按原句出现。
+    const weights = turn.items.map((item) => Math.max(1, item.text.replace(/\s/g, "").length));
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    let allocated = 0;
+    for (const [itemIndex, item] of turn.items.entries()) {
+      const isLast = itemIndex === turn.items.length - 1;
+      const share = isLast
+        ? round3(Math.max(0.05, planned.durationSec - allocated))
+        : round3((planned.durationSec * weights[itemIndex]!) / totalWeight);
+      const durationSec = Math.max(0.05, share);
+      synthesized.push({
+        speaker: turn.speaker,
+        text: item.text,
+        voice: provider.voice,
+        durationSec,
+      });
+      cues.push({
+        startSec: round3(offset + allocated),
+        endSec: round3(offset + allocated + durationSec),
+        text: `${turn.speaker}：${item.text}`,
+      });
+      allocated += durationSec;
+    }
     offset += planned.durationSec;
   }
 

@@ -80,6 +80,7 @@ node dist/cli.js create --topic "城市夜景"
 - 更自然的方案：配音供应商选 `ElevenLabs`（`eleven_multilingual_v2`），角色库的 voice 填 ElevenLabs `voice_id`，接口地址填 `https://api.elevenlabs.io`、密钥填 `TTS_API_KEY`；合成时按短剧对白给 `stability/style` 表演参数。
 - 对白之间会自动留停顿（首次开口 0.12s、同一人 0.18s、换人 0.32s），并按每句内容补情绪提示（争执/疑问/哭腔/耳语/笑意），避免一句顶一句的念稿感。
 - 单句内部也按标点朗读：`，、` 停 150ms、`；` 210ms、`。` 320ms、`！？` 360ms、`……` 420ms；感叹句与「滚、凭什么、竟然、不可能」等强情绪词会更快更高更响，疑问句略慢并抬高，`……` 与「对不起、算了、原来」等泄气句放慢压低，5 字以内短句轻微放慢。这样即使仍用免费的 Edge 音色，也不会把一整句话一口气念完（这是“播音腔”最主要的来源）。
+- 同一角色连续说的台词会合并成一个说话轮次再合成，拿到完整上下文；轮次内部再按标点分句，避免每句都有句尾收束的“背书感”。声线分配与合成策略详见 [docs/voice-design.md](docs/voice-design.md)。
 - 命令行为 `video-agent create --dialogue`；API 为 `dialogue: true`（创建任务与 `/api/scripts/generate` 预览都支持）。
 
 ## 口型同步（人物对白）
