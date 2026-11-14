@@ -73,7 +73,7 @@ export class BailianTtsProvider implements TtsProvider {
     const model = this.settings.model?.trim() || DEFAULT_HTTP_MODEL;
     if (/^cosyvoice/i.test(model)) {
       await this.synthesizeViaWebSocket(request, model, audioFile, signal);
-    } else if (/^qwen-tts/i.test(model)) {
+    } else if (/^qwen[\w.-]*tts/i.test(model)) {
       await this.synthesizeViaHttp(request, model, audioFile, signal);
     } else {
       // 百炼上的第三方语音模型（如 MiniMax/speech-2.8-turbo）走百炼原生多模态接口，
@@ -182,7 +182,7 @@ export class BailianTtsProvider implements TtsProvider {
     });
   }
 
-  /** qwen-tts：DashScope 多模态 HTTP，返回音频 URL 或 base64。 */
+  /** qwen-tts / qwen3-tts 系列：DashScope 多模态 HTTP，返回音频 URL 或 base64。 */
   private async synthesizeViaHttp(
     request: TtsRequest,
     model: string,

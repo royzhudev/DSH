@@ -267,6 +267,64 @@ test("阿里百炼 qwen-tts：HTTP 合成按音色传参并下载音频", async 
   }
 });
 
+test("阿里百炼 qwen3-tts-flash：走 qwen 系列多模态 HTTP，而不是第三方 input.audio", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let received: Record<string, unknown> = {};
+  let requestPath = "";
+  let base = "";
+  const server = http.createServer((req, res) => {
+    if (req.url === "/audio/sample.mp3") {
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+      return;
+    }
+    requestPath = req.url ?? "";
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      received = JSON.parse(raw || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { audio: { url: `${base}/audio/sample.mp3` } } }));
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  base = `http://127.0.0.1:${port}`;
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: base,
+        apiKey: "test-key",
+        model: "qwen3-tts-flash",
+        voice: "Cherry",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "你站住！", cacheKey: "bailian-qwen3-test" });
+    assert.ok(result.durationSec > 0.2);
+    assert.equal(requestPath, "/api/v1/services/aigc/multimodal-generation/generation");
+    assert.equal(received.model, "qwen3-tts-flash");
+    const input = received.input as Record<string, unknown>;
+    assert.equal(input.voice, "Cherry");
+    assert.equal(input.text, "你站住！");
+    assert.equal((received as { input?: { audio?: unknown } }).input?.audio, undefined);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("阿里百炼 cosyvoice-v3：WebSocket 流式合成并校验任务参数", async () => {
   const dir = await makeTempDir();
   const audio = path.join(dir, "sample.mp3");

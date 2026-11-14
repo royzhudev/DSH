@@ -2559,7 +2559,7 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
-          <div><div class="card-title">配音</div><div class="card-sub">Edge TTS 免费无需密钥；也支持 OpenAI 兼容、ElevenLabs 与阿里百炼（qwen-tts / CosyVoice / MiniMax，含声音复刻音色）</div></div>
+          <div><div class="card-title">配音</div><div class="card-sub">Edge TTS 免费无需密钥；也支持 OpenAI 兼容、ElevenLabs 与阿里百炼（qwen-tts / qwen3-tts-flash / CosyVoice / MiniMax，含声音复刻音色）</div></div>
           <span class="pill pill-soft">${esc(s.tts.provider)}</span>
         </div>
         <div class="card-body">
@@ -2588,7 +2588,7 @@ async function renderSettings() {
             </div>
             <div class="field">
               <label for="tts-model">模型</label>
-              <input class="input" id="tts-model" value="${attr(s.tts.model)}" placeholder="tts-1 / qwen-tts / MiniMax/speech-2.8-turbo" />
+              <input class="input" id="tts-model" value="${attr(s.tts.model)}" placeholder="tts-1 / qwen-tts / qwen3-tts-flash / MiniMax/speech-2.8-turbo" />
             </div>
             <div class="field">
               <label for="tts-fallback">失败处理</label>

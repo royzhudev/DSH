@@ -766,6 +766,12 @@ test(
     ).json()) as { catalog: { voices: Array<{ value: string }> } };
     assert.ok(qwen.catalog.voices.some((item) => item.value === "Cherry"));
 
+    const qwen3 = (await (
+      await request(`${app.url}/api/tts/voices?provider=bailian&model=qwen3-tts-flash`)
+    ).json()) as { catalog: { voices: Array<{ value: string }>; hint: string } };
+    assert.ok(qwen3.catalog.voices.some((item) => item.value === "Cherry"));
+    assert.doesNotMatch(qwen3.catalog.hint, /第三方/);
+
     // 旧角色还存着 Edge 音色：试听时按当前百炼音色替换，并告知实际使用的音色。
     const preview = await jsonRequest(request, `${app.url}/api/cast/voice-preview`, {
       voice: "zh-CN-XiaoxiaoNeural",
