@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { AppError } from "./errors.js";
+import { TTS_PROVIDER_NAMES } from "./types.js";
 import type { AppConfig, ScriptProviderName, TtsProviderName } from "./types.js";
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -107,7 +108,6 @@ export interface LoadConfigOptions {
 }
 
 const SCRIPT_PROVIDERS: ScriptProviderName[] = ["auto", "openai", "offline"];
-const TTS_PROVIDERS: TtsProviderName[] = ["edge", "openai", "elevenlabs", "bailian", "silent"];
 const VIDEO_GEN_PROVIDERS = ["none", "http"] as const;
 
 /** AI 画面是否真的可用：启用了 HTTP 供应商并且填写了 API Key，否则走素材库。 */
@@ -313,7 +313,7 @@ function validateConfig(config: AppConfig): void {
   if (!SCRIPT_PROVIDERS.includes(config.script.provider)) {
     throw new AppError(`不支持的脚本供应商：${config.script.provider}`, { code: "CONFIG_INVALID" });
   }
-  if (!TTS_PROVIDERS.includes(config.tts.provider)) {
+  if (!TTS_PROVIDER_NAMES.includes(config.tts.provider)) {
     throw new AppError(`不支持的配音供应商：${config.tts.provider}`, { code: "CONFIG_INVALID" });
   }
   if (config.tts.fallback !== "silent" && config.tts.fallback !== "error") {
