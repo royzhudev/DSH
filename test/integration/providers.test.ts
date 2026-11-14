@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
+import { WebSocketServer } from "ws";
 import { runPipeline } from "../../src/pipeline.js";
 import { silentLogger } from "../../src/logger.js";
 import { generateSilentAudio, probeMedia } from "../../src/media/ffmpeg.js";
@@ -204,6 +205,173 @@ test("ElevenLabs 配音：按角色传 voice_id 与表演参数，返回可用�
     assert.equal(body.text, "合同里写着我陪。");
     const settings = body.voice_settings as Record<string, unknown>;
     assert.equal(settings.style, 0.45);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼 qwen-tts：HTTP 合成按音色传参并下载音频", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let received: Record<string, unknown> = {};
+  let base = "";
+  const server = http.createServer((req, res) => {
+    if (req.url === "/audio/sample.mp3") {
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+      return;
+    }
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      received = JSON.parse(raw || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { audio: { url: `${base}/audio/sample.mp3` } } }));
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  base = `http://127.0.0.1:${port}`;
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: base,
+        apiKey: "test-key",
+        model: "qwen-tts",
+        voice: "Cherry",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "合同里写着我陪。", cacheKey: "bailian-http-test" });
+    assert.equal(result.provider, "bailian");
+    assert.ok(result.durationSec > 0.2);
+    assert.equal(received.model, "qwen-tts");
+    const input = received.input as Record<string, unknown>;
+    assert.equal(input.voice, "Cherry");
+    assert.equal(input.text, "合同里写着我陪。");
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼 cosyvoice-v3：WebSocket 流式合成并校验任务参数", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  const seen: { auth?: string; runTask?: Record<string, unknown>; text?: string } = {};
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server, path: "/api-ws/v1/inference" });
+  wss.on("connection", (socket, req) => {
+    seen.auth = String(req.headers.authorization ?? "");
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as {
+        header: { action: string };
+        payload: Record<string, unknown>;
+      };
+      if (message.header.action === "run-task") {
+        seen.runTask = message.payload;
+        socket.send(JSON.stringify({ header: { event: "task-started", task_id: "t1" } }));
+      } else if (message.header.action === "continue-task") {
+        seen.text = String((message.payload.input as { text?: string }).text ?? "");
+      } else if (message.header.action === "finish-task") {
+        socket.send(audioBuffer, { binary: true });
+        socket.send(JSON.stringify({ header: { event: "task-finished", task_id: "t1" } }));
+      }
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "test-key",
+        model: "cosyvoice-v3",
+        voice: "cosyvoice-v3-clone-abc",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "你站住！", cacheKey: "bailian-ws-test" });
+    assert.equal(result.provider, "bailian");
+    assert.ok(result.durationSec > 0.2);
+    assert.equal(seen.auth, "Bearer test-key");
+    const params = seen.runTask?.parameters as Record<string, unknown>;
+    assert.equal(seen.runTask?.model, "cosyvoice-v3");
+    assert.equal(params.voice, "cosyvoice-v3-clone-abc");
+    assert.equal(seen.text, "你站住！");
+  } finally {
+    wss.close();
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("阿里百炼第三方模型：MiniMax/speech-2.8-turbo 走兼容 /audio/speech", async () => {
+  const dir = await makeTempDir();
+  const audio = path.join(dir, "sample.mp3");
+  await generateSilentAudio(audio, 0.6);
+  const audioBuffer = await fs.readFile(audio);
+  let received: Record<string, unknown> = {};
+  let requestPath = "";
+  const server = http.createServer((req, res) => {
+    requestPath = req.url ?? "";
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      received = JSON.parse(raw || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      res.end(audioBuffer);
+    });
+  });
+  const port = await new Promise<number>((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    }),
+  );
+  try {
+    const { BailianTtsProvider } = await import("../../src/tts/bailian.js");
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: "bailian-key",
+        model: "MiniMax/speech-2.8-turbo",
+        voice: "male-qn-qingse",
+        rate: 1,
+      },
+    });
+    const provider = new BailianTtsProvider(config.tts, config.cacheDir, silentLogger);
+    const result = await provider.synthesize({ text: "你站住！", cacheKey: "bailian-minimax-test" });
+    assert.equal(result.provider, "bailian");
+    assert.ok(result.durationSec > 0.2);
+    assert.equal(requestPath, "/compatible-mode/v1/audio/speech");
+    assert.equal(received.model, "MiniMax/speech-2.8-turbo");
+    assert.equal(received.voice, "male-qn-qingse");
+    assert.equal(received.input, "你站住！");
+    assert.equal(received.response_format, "mp3");
   } finally {
     server.closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));

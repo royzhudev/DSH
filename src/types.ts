@@ -1,5 +1,5 @@
 export type ScriptProviderName = "auto" | "openai" | "offline";
-export type TtsProviderName = "edge" | "openai" | "elevenlabs" | "silent";
+export type TtsProviderName = "edge" | "openai" | "elevenlabs" | "bailian" | "silent";
 /** 画面来源：none 只使用素材库；http 调用可配置的 AI 视频生成接口。 */
 export type VideoGenProviderName = "none" | "http";
 
