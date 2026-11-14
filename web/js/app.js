@@ -1611,7 +1611,7 @@ function castUploadCardHtml(voiceCatalog = null) {
     : EDGE_VOICES.map(([value, label]) => ({ value, label }));
   const castVoiceHint = `${voiceSourcePrefix(voiceCatalog)}${
     voiceCatalog?.hint ?? "开启「人物对话」时，这个角色用该音色；留空时按设定里的性别自动挑男声/女声。"
-  }`;
+  }成片配音会按这里给每个角色分别合成；列表是常用音色，模型支持的其他 id 可直接输入。`;
   return `<section class="card">
     <div class="card-head">
       <div><div class="card-title">添加角色或道具</div><div class="card-sub">名称 + 外观设定 + 参考图；参考图会用于图生视频，让后续镜头保持同一形象</div></div>
@@ -1666,7 +1666,7 @@ function castDialogHtml(voiceCatalog = null) {
   const castVoiceOptions = voiceCatalog?.voices?.length
     ? voiceCatalog.voices
     : EDGE_VOICES.map(([value, label]) => ({ value, label }));
-  const castVoiceHint = `${voiceSourcePrefix(voiceCatalog)}${voiceCatalog?.hint ?? "留空自动分配。"}`;
+  const castVoiceHint = `${voiceSourcePrefix(voiceCatalog)}${voiceCatalog?.hint ?? "留空自动分配。"}成片配音会按这里给每个角色分别合成；模型支持的其他 id 可直接输入。`;
   return `<dialog class="user-dialog" id="cast-dialog">
     <form id="cast-form" novalidate>
       <div class="dialog-head">

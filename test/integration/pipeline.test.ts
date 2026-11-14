@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import test from "node:test";
 import { runPipeline } from "../../src/pipeline.js";
-import { probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
+import { generateSilentAudio, probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
 import { silentLogger } from "../../src/logger.js";
 import { CastLibrary } from "../../src/cast/library.js";
 import { MaterialLibrary } from "../../src/materials/library.js";
@@ -118,6 +119,80 @@ test(
       const probe = await probeMedia(result.videoPath);
       assert.equal(probe.hasAudio, true);
     } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "对话模式：百炼配音按角色设定的音色逐人合成",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const audio = path.join(dir, "sample.mp3");
+    await generateSilentAudio(audio, 0.8);
+    const audioBuffer = await fs.readFile(audio);
+    const heardVoices = new Set<string>();
+    let base = "";
+    const mock = http.createServer(async (req, res) => {
+      if (req.url === "/audio/sample.mp3") {
+        res.writeHead(200, { "content-type": "audio/mpeg" });
+        res.end(audioBuffer);
+        return;
+      }
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw || "{}") as { input?: { voice?: string } };
+      if (body.input?.voice) heardVoices.add(body.input.voice);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: { audio: { url: `${base}/audio/sample.mp3` } } }));
+    });
+    const port = await new Promise<number>((resolve) =>
+      mock.listen(0, "127.0.0.1", () => {
+        const address = mock.address();
+        resolve(typeof address === "object" && address ? address.port : 0);
+      }),
+    );
+    base = `http://127.0.0.1:${port}`;
+    const config = makeTestConfig(dir, {
+      tts: {
+        provider: "bailian",
+        baseUrl: base,
+        apiKey: "bailian-key",
+        model: "qwen-tts",
+        voice: "Cherry",
+        rate: 1,
+      },
+    });
+    const library = new CastLibrary(config.castDir, silentLogger);
+    await library.add({
+      kind: "character",
+      name: "林小满",
+      description: "25 岁女性，齐肩短发",
+      voice: "Cherry",
+    });
+    await library.add({
+      kind: "character",
+      name: "黄乐",
+      description: "45 岁男性，酒吧老板",
+      voice: "Ethan",
+    });
+    try {
+      const result = await runPipeline({
+        topic: "外卖员被冤枉",
+        config,
+        logger: silentLogger,
+        dialogue: true,
+      });
+      const voices = new Set(
+        result.segments.flatMap((segment) => segment.lines?.map((line) => line.voice) ?? []),
+      );
+      assert.ok(voices.has("Cherry"), `缺少林小满的音色：${[...voices].join(",")}`);
+      assert.ok(voices.has("Ethan"), `缺少黄乐的音色：${[...voices].join(",")}`);
+      assert.ok(heardVoices.has("Cherry") && heardVoices.has("Ethan"), "合成本身要按角色切换音色");
+    } finally {
+      mock.closeAllConnections?.();
+      await new Promise<void>((resolve) => mock.close(() => resolve()));
       await fs.rm(dir, { recursive: true, force: true });
     }
   },

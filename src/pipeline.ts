@@ -39,8 +39,10 @@ import { createLipsyncProvider } from "./lipsync/dashscope.js";
 import { synthesizeNaturalSpeech, synthesizeSpeechPieces } from "./tts/speech.js";
 import { masterVoiceTrack, masteredVoicePath } from "./audio/mix.js";
 import { estimateSentences } from "./tts/estimate.js";
+import { catalogVoiceOptions } from "./tts/voice-catalog.js";
 import {
   assignDialogueVoices,
+  assignDialogueVoicesFromCatalog,
   voicePitchFor,
   voiceRateFor,
   voiceStyleFor,
@@ -172,6 +174,23 @@ interface DialogueSynthesisInput {
   signal?: AbortSignal;
 }
 
+/** 按当前供应商给说话人分配音色：Edge/OpenAI 用内置音色池，其他供应商用各自的音色目录。 */
+function assignVoicesForConfig(
+  speakers: string[],
+  cast: CastAsset[],
+  config: AppConfig,
+): Map<string, string> {
+  if (config.tts.provider === "edge" || config.tts.provider === "openai") {
+    return assignDialogueVoices(
+      speakers,
+      cast,
+      config.tts.voice,
+      config.tts.provider === "openai" ? "openai" : "edge",
+    );
+  }
+  return assignDialogueVoicesFromCatalog(speakers, cast, config.tts.voice, catalogVoiceOptions(config.tts));
+}
+
 /**
  * 对话模式：按说话人逐句合成，再把几段配音拼成一条音轨。
  * - 每个说话人固定音色（角色库可指定，未指定时按名字稳定分配）；
@@ -184,12 +203,15 @@ async function synthesizeDialogueLines(input: DialogueSynthesisInput): Promise<{
   lines: Array<DialogueLine & { voice: string; durationSec: number }>;
 }> {
   const { lines, cast, config, logger, jobDir, index, ttsProvider, signal } = input;
-  // Edge 与 OpenAI 兼容 TTS 都支持逐角色换音色；OpenAI 还支持 instructions 表演提示。
-  const voicePool = config.tts.provider === "openai" ? ("openai" as const) : ("edge" as const);
-  const canSwitchVoice = config.tts.provider === "edge" || config.tts.provider === "openai";
+  // Edge / OpenAI / 百炼 / ElevenLabs 都支持逐角色换音色；只有静音占位不需要。
+  const canSwitchVoice = config.tts.provider !== "silent";
   const voices = canSwitchVoice
     ? (input.voices ??
-      assignDialogueVoices([...new Set(lines.map((line) => line.speaker))], cast, config.tts.voice, voicePool))
+      assignVoicesForConfig(
+        [...new Set(lines.map((line) => line.speaker))],
+        cast,
+        config,
+      ))
     : new Map<string, string>();
   // 按“说话轮次”合成：同一个人连续说的几句合并成一段再来配音。
   // 合并后 TTS 能拿到完整上下文，语气连贯，字幕再按原句比例切分。
@@ -438,11 +460,10 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     const allSpeakers = [
       ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
     ];
-    const dialogueVoices = assignDialogueVoices(
+    const dialogueVoices = assignVoicesForConfig(
       allSpeakers,
       cast,
-      config.tts.voice,
-      config.tts.provider === "openai" ? "openai" : "edge",
+      config,
     );
     const plans: SegmentPlan[] = [];
     let cursor = 0;
