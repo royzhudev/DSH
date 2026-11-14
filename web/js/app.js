@@ -1439,6 +1439,20 @@ async function renderMaterials() {
     }
   }
 
+  voicePreview?.addEventListener("click", () => {
+    void previewCastVoice(voicePreview, {
+      voice: voiceInput?.value.trim() ?? "",
+      name: nameInput.value.trim(),
+      description: descInput.value.trim(),
+    });
+  });
+  editVoicePreview?.addEventListener("click", () => {
+    void previewCastVoice(editVoicePreview, {
+      voice: document.getElementById("cast-edit-voice")?.value.trim() ?? "",
+      name: document.getElementById("cast-edit-name")?.value.trim() ?? "",
+      description: document.getElementById("cast-edit-desc")?.value.trim() ?? "",
+    });
+  });
   dropzone.addEventListener("click", (event) => {
     if (event.target === fileInput) return;
     fileInput.click();
@@ -1564,7 +1578,10 @@ function castUploadCardHtml() {
       </div>
       <div class="field">
         <label for="cast-voice">对话配音音色 <span class="optional">可选</span></label>
-        <input class="input" id="cast-voice" list="cast-voice-options" placeholder="留空自动分配；例如 zh-CN-YunxiNeural" maxlength="60" />
+        <div class="input-with-action">
+          <input class="input" id="cast-voice" list="cast-voice-options" placeholder="留空自动分配；例如 zh-CN-YunxiNeural" maxlength="60" />
+          <button class="btn btn-ghost btn-sm" type="button" id="cast-voice-preview">试听</button>
+        </div>
         <datalist id="cast-voice-options">
           ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
         </datalist>
@@ -1614,7 +1631,10 @@ function castDialogHtml() {
         </div>
         <div class="field">
           <label for="cast-edit-voice">对话配音音色</label>
-          <input class="input" id="cast-edit-voice" list="cast-edit-voice-options" maxlength="60" placeholder="留空自动分配" />
+          <div class="input-with-action">
+            <input class="input" id="cast-edit-voice" list="cast-edit-voice-options" maxlength="60" placeholder="留空自动分配" />
+            <button class="btn btn-ghost btn-sm" type="button" id="cast-edit-voice-preview">试听</button>
+          </div>
           <datalist id="cast-edit-voice-options">
             ${EDGE_VOICES.map(([value, label]) => `<option value="${attr(value)}">${esc(label)}</option>`).join("")}
           </datalist>
@@ -1696,6 +1716,42 @@ async function deleteCast(id) {
   }
 }
 
+let castPreviewAudio = null;
+
+/** 试听角色音色：用当前填写的音色与设定合成一句示例台词。 */
+async function previewCastVoice(button, { voice, name, description }) {
+  if (!voice) {
+    toast("先选择或填写音色再试听", "error");
+    return;
+  }
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "试听中…";
+  try {
+    const response = await fetch("/api/cast/voice-preview", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ voice, name, description }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.error?.message ?? `试听失败（${response.status}）`);
+    }
+    const blob = await response.blob();
+    if (castPreviewAudio) {
+      castPreviewAudio.pause();
+      URL.revokeObjectURL(castPreviewAudio.src);
+    }
+    castPreviewAudio = new Audio(URL.createObjectURL(blob));
+    await castPreviewAudio.play();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 async function renderCast() {
   setPage("角色库", "角色与道具");
   view.innerHTML = loadingView("正在读取角色库…");
@@ -1731,6 +1787,9 @@ async function renderCast() {
   const nameInput = document.getElementById("cast-name");
   const descInput = document.getElementById("cast-desc");
   const imageInput = document.getElementById("cast-image-input");
+  const voicePreview = document.getElementById("cast-voice-preview");
+  const voiceInput = document.getElementById("cast-voice");
+  const editVoicePreview = document.getElementById("cast-edit-voice-preview");
   let pendingReplaceId = null;
 
   function selectFile(file) {
@@ -1747,6 +1806,20 @@ async function renderCast() {
     if (!button) return;
     for (const item of kindPicker.querySelectorAll("button")) item.classList.remove("active");
     button.classList.add("active");
+  });
+  voicePreview?.addEventListener("click", () => {
+    void previewCastVoice(voicePreview, {
+      voice: voiceInput?.value.trim() ?? "",
+      name: nameInput.value.trim(),
+      description: descInput.value.trim(),
+    });
+  });
+  editVoicePreview?.addEventListener("click", () => {
+    void previewCastVoice(editVoicePreview, {
+      voice: document.getElementById("cast-edit-voice")?.value.trim() ?? "",
+      name: document.getElementById("cast-edit-name")?.value.trim() ?? "",
+      description: document.getElementById("cast-edit-desc")?.value.trim() ?? "",
+    });
   });
   dropzone.addEventListener("click", (event) => {
     if (event.target === fileInput) return;
