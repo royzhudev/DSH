@@ -471,6 +471,11 @@ const voiceCatalogCache = new Map();
 
 /** 拉取当前配音供应商/模型的音色列表；失败时退回 Edge 常用音色，保证输入框仍能用。 */
 async function loadVoiceCatalog(force = false, provider, model) {
+  // 没有显式指定时，跟随设置里保存的供应商/模型，避免沿用页面打开前的旧缓存。
+  if (!provider && state.settings?.tts?.provider) {
+    provider = state.settings.tts.provider;
+    model = state.settings.tts.model;
+  }
   const key = `${provider ?? ""}|${model ?? ""}`;
   if (!force && voiceCatalogCache.has(key)) return voiceCatalogCache.get(key);
   const query = new URLSearchParams();
@@ -1581,12 +1586,28 @@ function castCardHtml(asset) {
   </article>`;
 }
 
+const TTS_PROVIDER_LABELS = {
+  edge: "Edge TTS",
+  openai: "OpenAI 兼容",
+  elevenlabs: "ElevenLabs",
+  bailian: "阿里百炼",
+  silent: "静音",
+};
+
+function voiceSourcePrefix(voiceCatalog) {
+  if (!voiceCatalog?.provider) return "";
+  const provider = TTS_PROVIDER_LABELS[voiceCatalog.provider] ?? voiceCatalog.provider;
+  const model = voiceCatalog.model ? ` · ${voiceCatalog.model}` : "";
+  return `音色列表来自设置里的 ${provider}${model}；`;
+}
+
 function castUploadCardHtml(voiceCatalog = null) {
   const castVoiceOptions = voiceCatalog?.voices?.length
     ? voiceCatalog.voices
     : EDGE_VOICES.map(([value, label]) => ({ value, label }));
-  const castVoiceHint =
-    voiceCatalog?.hint ?? "开启「人物对话」时，这个角色用该音色；留空时按设定里的性别自动挑男声/女声。";
+  const castVoiceHint = `${voiceSourcePrefix(voiceCatalog)}${
+    voiceCatalog?.hint ?? "开启「人物对话」时，这个角色用该音色；留空时按设定里的性别自动挑男声/女声。"
+  }`;
   return `<section class="card">
     <div class="card-head">
       <div><div class="card-title">添加角色或道具</div><div class="card-sub">名称 + 外观设定 + 参考图；参考图会用于图生视频，让后续镜头保持同一形象</div></div>
@@ -1640,7 +1661,7 @@ function castDialogHtml(voiceCatalog = null) {
   const castVoiceOptions = voiceCatalog?.voices?.length
     ? voiceCatalog.voices
     : EDGE_VOICES.map(([value, label]) => ({ value, label }));
-  const castVoiceHint = voiceCatalog?.hint ?? "留空自动分配。";
+  const castVoiceHint = `${voiceSourcePrefix(voiceCatalog)}${voiceCatalog?.hint ?? "留空自动分配。"}`;
   return `<dialog class="user-dialog" id="cast-dialog">
     <form id="cast-form" novalidate>
       <div class="dialog-head">
@@ -2922,6 +2943,8 @@ async function saveSettings() {
   try {
     const data = await api("/api/settings", { method: "PUT", body: collectSettings() });
     state.settings = data.settings;
+    // 供应商/模型变了，角色库和创作页的音色下拉要重新按新模型拉取。
+    voiceCatalogCache.clear();
     updateModelPill();
     toast("设置已保存", "success");
     const scrollY = window.scrollY;
