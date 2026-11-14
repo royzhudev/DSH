@@ -37,6 +37,7 @@ import { buildSubtitleCues, renderSrt } from "./subtitles/ass.js";
 import { probeMedia, extractPoster, concatAudio, createSilence } from "./media/ffmpeg.js";
 import { createLipsyncProvider } from "./lipsync/dashscope.js";
 import { synthesizeNaturalSpeech, synthesizeSpeechPieces } from "./tts/speech.js";
+import { masterVoiceTrack, masteredVoicePath } from "./audio/mix.js";
 import { estimateSentences } from "./tts/estimate.js";
 import {
   assignDialogueVoices,
@@ -514,6 +515,33 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           audioDurationSec: tts.durationSec,
           style: config.subtitles,
         });
+      }
+      // 人声后期：TTS 直出的是干声，又小又飘，贴在画面上像有人在旁边念稿。
+      // 统一做去喷麦、压缩、轻微房间感与 EBU R128 响度归一，让它像成片里的一条人声。
+      if (tts.provider !== "silent") {
+        const target = path.join(jobDir, "audio", `segment-${String(index + 1).padStart(2, "0")}-voice.mp3`);
+        try {
+          const mastered = await masterVoiceTrack(tts.audioPath, masteredVoicePath(target));
+          if (mastered.durationSec > 0 && tts.durationSec > 0) {
+            const ratio = mastered.durationSec / tts.durationSec;
+            if (Math.abs(ratio - 1) > 0.001) {
+              // 响度归一会让音轨长度轻微变化，字幕时间轴按同一比例跟着缩放。
+              cues = cues.map((cue) => ({
+                ...cue,
+                startSec: round3(cue.startSec * ratio),
+                endSec: round3(cue.endSec * ratio),
+              }));
+            }
+          }
+          tts = {
+            ...tts,
+            audioPath: mastered.file,
+            durationSec: mastered.durationSec > 0 ? mastered.durationSec : tts.durationSec,
+          };
+        } catch (error) {
+          warnings.push(`分镜 ${index + 1} 人声后期处理失败，已使用原始配音：${toErrorMessage(error)}`);
+          logger.warn(`分镜 ${index + 1} 人声后期处理失败：${toErrorMessage(error)}`);
+        }
       }
       if (config.tts.provider !== "silent" && tts.provider === "silent") {
         warnings.push(`分镜 ${index + 1} 配音失败，已回退为静音占位（详见服务日志）。`);
