@@ -450,10 +450,30 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     config.videoGen.baseUrl = `https://${config.videoGen.baseUrl}`;
   }
   config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.trim().replace(/\/+$/, "");
+  normalizeProviderTokens(config);
   normalizeVideoGenProtocol(config);
 
   validateConfig(config);
   return config;
+}
+
+/** 枚举值统一成小写：网页设置或手写配置里常出现 BAILIAN、Edge 这类写法。 */
+function lowerToken<T extends string>(value: T): T {
+  return (typeof value === "string" ? value.trim().toLowerCase() : value) as T;
+}
+
+/**
+ * 供应商、协议等枚举值不区分大小写。设置页把选项标签（例如 BAILIAN）直接存进配置后，
+ * 如果不在这里归一化，创建任务就会在校验阶段报“不支持的配音提供商”。
+ */
+function normalizeProviderTokens(config: AppConfig): void {
+  config.script.provider = lowerToken(config.script.provider);
+  config.tts.provider = lowerToken(config.tts.provider);
+  config.tts.fallback = lowerToken(config.tts.fallback);
+  config.video.transition = lowerToken(config.video.transition);
+  config.videoGen.provider = lowerToken(config.videoGen.provider);
+  config.videoGen.protocol = lowerToken(config.videoGen.protocol);
+  config.lipsync.provider = lowerToken(config.lipsync.provider);
 }
 
 export const DASHSCOPE_VIDEO_SUBMIT_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";

@@ -22,6 +22,9 @@ type Overlay = Partial<Record<EditableSection, Record<string, unknown>>> & { upd
 
 const SECRET_KEYS = new Set(["apiKey", "clientSecret"]);
 
+/** 取值是固定枚举的字段：保存时统一小写，避免 BAILIAN 这类写法存进配置后校验失败。 */
+const TOKEN_KEYS = new Set(["provider", "protocol", "fallback", "transition"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -120,7 +123,7 @@ function sanitizeSection(section: EditableSection, patch: unknown): Record<strin
       result[key] = sanitizeSection(section, value);
       continue;
     }
-    result[key] = value;
+    result[key] = TOKEN_KEYS.has(key) && typeof value === "string" ? value.trim().toLowerCase() : value;
   }
   return result;
 }

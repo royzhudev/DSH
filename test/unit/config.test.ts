@@ -147,3 +147,31 @@ test("loadConfig 不改动非阿里百炼地址上的通用协议", async () => 
   assert.equal(config.videoGen.protocol, "generic");
   assert.equal(config.videoGen.submitPath, "/v1/videos/generations");
 });
+
+test("loadConfig 接受大小写混写的供应商名并统一成小写", async () => {
+  const dir = await makeTempDir();
+  // 设置页把选项标签（BAILIAN）原样存进配置 / 设置文件时，创建任务不应该被判为非法供应商。
+  await fs.writeFile(
+    path.join(dir, "video-agent.config.json"),
+    JSON.stringify({
+      script: { provider: "OFFLINE" },
+      tts: { provider: " BAILIAN ", fallback: "SILENT" },
+      videoGen: { provider: "HTTP", protocol: "DASHSCOPE" },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.script.provider, "offline");
+  assert.equal(config.tts.provider, "bailian");
+  assert.equal(config.tts.fallback, "silent");
+  assert.equal(config.videoGen.provider, "http");
+  assert.equal(config.videoGen.protocol, "dashscope");
+});
+
+test("loadConfig 仍然拒绝大小写归一化后依然未知的供应商", async () => {
+  const dir = await makeTempDir();
+  assert.throws(
+    () => loadConfig({ cwd: dir, env: { TTS_PROVIDER: "NOTAPROVIDER" } }),
+    (error: unknown) => error instanceof AppError && error.code === "CONFIG_INVALID",
+  );
+});

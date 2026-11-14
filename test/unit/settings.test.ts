@@ -98,3 +98,19 @@ test("effectiveRedirectUri 处理空值与通配监听地址", () => {
   config.douyin.redirectUri = "https://example.com/cb";
   assert.equal(effectiveRedirectUri(config), "https://example.com/cb");
 });
+
+test("SettingsStore 把大写供应商名保存成小写，创建任务不再报不支持的供应商", async () => {
+  const dir = await makeTempDir();
+  const { config, store } = await makeStore(dir);
+  await store.update({ tts: { provider: "BAILIAN", model: "cosyvoice-v3-plus" } });
+  assert.equal(config.tts.provider, "bailian");
+
+  const raw = JSON.parse(await fs.readFile(config.settingsFile, "utf8")) as {
+    tts?: { provider?: string };
+  };
+  assert.equal(raw.tts?.provider, "bailian");
+
+  // 重新加载（等价于重启服务后创建任务）也要通过校验。
+  const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
+  assert.equal(reloaded.tts.provider, "bailian");
+});
