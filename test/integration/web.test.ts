@@ -215,13 +215,16 @@ test(
     const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },
       tts: { provider: "silent" },
+      lipsync: { enabled: false, provider: "dashscope" },
     }, "PUT");
     assert.equal(putResponse.status, 200, await putResponse.clone().text());
     const updated = (await putResponse.json()) as {
-      settings: { script: { model: string }; tts: { provider: string } };
+      settings: { script: { model: string }; tts: { provider: string }; lipsync: { enabled: boolean; provider: string } };
     };
     assert.equal(updated.settings.script.model, "ui-model");
     assert.equal(updated.settings.tts.provider, "silent");
+    assert.equal(updated.settings.lipsync.enabled, false);
+    assert.equal(updated.settings.lipsync.provider, "dashscope");
     assert.equal(config.script.model, "ui-model");
 
     const secretPut = await jsonRequest(request, `${app.url}/api/settings`, {

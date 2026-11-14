@@ -789,7 +789,7 @@ async function renderCreate() {
                 <span class="track"></span>
                 <span>人物对话（多音色）</span>
               </label>
-              <span class="hint">分镜写成“角色：台词”，每个角色用自己的音色；关闭则用第三人称旁白讲解。角色音色可在「角色与道具」里设置，未设置会自动分配。${settings.lipsync.provider === "dashscope" ? "成片会调用百炼 VideoRetalk 对齐口型（按秒计费）。" : "需要口型对齐时在设置里启用口型同步。"}</span>
+              <span class="hint">分镜写成“角色：台词”，每个角色用自己的音色；关闭则用第三人称旁白讲解。角色音色可在「角色与道具」里设置，未设置会自动分配。${settings.lipsync.enabled && settings.lipsync.provider === "dashscope" ? "成片会调用百炼 VideoRetalk 对齐口型（按秒计费）。" : "需要口型对齐时在设置里启用口型同步。"}</span>
             </div>
           </div>
 
@@ -2730,9 +2730,10 @@ async function renderSettings() {
       <section class="card settings-card">
         <div class="card-head">
           <div><div class="card-title">口型同步（对白）</div><div class="card-sub">分镜渲染后把人物口型对齐到台词音轨</div></div>
-          <span class="pill ${s.lipsync.provider === "dashscope" ? "pill-brand" : "pill-soft"}">${s.lipsync.provider === "dashscope" ? "已启用" : "未启用"}</span>
+          <span class="pill ${s.lipsync.enabled && s.lipsync.provider === "dashscope" ? "pill-brand" : "pill-soft"}">${s.lipsync.enabled && s.lipsync.provider === "dashscope" ? "已启用" : "未启用"}</span>
         </div>
         <div class="card-body">
+          ${switchField("lipsync-enabled", "启用口型同步（对白）", s.lipsync.enabled, "关闭后成片阶段不调用口型校验；开启则沿用下面的供应商与参数")}
           <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里云百炼 VideoRetalk</strong>（<code>videoretalk</code>）：提交人物视频 + 人声音频，返回口型对齐的新视频。只支持<strong>华北 2（北京）</strong>地域，必须使用该地域的 API Key；视频/音频需 2–120 秒、视频边长 640–2048、画面是人物正面近景。程序会先把本地文件上传到百炼临时存储（48 小时有效），再提交异步任务并轮询，成片按秒计费（0.08 元/秒）。只在同时满足「对话模式 + 分镜有台词 + 出现角色」时才调用。</span></div>
           <div class="field-grid-3">
             <div class="field">
@@ -2936,8 +2937,12 @@ function collectSettings() {
   const videoGenKey = secret("videogen-api-key");
   if (videoGenKey !== undefined) videoGen.apiKey = videoGenKey;
 
+  const lipsyncEnabled = checked("lipsync-enabled");
+  const lipsyncProvider = value("lipsync-provider");
   const lipsync = {
-    provider: value("lipsync-provider"),
+    enabled: lipsyncEnabled,
+    // 总开关打开但供应商还是「不使用」时，直接切到唯一的云供应商，避免开关看似开了却没生效。
+    provider: lipsyncEnabled && lipsyncProvider === "none" ? "dashscope" : lipsyncProvider,
     model: value("lipsync-model").trim(),
     baseUrl: value("lipsync-base-url").trim(),
     pollIntervalMs: number("lipsync-poll-interval"),

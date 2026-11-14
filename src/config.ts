@@ -73,7 +73,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     fallbackToMaterials: true,
   },
   lipsync: {
-    // 默认关闭；开启后分镜渲染完会调用口型同步，再进成片拼接。
+    // 总开关默认打开，但供应商默认 none，因此默认不会调用；
+    // 选好百炼 VideoRetalk 并填 Key 后才真正生效，关掉总开关则完全跳过。
+    enabled: true,
     provider: "none",
     baseUrl: "https://dashscope.aliyuncs.com",
     model: "videoretalk",
@@ -237,6 +239,7 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
   config.videoGen.apiKey = set(config.videoGen.apiKey, envString(env, "VIDEOGEN_API_KEY"));
   config.videoGen.model = set(config.videoGen.model, envString(env, "VIDEOGEN_MODEL"));
 
+  config.lipsync.enabled = set(config.lipsync.enabled, envBoolean(env, "LIPSYNC_ENABLED"));
   const lipsyncProvider = envString(env, "LIPSYNC_PROVIDER") as "none" | "dashscope" | undefined;
   if (lipsyncProvider) config.lipsync.provider = lipsyncProvider;
   config.lipsync.baseUrl = set(config.lipsync.baseUrl, envString(env, "LIPSYNC_BASE_URL"));

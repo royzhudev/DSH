@@ -11,6 +11,7 @@ import { generateTestClip, makeTempDir } from "../helpers.js";
 
 function settings(overrides: Partial<LipsyncSettings> = {}): LipsyncSettings {
   return {
+    enabled: true,
     provider: "dashscope",
     baseUrl: "https://dashscope.example",
     model: "videoretalk",
