@@ -141,6 +141,8 @@ export interface SegmentResult {
   material: Pick<Material, "id" | "title" | "type" | "file"> | null;
   voice: string;
   ttsProvider: TtsProviderName;
+  /** 配音来源：tts 为配音模型；video 为画面模型直接生成的同期声。 */
+  audioSource?: "tts" | "video";
   /** 该分镜是否做过口型同步（仅对话分镜会记录）。 */
   lipsync?: "synced" | "unsynced" | "skipped";
   /** 对话模式：本分镜的台词、说话人与音色。 */
@@ -251,6 +253,8 @@ export interface ScriptSettings {
 }
 
 export interface TtsSettings {
+  /** 总开关：关闭后不调用配音供应商，改由画面模型在生成视频时直接生成台词同期声。 */
+  enabled: boolean;
   provider: TtsProviderName;
   voice: string;
   rate: number;

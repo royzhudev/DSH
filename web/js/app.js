@@ -2617,9 +2617,10 @@ async function renderSettings() {
       <section class="card settings-card">
         <div class="card-head">
           <div><div class="card-title">配音</div><div class="card-sub">Edge TTS 免费无需密钥；也支持 OpenAI 兼容、ElevenLabs 与阿里百炼（qwen-tts / qwen3-tts-flash / CosyVoice / MiniMax，含声音复刻音色）</div></div>
-          <span class="pill pill-soft">${esc(s.tts.provider)}</span>
+          <span class="pill ${s.tts.enabled ? "pill-soft" : "pill-brand"}">${s.tts.enabled ? esc(s.tts.provider) : "已关闭，画面模型出声"}</span>
         </div>
         <div class="card-body">
+          ${switchField("tts-enabled", "启用配音模块", s.tts.enabled, "启用后按下面的供应商合成配音；关闭后不调用配音模型，改由 AI 画面模型根据分镜台词直接生成同期声（画面模型需支持音频，否则成片没有台词声）")}
           <div class="field-grid-3">
             <div class="field">
               <label for="tts-provider">供应商</label>
@@ -2967,6 +2968,7 @@ function collectSettings() {
   if (scriptKey !== undefined) script.apiKey = scriptKey;
 
   const tts = {
+    enabled: checked("tts-enabled"),
     provider: value("tts-provider"),
     voice: value("tts-voice").trim(),
     rate: number("tts-rate"),

@@ -2,7 +2,7 @@ import path from "node:path";
 import type { AppConfig, Material, ScriptSegment, SubtitleCue, TtsResult } from "../types.js";
 import type { Logger } from "../logger.js";
 import { createGradientImage, backgroundSeed } from "../media/background.js";
-import { runFfmpeg } from "../media/ffmpeg.js";
+import { probeMedia, runFfmpeg } from "../media/ffmpeg.js";
 import { renderAss } from "../subtitles/ass.js";
 import { ensureDir } from "../util/fs.js";
 import fs from "node:fs/promises";
@@ -22,6 +22,8 @@ export interface RenderSegmentOptions {
   logger: Logger;
   /** 是否烧录字幕；口型同步需要先不烧字幕，等同步后再补，避免模型把字也重绘。 */
   burnSubtitles?: boolean;
+  /** 配音关闭时保留画面模型自带的同期声；源视频没有音轨就补静音。 */
+  keepSourceAudio?: boolean;
 }
 
 export interface RenderedSegment {
@@ -117,18 +119,33 @@ export async function renderSegment(options: RenderSegmentOptions): Promise<Rend
     "asetpts=PTS-STARTPTS",
   ].join(",");
 
+  const keepSourceAudio = options.keepSourceAudio === true;
+  let sourceHasAudio = false;
+  if (keepSourceAudio && visualPath) {
+    try {
+      sourceHasAudio = (await probeMedia(visualPath)).hasAudio;
+    } catch {
+      sourceHasAudio = false;
+    }
+  }
+  const audioInputArgs = keepSourceAudio
+    ? sourceHasAudio
+      ? []
+      : ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    : ["-i", tts.audioPath];
+  const audioMap = keepSourceAudio ? (sourceHasAudio ? "0:a:0" : "1:a:0") : "1:a:0";
+
   const args = [
     "-y",
     "-hide_banner",
     "-loglevel",
     "error",
     ...inputArgs,
-    "-i",
-    tts.audioPath,
+    ...audioInputArgs,
     "-map",
     "0:v:0",
     "-map",
-    "1:a:0",
+    audioMap,
     "-vf",
     videoFilter,
     "-af",

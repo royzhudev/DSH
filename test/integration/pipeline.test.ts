@@ -568,3 +568,91 @@ test(
     }
   },
 );
+
+test(
+  "关闭配音：不调用 TTS，成片保留画面模型生成的同期声",
+  { timeout: 180_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, { tts: { enabled: false } });
+    const clip = path.join(dir, "source", "generated-with-audio.mp4");
+    await fs.mkdir(path.dirname(clip), { recursive: true });
+    await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0x335577:s=360x640:d=4:r=15",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:duration=4",
+      "-shortest",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      clip,
+    ]);
+    const prompts: string[] = [];
+    let ttsCalls = 0;
+    const ttsProvider = {
+      name: "edge" as const,
+      voice: "fake-voice",
+      synthesize: async () => {
+        ttsCalls += 1;
+        throw new AppError("不应调用配音", { code: "TTS_API_FAILED" });
+      },
+    };
+    const videoGenProvider = {
+      name: "fake",
+      model: "fake-video",
+      generate: async (request: { prompt: string }) => {
+        prompts.push(request.prompt);
+        return { file: clip, durationSec: 4, provider: "fake", model: "fake-video" };
+      },
+    };
+    try {
+      const result = await runPipeline({
+        topic: "同期声测试",
+        config,
+        logger: silentLogger,
+        ttsProvider,
+        videoGenProvider: videoGenProvider as never,
+      });
+      assert.equal(ttsCalls, 0, "关闭配音后不应调用 TTS");
+      assert.ok(prompts.length >= 2);
+      assert.ok(prompts.every((prompt) => prompt.includes("同期声")), "画面提示词应要求模型生成同期声");
+      assert.ok(result.segments.every((segment) => segment.audioSource === "video"));
+      assert.ok(result.segments.every((segment) => segment.durationSec >= 3.5));
+      assert.ok(result.segments.every((segment) => segment.subtitleCues > 0), "字幕应按分镜时长生成");
+      const probe = await probeMedia(result.videoPath);
+      assert.equal(probe.hasVideo, true);
+      assert.equal(probe.hasAudio, true);
+      // 源片段的 440Hz 测试音必须保留下来，而不是补成静音。
+      const volume = await runFfmpeg([
+        "-hide_banner",
+        "-i",
+        result.videoPath,
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+      ]);
+      const mean = /mean_volume:\s*(-?[\d.]+) dB/.exec(volume.stderr);
+      assert.ok(mean, `没有读到音量信息：${volume.stderr.slice(-200)}`);
+      assert.ok(Number(mean[1]) > -50, `成片音轨接近静音：${mean[1]} dB`);
+      assert.ok(result.durationSec > 7);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  },
+);

@@ -94,11 +94,13 @@ export async function preflightVideoJob(input: PreflightInput): Promise<void> {
   }
 
   // 配音。
-  if (config.tts.provider === "openai") {
-    pushIf(issues, !config.tts.apiKey, "配音供应商为 OpenAI 兼容接口，但还没有填写 API Key");
-  }
-  if (config.tts.provider !== "silent") {
-    pushIf(issues, !config.tts.voice.trim(), "配音音色不能为空");
+  if (config.tts.enabled) {
+    if (config.tts.provider === "openai") {
+      pushIf(issues, !config.tts.apiKey, "配音供应商为 OpenAI 兼容接口，但还没有填写 API Key");
+    }
+    if (config.tts.provider !== "silent") {
+      pushIf(issues, !config.tts.voice.trim(), "配音音色不能为空");
+    }
   }
 
   // 角色/道具参考图：在调用脚本模型之前就确认能读到，避免生成完才发现。
