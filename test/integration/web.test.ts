@@ -200,6 +200,8 @@ test(
     assert.match(scriptText, /data-resume="videogen"/);
     assert.match(scriptText, /videogen-test-task/);
     assert.match(scriptText, /data-test="douyin"/);
+    assert.match(scriptText, /segment-edit-dialog/);
+    assert.match(scriptText, /\/api\/videos\/\$\{job\.id\}\/edit/);
 
     const apiIndex = (await (await request(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
     assert.equal(apiIndex.name, "video-agent");
@@ -402,6 +404,22 @@ test(
     assert.equal(job.segments?.length, 2);
     assert.equal(job.segments?.[0]?.source, "material");
     assert.ok(job.segments?.[0]?.material);
+
+    const editNoPrompt = await jsonRequest(request, `${app.url}/api/videos/${job.id}/edit`, {
+      segmentIndex: 1,
+      prompt: "   ",
+    });
+    assert.equal(editNoPrompt.status, 400);
+    const editNoSegment = await jsonRequest(request, `${app.url}/api/videos/${job.id}/edit`, {
+      segmentIndex: 99,
+      prompt: "把背景换成夜景",
+    });
+    assert.equal(editNoSegment.status, 404);
+    const editUnknownJob = await jsonRequest(request, `${app.url}/api/videos/not-a-job/edit`, {
+      segmentIndex: 1,
+      prompt: "把背景换成夜景",
+    });
+    assert.equal(editUnknownJob.status, 404);
 
     const videoRange = await request(`${app.url}${job.videoUrl}`, { headers: { range: "bytes=0-99" } });
     assert.equal(videoRange.status, 206);

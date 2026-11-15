@@ -666,6 +666,7 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       douyinStatus: "GET /api/douyin/status",
       douyinAuthorize: "GET /api/douyin/authorize",
       douyinCallback: "GET /api/douyin/callback",
+      editSegment: "POST /api/videos/:id/edit {segmentIndex, prompt}",
       publish: "POST /api/videos/:id/publish {text?, coverTsp?}",
       publishes: "GET /api/publishes",
     },
@@ -1490,6 +1491,24 @@ async function handleRequest(
   if (jobPublish && method === "GET") {
     const publishes = await ctx.publishes.list();
     sendJson(res, 200, { publishes: publishes.filter((item) => item.jobId === jobPublish[1]) });
+    return;
+  }
+
+  const jobEdit = /^\/api\/videos\/([a-zA-Z0-9-]+)\/edit$/.exec(pathname);
+  if (jobEdit && method === "POST") {
+    const body = await readJsonBody(req);
+    const segmentIndex = Number(body.segmentIndex);
+    if (!Number.isInteger(segmentIndex) || segmentIndex < 1) {
+      throw new AppError("请选择要修改的分镜", { code: "JOB_SEGMENT_NOT_FOUND", status: 400 });
+    }
+    const prompt = optionalString(body.prompt) ?? "";
+    const record = ctx.jobs.startVideoEdit(jobEdit[1]!, segmentIndex, prompt);
+    res.writeHead(202, {
+      ...securityHeaders(),
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(`${JSON.stringify(ctx.jobs.serialize(record, true), null, 2)}\n`);
     return;
   }
 

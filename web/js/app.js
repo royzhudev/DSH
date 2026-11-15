@@ -111,6 +111,7 @@ const state = {
   createTopic: "",
   createStory: "",
   pollTimer: null,
+  editTimer: null,
   uploadFile: null,
   castDenied: false,
   route: { name: "create" },
@@ -221,6 +222,10 @@ function clearPoll() {
   if (state.pollTimer) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
+  }
+  if (state.editTimer) {
+    clearInterval(state.editTimer);
+    state.editTimer = null;
   }
 }
 
@@ -1185,6 +1190,46 @@ function publishCardHtml(job) {
     </div></section>`;
 }
 
+function segmentEditStatusHtml(job) {
+  const edit = job.edit;
+  if (!edit) return "";
+  if (edit.status === "running") {
+    return `<div class="segment-edit-status running" id="segment-edit-status">${icon("wand", 15)}<span>正在局部修改分镜 ${esc(edit.segmentIndex)}：${esc(edit.prompt)}。完成后成片和播放器会自动刷新，请不要关闭页面。</span></div>`;
+  }
+  if (edit.status === "failed") {
+    return `<div class="segment-edit-status failed" id="segment-edit-status">${icon("alert", 15)}<span>分镜 ${esc(edit.segmentIndex)} 局部修改失败：${esc(edit.error ?? "未知错误")}。可以修改描述后重试。</span></div>`;
+  }
+  return `<div class="segment-edit-status" id="segment-edit-status">${icon("check", 15)}<span>分镜 ${esc(edit.segmentIndex)} 已局部修改：${esc(edit.prompt)}。成片已重新拼接，原台词音轨保持不变。</span></div>`;
+}
+
+function segmentEditDialogHtml() {
+  return `<dialog class="user-dialog" id="segment-edit-dialog">
+    <form id="segment-edit-form" novalidate>
+      <div class="dialog-head">
+        <div>
+          <div class="card-title">局部修改分镜</div>
+          <div class="card-sub" id="segment-edit-sub">用一句话说明要改哪里，画面模型只重绘这一镜</div>
+        </div>
+        <button class="icon-btn" type="button" id="close-segment-edit-dialog" aria-label="关闭">${icon("x", 16)}</button>
+      </div>
+      <div class="dialog-body">
+        <input type="hidden" id="segment-edit-index" value="" />
+        <div class="field">
+          <label for="segment-edit-prompt">修改要求</label>
+          <textarea class="textarea" id="segment-edit-prompt" rows="4" maxlength="2000" placeholder="例如：编辑视频，把男生手里的纸杯换成红色礼盒；保持人物、动作和镜头不变"></textarea>
+          <span class="hint">支持增删元素、替换服装/道具、改背景或风格。写清「改什么、保留什么」效果更稳；单镜需 2–10 秒。</span>
+        </div>
+        <div class="settings-note">${icon("info", 16)}<span>编辑只改画面，原分镜的台词音轨和字幕时间轴会保留；成片会自动重新拼接。光影或文字区域改动过大时可能出现轻微伪影。模型处理通常需要几分钟，请留在本页等待。</span></div>
+        <div class="dialog-error" id="segment-edit-error" hidden></div>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" id="cancel-segment-edit">取消</button>
+        <button class="btn btn-primary" type="submit" id="save-segment-edit">${icon("wand", 15)} 开始修改</button>
+      </div>
+    </form>
+  </dialog>`;
+}
+
 function scriptSectionHtml(job) {
   if (!job.segments?.length) return "";
   const cast = job.cast ?? [];
@@ -1206,6 +1251,7 @@ function scriptSectionHtml(job) {
             </div>`
           : ""
       }
+      ${segmentEditStatusHtml(job)}
       <div class="script-table">
         ${job.segments
           .map((segment) => {
@@ -1230,7 +1276,13 @@ function scriptSectionHtml(job) {
               <div class="visual">
                 <strong>画面来源</strong>
                 ${esc(visual)}
+                ${segment.edited ? `<div><span class="pill pill-brand">已局部修改</span></div>` : ""}
                 <div class="material-meta">${formatDuration(segment.durationSec)}</div>
+                ${
+                  job.state === "succeeded" && segment.renderedFile
+                    ? `<button class="btn btn-ghost btn-sm segment-edit-btn mt-8" type="button" data-seg="${esc(segment.index)}" ${job.edit?.status === "running" ? "disabled" : ""}>${icon("wand", 14)} 局部修改</button>`
+                    : ""
+                }
               </div>
             </div>`;
           })
@@ -1313,7 +1365,22 @@ function renderJobView() {
         ${succeeded ? publishCardHtml(job) : ""}
       </div>
     </div>
-    ${scriptSectionHtml(job)}`;
+    ${scriptSectionHtml(job)}
+    ${succeeded ? segmentEditDialogHtml() : ""}`;
+
+  document.querySelectorAll(".segment-edit-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      openSegmentEdit(job, Number(button.dataset.seg));
+    });
+  });
+  document.getElementById("close-segment-edit-dialog")?.addEventListener("click", closeSegmentEdit);
+  document.getElementById("cancel-segment-edit")?.addEventListener("click", closeSegmentEdit);
+  const editForm = document.getElementById("segment-edit-form");
+  editForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitSegmentEdit(job);
+  });
+  if (job.edit?.status === "running") startEditPolling(job.id);
 
   document.getElementById("connect-douyin")?.addEventListener("click", () => {
     void connectDouyin();
@@ -1328,6 +1395,99 @@ function renderJobView() {
     publishButton.addEventListener("click", () => {
       void publishJob(job);
     });
+  }
+}
+
+function openSegmentEdit(job, index) {
+  const segment = job.segments?.find((item) => Number(item.index) === index);
+  const dialog = document.getElementById("segment-edit-dialog");
+  if (!segment || !dialog) return;
+  document.getElementById("segment-edit-index").value = String(index);
+  document.getElementById("segment-edit-prompt").value = "";
+  const sub = document.getElementById("segment-edit-sub");
+  if (sub) sub.textContent = `分镜 ${index} · ${segment.narration || "无旁白"}`;
+  const error = document.getElementById("segment-edit-error");
+  if (error) error.hidden = true;
+  dialog.showModal();
+  document.getElementById("segment-edit-prompt")?.focus();
+}
+
+function closeSegmentEdit() {
+  document.getElementById("segment-edit-dialog")?.close();
+}
+
+async function submitSegmentEdit(job) {
+  const index = Number(document.getElementById("segment-edit-index")?.value);
+  const prompt = document.getElementById("segment-edit-prompt")?.value.trim() ?? "";
+  const error = document.getElementById("segment-edit-error");
+  if (error) error.hidden = true;
+  if (!prompt) {
+    if (error) {
+      error.textContent = "请填写要修改的内容";
+      error.hidden = false;
+    }
+    return;
+  }
+  const button = document.getElementById("save-segment-edit");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> 提交中…`;
+  }
+  try {
+    const updated = await api(`/api/videos/${job.id}/edit`, {
+      method: "POST",
+      body: { segmentIndex: index, prompt },
+    });
+    state.job = updated;
+    closeSegmentEdit();
+    renderJobView();
+    startEditPolling(job.id);
+    toast("已提交局部修改，正在重绘这一镜", "success");
+  } catch (err) {
+    if (error) {
+      error.textContent = err.message;
+      error.hidden = false;
+    }
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = `${icon("wand", 15)} 开始修改`;
+    }
+  }
+}
+
+function startEditPolling(id) {
+  if (state.editTimer) clearInterval(state.editTimer);
+  state.editTimer = setInterval(() => {
+    void pollEdit(id);
+  }, 2500);
+}
+
+async function pollEdit(id) {
+  try {
+    const job = await api(`/api/videos/${id}`);
+    if (state.route.name !== "job" || state.route.id !== id) {
+      clearInterval(state.editTimer);
+      state.editTimer = null;
+      return;
+    }
+    state.job = job;
+    if (job.edit?.status === "running") {
+      const status = document.getElementById("segment-edit-status");
+      if (status) {
+        status.innerHTML = `${icon("wand", 15)}<span>正在局部修改分镜 ${esc(job.edit.segmentIndex)}：${esc(job.edit.prompt)}。完成后成片和播放器会自动刷新，请不要关闭页面。</span>`;
+      }
+      return;
+    }
+    clearInterval(state.editTimer);
+    state.editTimer = null;
+    renderJobView();
+    void refreshJobBadge();
+    if (job.edit?.status === "succeeded") toast("局部修改完成，成片已重新拼接", "success");
+    else if (job.edit?.status === "failed") toast(job.edit.error || "局部修改失败", "error");
+  } catch (err) {
+    clearInterval(state.editTimer);
+    state.editTimer = null;
+    toast(err.message, "error");
   }
 }
 
@@ -2216,6 +2376,20 @@ async function renderPublish() {
       </section>
     </div>`;
 
+  document.querySelectorAll(".segment-edit-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      openSegmentEdit(job, Number(button.dataset.seg));
+    });
+  });
+  document.getElementById("close-segment-edit-dialog")?.addEventListener("click", closeSegmentEdit);
+  document.getElementById("cancel-segment-edit")?.addEventListener("click", closeSegmentEdit);
+  const editForm = document.getElementById("segment-edit-form");
+  editForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitSegmentEdit(job);
+  });
+  if (job.edit?.status === "running") startEditPolling(job.id);
+
   document.getElementById("connect-douyin")?.addEventListener("click", () => {
     void connectDouyin();
   });
@@ -2683,6 +2857,11 @@ async function renderSettings() {
               <input class="input" id="videogen-model" value="${attr(s.videoGen.model)}" placeholder="video-gen-1" />
             </div>
             <div class="field">
+              <label for="videogen-edit-model">局部编辑模型</label>
+              <input class="input" id="videogen-edit-model" value="${attr(s.videoGen.editModel)}" placeholder="wan2.7-videoedit" />
+              <span class="hint">成片详情里的「局部修改」用这个模型；百炼默认 wan2.7-videoedit。</span>
+            </div>
+            <div class="field">
               <label for="videogen-base-url">接口地址</label>
               <input class="input" id="videogen-base-url" value="${attr(s.videoGen.baseUrl)}" placeholder="https://api.example.com" />
             </div>
@@ -2902,6 +3081,7 @@ async function renderSettings() {
     set("videogen-protocol", "dashscope");
     set("videogen-base-url", "https://dashscope.aliyuncs.com");
     set("videogen-model", "wan3.0-video");
+    set("videogen-edit-model", "wan2.7-videoedit");
     set("videogen-submit-path", "/api/v1/services/aigc/video-generation/video-synthesis");
     set("videogen-poll-path", "/api/v1/tasks/{id}");
     set("videogen-poll-interval", "3000");
@@ -2983,6 +3163,7 @@ function collectSettings() {
   const videoGen = {
     provider: value("videogen-provider"),
     model: value("videogen-model").trim(),
+    editModel: value("videogen-edit-model").trim() || "wan2.7-videoedit",
     baseUrl: value("videogen-base-url").trim(),
     submitPath: value("videogen-submit-path").trim(),
     pollPath: value("videogen-poll-path").trim(),
