@@ -26,6 +26,19 @@ test("loadConfig 合并配置文件、环境变量和命令行覆盖", async () 
   assert.equal(config.libraryDir, path.join(dir, "materials"));
 });
 
+test("tts.enabled 默认开启，可在配置文件里关闭", async () => {
+  const dir = await makeTempDir();
+  const defaults = loadConfig({ cwd: dir, env: {} });
+  assert.equal(defaults.tts.enabled, true);
+  await fs.writeFile(
+    path.join(dir, "video-agent.config.json"),
+    JSON.stringify({ tts: { enabled: false, provider: "silent" } }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.tts.enabled, false);
+});
+
 test("loadConfig 拒绝不存在的显式配置文件", async () => {
   const dir = await makeTempDir();
   assert.throws(

@@ -61,6 +61,39 @@ const SHOT_VARIATIONS = [
   "俯拍，强化人物关系",
 ] as const;
 
+/** 配音关闭时按分镜时长估算字幕：对话按台词长度分配时间，旁白按标点分句。 */
+function nativeAudioCues(segment: ScriptSegment, durationSec: number, config: AppConfig): SubtitleCue[] {
+  const lines = segment.lines ?? [];
+  if (durationSec <= 0) return [];
+  const narration = lines.length > 0
+    ? lines.map((line) => `${line.speaker}：${line.text}`).join("\n")
+    : segment.narration;
+  let sentences: Array<{ text: string; startSec: number; endSec: number }>;
+  if (lines.length > 0) {
+    const texts = lines.map((line) => `${line.speaker}：${line.text}`);
+    const weights = texts.map((text) => Math.max(1, text.length));
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    let cursor = 0;
+    sentences = texts.map((text, index) => {
+      const startSec = cursor;
+      const endSec =
+        index === texts.length - 1
+          ? durationSec
+          : Math.min(durationSec, cursor + (durationSec * weights[index]!) / totalWeight);
+      cursor = endSec;
+      return { text, startSec, endSec };
+    });
+  } else {
+    sentences = estimateSentences(narration, durationSec);
+  }
+  return buildSubtitleCues({
+    narration,
+    sentences,
+    audioDurationSec: durationSec,
+    style: config.subtitles,
+  });
+}
+
 export interface RunPipelineOptions {
   topic: string;
   config: AppConfig;
@@ -468,16 +501,16 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       message: `脚本已生成，素材库共 ${materials.length} 条`,
     });
 
-    const ttsProvider = options.ttsProvider ?? createTtsProvider(config, config.cacheDir, logger);
+    // 配音总开关：关闭后不调用任何 TTS，改由画面模型在生成视频时直接产出同期声。
+    const useTts = config.tts.enabled;
+    const ttsProvider = useTts
+      ? (options.ttsProvider ?? createTtsProvider(config, config.cacheDir, logger))
+      : null;
     // 先按整条脚本收集说话人，一次性分配音色：同一角色跨分镜也保持同一个声音。
-    const allSpeakers = [
-      ...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker))),
-    ];
-    const dialogueVoices = assignVoicesForConfig(
-      allSpeakers,
-      cast,
-      config,
-    );
+    const allSpeakers = useTts
+      ? [...new Set(script.segments.flatMap((segment) => (segment.lines ?? []).map((line) => line.speaker)))]
+      : [];
+    const dialogueVoices = useTts ? assignVoicesForConfig(allSpeakers, cast, config) : new Map<string, string>();
     const plans: SegmentPlan[] = [];
     let cursor = 0;
     const totalSegments = script.segments.length;
@@ -485,6 +518,49 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     for (let index = 0; index < totalSegments; index += 1) {
       throwIfAborted(signal);
       const segment = script.segments[index]!;
+
+      if (!useTts) {
+        // 不配音：分镜时长先按脚本提示/总时长均分，画面生成后再以模型返回的真实时长为准。
+        const explicitCast = resolveCastNames(segment.cast, cast);
+        const inferredCast = explicitCast.length > 0 ? [] : inferSegmentCast(segment, cast);
+        if (inferredCast.length > 0) {
+          warnings.push(
+            `分镜 ${index + 1} 的脚本没有标明出场角色，已按角色库代入「${inferredCast.map((item) => item.name).join("、")}」。`,
+          );
+        }
+        const hint =
+          segment.durationHintSec ??
+          Math.ceil(config.script.targetDurationSec / Math.max(1, totalSegments));
+        const durationSec = round3(Math.max(config.video.minSegmentSec, Math.min(10, hint)));
+        const nativeTts: TtsResult = {
+          provider: "silent",
+          voice: "画面模型同期声",
+          audioPath: "",
+          durationSec,
+          sentences: [],
+          cached: false,
+        };
+        plans.push({
+          index,
+          segment,
+          material: null,
+          cast: explicitCast.length > 0 ? explicitCast : inferredCast,
+          tts: nativeTts,
+          durationSec,
+          cues: [],
+          startSec: round3(cursor),
+        });
+        cursor = round3(cursor + durationSec);
+        report({
+          stage: "tts",
+          percent: Math.round(15 + ((index + 1) / totalSegments) * 35),
+          message: `分镜 ${index + 1}/${totalSegments} 由画面模型生成同期声`,
+        });
+        continue;
+      }
+      if (!ttsProvider) {
+        throw new AppError("配音模块已启用但供应商未创建", { code: "CONFIG_INVALID" });
+      }
 
       const dialogueLines = segment.lines ?? [];
       let tts: TtsResult;
@@ -577,7 +653,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           logger.warn(`分镜 ${index + 1} 人声后期处理失败：${toErrorMessage(error)}`);
         }
       }
-      if (config.tts.provider !== "silent" && tts.provider === "silent") {
+      if (useTts && config.tts.provider !== "silent" && tts.provider === "silent") {
         warnings.push(`分镜 ${index + 1} 配音失败，已回退为静音占位（详见服务日志）。`);
       }
       const durationSec = round3(
@@ -617,6 +693,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       options.videoGenProvider === undefined
         ? createVideoGenProvider(config, logger)
         : options.videoGenProvider;
+    if (!useTts && !videoGen) {
+      warnings.push(
+        "配音模块已关闭，但本次没有启用 AI 画面生成，成片将没有角色台词声音；请同时启用画面生成（需模型支持音频），或重新打开配音模块。",
+      );
+    }
     const castCharacters = cast.filter((asset) => asset.kind === "character");
     const plansWithCast = plans.filter((plan) => plan.cast.some((asset) => asset.kind === "character"));
     if (!videoGen && castCharacters.length > 0) {
@@ -671,6 +752,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           segment: plan.segment,
           cast: plan.cast,
           ...(variation ? { variation } : {}),
+          ...(useTts ? {} : { nativeAudio: true }),
         });
         logger.info(
           `分镜 ${index + 1}/${plans.length} 画面提示词：${shotPrompt.split("\n")[1] ?? shotPrompt.slice(0, 40)}`,
@@ -732,6 +814,38 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       }
     }
 
+    if (!useTts) {
+      // 画面模型生成的片段就是最终时长和音轨来源：以真实时长重排本镜字幕。
+      let clipsWithoutAudio = 0;
+      for (const plan of plans) {
+        if (plan.generated?.file) {
+          try {
+            const clip = await probeMedia(plan.generated.file);
+            if (clip.durationSec && clip.durationSec > 0) {
+              plan.durationSec = round3(Math.max(config.video.minSegmentSec, clip.durationSec));
+              plan.tts = { ...plan.tts, durationSec: plan.durationSec };
+            }
+            if (!clip.hasAudio) clipsWithoutAudio += 1;
+          } catch {
+            // 读不出时长就沿用脚本估算时长
+          }
+        } else {
+          clipsWithoutAudio += 1;
+        }
+        plan.cues = nativeAudioCues(plan.segment, plan.durationSec, config);
+      }
+      if (clipsWithoutAudio > 0) {
+        warnings.push(
+          `配音模块已关闭，但有 ${clipsWithoutAudio} 个分镜的画面没有音轨，这些分镜会以静音呈现；请确认画面模型支持音频，或重新打开配音模块。`,
+        );
+      }
+      let nativeCursor = 0;
+      for (const plan of plans) {
+        plan.startSec = round3(nativeCursor);
+        nativeCursor = round3(nativeCursor + plan.durationSec);
+      }
+    }
+
     report({
       stage: "materials",
       percent: 65,
@@ -748,7 +862,10 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     if (config.lipsync.provider === "dashscope" && !config.lipsync.apiKey) {
       warnings.push("口型同步已选择百炼 VideoRetalk，但还没有填写 API Key，本次跳过口型同步。");
     }
-    if (lipsyncProvider) {
+    if (!useTts && lipsyncProvider) {
+      warnings.push("配音模块已关闭，角色声音由画面模型生成，已自动跳过额外的口型同步。");
+    }
+    if (lipsyncProvider && useTts) {
       warnings.push(
         "口型同步会按成片时长计费（百炼 VideoRetalk 0.08 元/秒），且只在分镜含台词、画面有人物时生效。",
       );
@@ -768,6 +885,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         message: `剪辑分镜 ${index + 1}/${plans.length}`,
       });
       const willSync =
+        useTts &&
         Boolean(lipsyncProvider) &&
         Boolean(plan.lines && plan.lines.length > 0) &&
         plan.durationSec > 2 &&
@@ -787,6 +905,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         logger,
         // 口型同步会把整帧重新生成，先不烧字幕，同步后再补，避免文字被模型重绘。
         ...(willSync ? { burnSubtitles: false } : {}),
+        ...(useTts ? {} : { keepSourceAudio: true }),
       });
       let segmentFile = result.file;
       // 口型结果按分镜序号记录，供 result.json 展示。
@@ -930,6 +1049,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         : null,
       voice: plan.tts.voice,
       ttsProvider: plan.tts.provider,
+      audioSource: useTts ? "tts" : "video",
       ...(plan.renderedFile ? { renderedFile: plan.renderedFile } : {}),
       ...(plan.renderedSha256 ? { renderedSha256: plan.renderedSha256 } : {}),
       ...(segmentLipsync.has(plan.index) ? { lipsync: segmentLipsync.get(plan.index) } : {}),

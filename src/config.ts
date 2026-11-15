@@ -33,6 +33,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     fallbackToOffline: true,
   },
   tts: {
+    enabled: true,
     provider: "edge",
     voice: "zh-CN-XiaoxiaoNeural",
     rate: 1.0,
@@ -199,6 +200,7 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     envBoolean(env, "SCRIPT_FALLBACK_OFFLINE"),
   );
 
+  config.tts.enabled = set(config.tts.enabled, envBoolean(env, "TTS_ENABLED"));
   const ttsProvider = envString(env, "TTS_PROVIDER") as TtsProviderName | undefined;
   if (ttsProvider) config.tts.provider = ttsProvider;
   config.tts.voice = set(config.tts.voice, envString(env, "TTS_VOICE"));
@@ -331,7 +333,7 @@ function validateConfig(config: AppConfig): void {
       { code: "CONFIG_MISSING_API_KEY" },
     );
   }
-  if (config.tts.provider === "openai" && !config.tts.apiKey) {
+  if (config.tts.enabled && config.tts.provider === "openai" && !config.tts.apiKey) {
     throw new AppError(
       "配音供应商为 openai 但未配置 TTS_API_KEY（或 OPENAI_API_KEY）。也可以改用 edge 或 silent。",
       { code: "CONFIG_MISSING_API_KEY" },

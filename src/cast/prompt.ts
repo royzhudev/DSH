@@ -9,6 +9,8 @@ export interface ShotPromptInput {
   cast: CastAsset[];
   /** 与上一镜区分用的机位/构图提示；相邻分镜场景镜头相同时由流水线补上。 */
   variation?: string;
+  /** 配音关闭时，要求画面模型直接生成台词同期声（模型需支持音频）。 */
+  nativeAudio?: boolean;
 }
 
 const STYLE_SUFFIX = "竖屏 9:16，真实拍摄质感，电影感构图，光线自然，镜头稳定，无文字水印。";
@@ -29,7 +31,7 @@ function castLine(asset: CastAsset): string {
  * 配合参考图（图生视频）让后续镜头延续同一形象。
  */
 export function buildShotPrompt(input: ShotPromptInput): string {
-  const { topic, index, total, segment, cast, variation } = input;
+  const { topic, index, total, segment, cast, variation, nativeAudio } = input;
   const scene = segment.scene?.trim();
   const shot = segment.shot?.trim();
   // 分镜内容一定要进提示词：相邻分镜的 scene/shot 写得很像时，
@@ -46,6 +48,9 @@ export function buildShotPrompt(input: ShotPromptInput): string {
     shot ? `镜头：${shot}。` : "",
     content ? `本镜内容：${content}。` : "",
     variation ? `本镜构图：${variation}。` : "",
+    nativeAudio
+      ? "同期声：本镜由画面模型直接生成中文语音，角色按本镜台词自然说话，口型与语音同步，保留环境声；不要添加字幕、文字或旁白配音。"
+      : "",
     "不要重复上一镜的画面与机位；每个分镜必须呈现新的动作或信息。" ,
     ...cast.map(castLine),
     cast.length > 0
