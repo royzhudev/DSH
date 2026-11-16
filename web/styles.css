@@ -2755,3 +2755,47 @@ body.auth-locked .app-shell {
   font-size: 11px;
   font-weight: 600;
 }
+
+/* ---------- 分镜局部修改 ---------- */
+.segment-edit-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.segment-edit-status svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--brand);
+}
+
+.segment-edit-status.running {
+  border-color: color-mix(in srgb, var(--brand) 35%, var(--line));
+  background: var(--brand-soft);
+}
+
+.segment-edit-status.failed {
+  border-color: color-mix(in srgb, #d94a4a 35%, var(--line));
+  background: #fff4f4;
+  color: #8a2020;
+}
+
+.segment-edit-status.failed svg {
+  color: #d94a4a;
+}
+
+.segment-edit-btn {
+  white-space: nowrap;
+}
+
+.segment-edit-btn:disabled {
+  opacity: 0.55;
+}

@@ -15,6 +15,7 @@
 - **AI 画面生成（可选）**：通过通用 HTTP 文生视频 / 图生视频接口为分镜生成画面；有角色参考图时自动携带 `image` 与 `reference_images`，失败时按配置回退素材库或渐变背景。
 - **预检与费用保护**：任务入队前与流水线开始前做本地预检（配置、密钥、剧本长度、参考图、目录可写、ffmpeg），问题一次性列出并标明阶段，不会先扣费再报错；离线脚本、静音配音、画面回退等降级会在任务详情里显式告警。
 - **测试视频**：设置页输入几句提示词，选择 3 秒或 5 秒，真实生成一条测试视频并内嵌播放，正式出片前先确认模型效果。
+- **成片局部修改**：任务完成后可以在分镜脚本里对任意一镜点「局部修改」，用一句话描述要改的元素（增删道具、换服装/背景、改风格等），平台调用百炼 `wan2.7-videoedit` 只重绘这一镜，保留原台词音轨和字幕时间轴，自动重新拼接成片；单镜需 2–10 秒、成片帧率至少 16fps。
 - **规则化自动剪辑**：每个分镜时长由配音时长决定，素材自动铺满 9:16 画幅，字幕烧录，分镜间统一淡入淡出转场，最后拼接为成片。
 - **抖音授权发布**：OAuth 授权、令牌自动刷新、上传成片并创建抖音作品；发布历史保存在本地。
 - **模型配置**：网页设置页可修改脚本、配音、AI 画面、视频/字幕、素材与抖音参数，保存到 `data/settings.json`，新任务生效。
@@ -214,6 +215,8 @@ GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
 轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态。百炼/万相 3.0 的分镜会带上角色库参考图：`media[type=reference_image]`（最多 10 张），没有参考图时才用 `media[type=first_frame]` 首帧——首帧和参考图在平台上互斥，同一请求不能混用；早期 Wan 模型仍走 `input.img_url`。
 
 > **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
+>
+> 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`（设置页「AI 画面生成 → 局部编辑模型」可改），走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。
 >
 > 接入步骤：设置 → AI 画面生成 → 点「一键填入百炼 Wan 3.0 默认值」→ 填 API Key → 保存设置 → 点「生成测试视频」。默认值为：接口协议「阿里百炼 DashScope」、接口地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。
 >

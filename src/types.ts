@@ -160,6 +160,9 @@ export interface SegmentResult {
   };
   /** 该分镜实际进入拼接的渲染文件（相对任务目录）。 */
   renderedFile?: string;
+  /** 是否被局部编辑过；保留最后一次编辑指令便于追溯。 */
+  edited?: boolean;
+  editPrompt?: string;
   /** 渲染文件内容哈希，用于核对是否把重复片段拼进了成片。 */
   renderedSha256?: string;
 }
@@ -318,6 +321,8 @@ export interface VideoGenSettings {
   protocol: "auto" | "dashscope" | "generic";
   apiKey?: string;
   model: string;
+  /** 已生成分镜的局部编辑模型；默认 wan2.7-videoedit。 */
+  editModel: string;
   /** 提交任务路径，默认 /v1/videos/generations。 */
   submitPath: string;
   /** 查询任务路径模板，{id} 会替换为任务 ID。 */

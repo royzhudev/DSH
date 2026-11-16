@@ -1,3 +1,5 @@
+import path from "node:path";
+import fsp from "node:fs/promises";
 import { TTS_PROVIDER_NAMES } from "../types.js";
 import type {
   AppConfig,
@@ -15,8 +17,31 @@ import type { Logger } from "../logger.js";
 import { createJobId, runPipeline } from "../pipeline.js";
 import { AppError, toErrorMessage } from "../errors.js";
 import { STORY_MAX_LENGTH } from "../preflight.js";
+import { concatSegments } from "../render/concat.js";
+import { extractPoster } from "../media/ffmpeg.js";
+import { DashScopeVideoEditProvider } from "../videoedit/dashscope.js";
+import type { VideoEditRequest, VideoEditResult } from "../videoedit/dashscope.js";
+import { sha256 } from "../util/fs.js";
 
 export type JobState = "queued" | "running" | "succeeded" | "failed";
+
+export interface JobVideoEditProvider {
+  edit(request: VideoEditRequest): Promise<VideoEditResult>;
+}
+
+export type VideoEditProviderFactory = (
+  settings: AppConfig["videoGen"],
+  logger: Logger,
+) => JobVideoEditProvider;
+
+export interface VideoEditState {
+  status: "running" | "succeeded" | "failed";
+  segmentIndex: number;
+  prompt: string;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+}
 
 export interface JobRecord {
   id: string;
@@ -33,6 +58,8 @@ export interface JobRecord {
   errorStage?: JobStage;
   /** 任务创建时的配置快照，保证运行期间设置变更不影响本任务。 */
   config: AppConfig;
+  /** 最近一次分镜局部编辑的状态。 */
+  edit?: VideoEditState;
 }
 
 export interface SerializedJob {
@@ -58,6 +85,7 @@ export interface SerializedJob {
   warnings?: string[];
   segments?: SegmentResult[];
   video?: VideoInfo;
+  edit?: VideoEditState;
 }
 
 
@@ -149,6 +177,8 @@ export class JobManager {
   constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
+    private readonly videoEditFactory: VideoEditProviderFactory = (settings, logger) =>
+      new DashScopeVideoEditProvider(settings, logger),
   ) {}
 
   create(topic: string, options: JobOptions = {}): JobRecord {
@@ -183,6 +213,8 @@ export class JobManager {
 
   serialize(record: JobRecord, detail = false): SerializedJob {
     const base = `/api/videos/${record.id}`;
+    // 局部修改后给播放器地址加版本号，避免浏览器继续用旧成片缓存。
+    const version = record.edit?.finishedAt ? `?v=${encodeURIComponent(record.edit.finishedAt)}` : "";
     return {
       id: record.id,
       topic: record.topic,
@@ -193,13 +225,15 @@ export class JobManager {
       startedAt: record.startedAt,
       finishedAt: record.finishedAt,
       durationSec: record.result?.durationSec,
-      videoUrl: record.state === "succeeded" ? `${base}/video` : undefined,
-      posterUrl: record.state === "succeeded" && record.result?.posterPath ? `${base}/poster` : undefined,
+      videoUrl: record.state === "succeeded" ? `${base}/video${version}` : undefined,
+      posterUrl:
+        record.state === "succeeded" && record.result?.posterPath ? `${base}/poster${version}` : undefined,
       subtitlesUrl: record.state === "succeeded" ? `${base}/subtitles` : undefined,
       scriptUrl: record.state === "succeeded" ? `${base}/script` : undefined,
       resultUrl: record.state === "succeeded" ? `${base}/result` : undefined,
       error: record.error,
       errorStage: record.errorStage,
+      edit: record.edit,
       ...(detail && record.result
         ? {
             script: record.result.script,
@@ -211,6 +245,113 @@ export class JobManager {
           }
         : {}),
     };
+  }
+
+  /**
+   * 对一个已完成任务的分镜做局部修改：调用视频编辑模型重绘画面，保留原音轨，
+   * 再用新的分镜重新拼接成片。编辑是异步的，接口先返回 202，前端轮询任务详情。
+   */
+  startVideoEdit(id: string, segmentIndex: number, prompt: string): JobRecord {
+    const record = this.jobs.get(id);
+    if (!record) {
+      throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+    }
+    if (record.state !== "succeeded" || !record.result) {
+      throw new AppError("只有已生成完成的任务才能局部修改", { code: "JOB_NOT_EDITABLE", status: 409 });
+    }
+    if (record.edit?.status === "running") {
+      throw new AppError("这个任务正在局部修改，请等当前修改完成", { code: "JOB_EDIT_RUNNING", status: 409 });
+    }
+    const segment = record.result.segments[segmentIndex - 1];
+    if (!segment?.renderedFile) {
+      throw new AppError("找不到要修改的分镜", { code: "JOB_SEGMENT_NOT_FOUND", status: 404 });
+    }
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      throw new AppError("请填写局部修改要求", { code: "JOB_EDIT_PROMPT_EMPTY", status: 400 });
+    }
+    if (trimmed.length > 2000) {
+      throw new AppError("局部修改要求不能超过 2000 字", { code: "JOB_EDIT_PROMPT_TOO_LONG", status: 400 });
+    }
+    record.edit = {
+      status: "running",
+      segmentIndex,
+      prompt: trimmed,
+      startedAt: new Date().toISOString(),
+    };
+    void this.runVideoEdit(record, segmentIndex, trimmed);
+    return record;
+  }
+
+  private async runVideoEdit(record: JobRecord, segmentIndex: number, prompt: string): Promise<void> {
+    const result = record.result;
+    if (!result) return;
+    const jobDir = path.dirname(result.videoPath);
+    const segment = result.segments[segmentIndex - 1];
+    try {
+      if (!segment?.renderedFile) throw new AppError("找不到要修改的分镜", { code: "JOB_SEGMENT_NOT_FOUND" });
+      const sourceFile = path.resolve(jobDir, segment.renderedFile);
+      if (!sourceFile.startsWith(`${jobDir}${path.sep}`)) {
+        throw new AppError("分镜文件路径异常", { code: "JOB_SEGMENT_NOT_FOUND" });
+      }
+      const editsDir = path.join(jobDir, "edits");
+      await fsp.mkdir(editsDir, { recursive: true });
+      const outputFile = path.join(editsDir, `segment-${String(segmentIndex).padStart(2, "0")}-${Date.now()}.mp4`);
+      const provider = this.videoEditFactory(record.config.videoGen, this.logger);
+      this.logger.info(`开始局部修改任务 ${record.id} 分镜 ${segmentIndex}：${prompt}`);
+      const edited = await provider.edit({
+        sourceFile,
+        prompt,
+        outputFile,
+        durationSec: segment.durationSec,
+        config: record.config,
+        logger: this.logger,
+      });
+
+      const segmentFiles = result.segments.map((item, index) => {
+        if (index === segmentIndex - 1) return edited.file;
+        if (!item.renderedFile) throw new AppError("有分镜缺少渲染文件，无法重新拼接", { code: "JOB_SEGMENT_NOT_FOUND" });
+        return path.resolve(jobDir, item.renderedFile);
+      });
+      const tempFinal = path.join(jobDir, `final-edit-${Date.now()}.mp4`);
+      const durationSec = await concatSegments({
+        segmentFiles,
+        outputFile: tempFinal,
+        jobDir,
+        config: record.config,
+        logger: this.logger,
+      });
+      await fsp.rename(tempFinal, result.videoPath);
+      const posterFile = result.posterPath ?? path.join(jobDir, "poster.jpg");
+      await extractPoster(result.videoPath, posterFile)
+        .then(() => {
+          result.posterPath = posterFile;
+        })
+        .catch((error) => {
+          this.logger.warn(`局部修改后更新封面失败（不影响成片）：${toErrorMessage(error)}`);
+        });
+
+      segment.renderedFile = path.relative(jobDir, edited.file).split(path.sep).join("/");
+      segment.renderedSha256 = sha256((await fsp.readFile(edited.file)).toString("base64"));
+      segment.edited = true;
+      segment.editPrompt = prompt;
+      result.durationSec = durationSec;
+      await fsp.writeFile(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2), "utf8");
+      record.edit = {
+        ...record.edit!,
+        status: "succeeded",
+        finishedAt: new Date().toISOString(),
+      };
+      this.logger.info(`局部修改完成：${record.id} 分镜 ${segmentIndex}`);
+    } catch (error) {
+      record.edit = {
+        ...record.edit!,
+        status: "failed",
+        error: toErrorMessage(error),
+        finishedAt: new Date().toISOString(),
+      };
+      this.logger.error(`局部修改失败：${record.id} 分镜 ${segmentIndex}`, error);
+    }
   }
 
   private async drain(): Promise<void> {

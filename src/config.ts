@@ -65,6 +65,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     protocol: "auto",
     baseUrl: "https://dashscope.aliyuncs.com",
     model: "wan3.0-video",
+    editModel: "wan2.7-videoedit",
     submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
     pollPath: "/api/v1/tasks/{id}",
     pollIntervalMs: 3000,
