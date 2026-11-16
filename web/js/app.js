@@ -1779,7 +1779,15 @@ function castThumb(asset) {
   return `<img loading="lazy" src="${attr(asset.imageUrl)}?v=${version}" alt="${attr(asset.name)}" />`;
 }
 
-function castCardHtml(asset) {
+function castCardHtml(asset, imageGenReady = false) {
+  const canGenerate = imageGenReady && Boolean(asset.description?.trim());
+  const generateHint = !imageGenReady
+    ? "先在「设置 → AI 角色图生成」填写 API Key"
+    : !asset.description?.trim()
+      ? "先补充外观设定"
+      : asset.imageFile
+        ? "按外观设定重新生成参考图（会覆盖当前参考图）"
+        : "按外观设定生成参考图";
   const meta = [
     asset.imageFile ? "参考图已上传" : "仅文字设定",
     asset.width && asset.height ? `${asset.width}×${asset.height}` : "",
@@ -1795,6 +1803,7 @@ function castCardHtml(asset) {
       <div class="material-title" title="${attr(asset.name)}">${esc(asset.name)}</div>
       <p class="cast-desc">${esc(asset.description || "（未填写外观设定，建议补充）")}</p>
       <div class="material-meta">${esc(meta)}</div>
+      <button class="btn btn-ghost btn-sm cast-generate-btn" type="button" data-generate-cast="${attr(asset.id)}" ${canGenerate ? "" : "disabled"} title="${attr(generateHint)}">${icon("wand", 14)} 按外观生成参考图</button>
     </div>
     <div class="material-foot">
       <div class="cast-actions">
@@ -1822,7 +1831,7 @@ function voiceSourcePrefix(voiceCatalog) {
   return `音色列表来自设置里的 ${provider}${model}；`;
 }
 
-function castUploadCardHtml(voiceCatalog = null) {
+function castUploadCardHtml(voiceCatalog = null, imageGenReady = false) {
   const castVoiceOptions = voiceCatalog?.voices?.length
     ? voiceCatalog.voices
     : EDGE_VOICES.map(([value, label]) => ({ value, label }));
@@ -1872,6 +1881,7 @@ function castUploadCardHtml(voiceCatalog = null) {
         <small id="cast-drop-hint">支持 jpg / png / webp，可选；没有参考图时只做文字一致性</small>
         <input type="file" id="cast-file-input" accept="image/*,.jpg,.jpeg,.png,.webp" />
       </div>
+      <span class="hint">${imageGenReady ? "也可以先添加，再在卡片上点「按外观生成参考图」让 AI 出一张；两种方式可以随时替换。" : "也可以先添加，之后在「设置 → AI 角色图生成」填好 API Key，再在卡片上一键生成参考图。"}</span>
       <div class="actions">
         <button class="btn btn-primary" id="cast-add-btn" type="button" disabled>${icon("plus", 16)} 添加</button>
       </div>
@@ -1988,6 +1998,29 @@ async function saveCastEdit() {
   }
 }
 
+async function generateCastImage(id, button) {
+  const asset = (state.cast ?? []).find((item) => item.id === id);
+  if (!asset) return;
+  if (!asset.description?.trim()) {
+    toast("请先补充外观设定，AI 需要根据设定生成参考图", "error");
+    return;
+  }
+  if (asset.imageFile && !window.confirm(`「${asset.name}」已有参考图，生成会覆盖它，继续吗？`)) return;
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = `<span class="spinner"></span> 生成中，约需半分钟…`;
+  try {
+    const data = await api(`/api/cast/${id}/image/generate`, { method: "POST" });
+    state.cast = (state.cast ?? []).map((item) => (item.id === id ? data.cast : item));
+    toast("参考图已生成", "success");
+    await renderCast();
+  } catch (error) {
+    toast(error.message, "error");
+    button.disabled = false;
+    button.innerHTML = original;
+  }
+}
+
 async function deleteCast(id) {
   const asset = (state.cast ?? []).find((item) => item.id === id);
   if (!asset) return;
@@ -2050,6 +2083,7 @@ async function renderCast() {
   if (state.route.name !== "cast") return;
   const cast = data.cast ?? [];
   state.cast = cast;
+  const imageGenReady = state.settings?.imageGen?.provider === "bailian" && Boolean(state.settings?.imageGen?.apiKeySet);
   // 每次都按设置里保存的供应商/模型重新拉一次，避免角色库停留在旧模型的音色列表。
   const voiceCatalog = await loadVoiceCatalog(
     true,
@@ -2062,14 +2096,14 @@ async function renderCast() {
       <h2>角色与道具</h2>
       <p>给人物和关键物品建立设定与参考图。生成短剧时，同一角色/道具会复用同一套外观描述和参考图，保证跨镜头、甚至跨视频延续同一形象。</p>
     </section>
-    ${castUploadCardHtml(voiceCatalog)}
+    ${castUploadCardHtml(voiceCatalog, imageGenReady)}
     <div class="materials-toolbar mt-24">
       <span class="muted small">共 ${cast.length} 个设定${cast.filter((asset) => asset.imageFile).length ? ` · ${cast.filter((asset) => asset.imageFile).length} 个有参考图` : ""}</span>
       <a class="btn btn-ghost btn-sm" href="#/create">${icon("plus", 15)} 去创作</a>
     </div>
     ${
       cast.length
-        ? `<div class="material-grid">${cast.map(castCardHtml).join("")}</div>`
+        ? `<div class="material-grid">${cast.map((asset) => castCardHtml(asset, imageGenReady)).join("")}</div>`
         : emptyState("users", "还没有角色或道具", "添加人物或物品的参考图与外观设定，之后的分镜会保持同一形象。")
     }
     <input type="file" id="cast-image-input" accept="image/*,.jpg,.jpeg,.png,.webp" hidden />
@@ -2201,6 +2235,11 @@ async function renderCast() {
 
   for (const button of view.querySelectorAll("[data-edit-cast]")) {
     button.addEventListener("click", () => openCastDialog(button.dataset.editCast));
+  }
+  for (const button of view.querySelectorAll("[data-generate-cast]")) {
+    button.addEventListener("click", () => {
+      void generateCastImage(button.dataset.generateCast, button);
+    });
   }
   for (const button of view.querySelectorAll("[data-delete-cast]")) {
     button.addEventListener("click", () => {
@@ -2932,6 +2971,52 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
+          <div><div class="card-title">AI 角色图生成</div><div class="card-sub">按外貌设定生成角色/道具参考图，也可以继续手动上传</div></div>
+          <span class="pill ${s.imageGen.provider === "bailian" && s.imageGen.apiKeySet ? "pill-brand" : "pill-soft"}">${s.imageGen.provider === "bailian" ? (s.imageGen.apiKeySet ? "已启用" : "待填 Key") : "未启用"}</span>
+        </div>
+        <div class="card-body">
+          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼 Qwen-Image</strong>，模型、尺寸、负向提示词和提示词改写都已预置；填好 API Key 后，角色库每张卡片的「按外观生成参考图」即可直接调用。接口地址留空会沿用上面的 AI 画面地址，通常只需要填 Key。</span></div>
+          <div class="field-grid-3">
+            <div class="field">
+              <label for="imagegen-provider">供应商</label>
+              <select class="select" id="imagegen-provider">
+                ${options([["bailian", "阿里百炼 Qwen-Image"], ["none", "不使用"]], s.imageGen.provider)}
+              </select>
+            </div>
+            <div class="field">
+              <label for="imagegen-model">模型</label>
+              <input class="input" id="imagegen-model" value="${attr(s.imageGen.model)}" placeholder="qwen-image-2.0-pro" />
+              <span class="hint">百炼当前主流；也可换成 qwen-image-3.0 等兼容模型</span>
+            </div>
+            <div class="field">
+              <label for="imagegen-size">输出尺寸</label>
+              <input class="input" id="imagegen-size" value="${attr(s.imageGen.size)}" placeholder="1152*1536" />
+              <span class="hint">宽*高，总像素 512×512 到 2048×2048</span>
+            </div>
+          </div>
+          ${secretField("imagegen-api-key", "图像生成 API Key", { set: s.imageGen.apiKeySet, hint: s.imageGen.apiKeyHint })}
+          <div class="field">
+            <label for="imagegen-base-url">接口地址 <span class="optional">留空沿用 AI 画面地址</span></label>
+            <input class="input" id="imagegen-base-url" value="${attr(s.imageGen.baseUrl)}" placeholder="https://dashscope.aliyuncs.com" />
+          </div>
+          <div class="field">
+            <label for="imagegen-negative">负向提示词 <span class="optional">可选</span></label>
+            <textarea class="textarea" id="imagegen-negative" rows="2" maxlength="1000">${esc(s.imageGen.negativePrompt)}</textarea>
+            <span class="hint">预置了低画质、畸形手指、过度光滑等常见问题；留空表示不发送</span>
+          </div>
+          ${switchField("imagegen-prompt-extend", "自动改写提示词", s.imageGen.promptExtend)}
+          <div class="field-grid-2">
+            ${numberField("imagegen-timeout", "超时（毫秒）", s.imageGen.timeoutMs, { min: 10000, max: 600000, step: 1000 })}
+          </div>
+          <div class="test-row">
+            <button class="btn btn-ghost btn-sm" type="button" id="imagegen-preset">填入百炼 Qwen-Image 默认值</button>
+            <span class="hint" id="imagegen-preset-hint">会把供应商、模型、尺寸、负向提示词恢复成百炼推荐值；填入后点「保存设置」</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card settings-card">
+        <div class="card-head">
           <div><div class="card-title">视频与字幕</div><div class="card-sub">输出画幅、编码与字幕样式</div></div>
         </div>
         <div class="card-body">
@@ -3091,6 +3176,22 @@ async function renderSettings() {
     if (hint) hint.textContent = "已填入百炼 Wan 3.0 默认值，点「保存设置」后即可测试";
   });
 
+  document.getElementById("imagegen-preset")?.addEventListener("click", () => {
+    const set = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value;
+    };
+    set("imagegen-provider", "bailian");
+    set("imagegen-model", "qwen-image-2.0-pro");
+    set("imagegen-size", "1152*1536");
+    set("imagegen-negative", "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。");
+    const extend = document.getElementById("imagegen-prompt-extend");
+    if (extend) extend.checked = true;
+    set("imagegen-timeout", "300000");
+    const hint = document.getElementById("imagegen-preset-hint");
+    if (hint) hint.textContent = "已填入百炼 Qwen-Image 默认值，点「保存设置」后即可在角色库生成";
+  });
+
   for (const button of view.querySelectorAll("[data-test]")) {
     button.addEventListener("click", () => {
       void testProvider(button.dataset.test, button);
@@ -3177,6 +3278,18 @@ function collectSettings() {
   const videoGenKey = secret("videogen-api-key");
   if (videoGenKey !== undefined) videoGen.apiKey = videoGenKey;
 
+  const imageGen = {
+    provider: value("imagegen-provider"),
+    model: value("imagegen-model").trim() || "qwen-image-2.0-pro",
+    size: value("imagegen-size").trim() || "1152*1536",
+    baseUrl: value("imagegen-base-url").trim(),
+    negativePrompt: value("imagegen-negative").trim(),
+    promptExtend: checked("imagegen-prompt-extend"),
+    timeoutMs: number("imagegen-timeout"),
+  };
+  const imageGenKey = secret("imagegen-api-key");
+  if (imageGenKey !== undefined) imageGen.apiKey = imageGenKey;
+
   const lipsyncEnabled = checked("lipsync-enabled");
   const lipsyncProvider = value("lipsync-provider");
   const lipsync = {
@@ -3205,6 +3318,7 @@ function collectSettings() {
     script,
     tts,
     videoGen,
+    imageGen,
     lipsync,
     video: {
       width: number("video-width"),

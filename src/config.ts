@@ -74,6 +74,18 @@ export const DEFAULT_CONFIG: AppConfig = {
     resultPath: "",
     fallbackToMaterials: true,
   },
+  imageGen: {
+    // 角色参考图默认接阿里百炼 Qwen-Image；只填 API Key 即可，地址留空沿用画面生成地址。
+    provider: "bailian",
+    baseUrl: "",
+    apiKey: undefined,
+    model: "qwen-image-2.0-pro",
+    size: "1152*1536",
+    negativePrompt:
+      "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",
+    promptExtend: true,
+    timeoutMs: 300_000,
+  },
   lipsync: {
     // 总开关默认打开，但供应商默认 none，因此默认不会调用；
     // 选好百炼 VideoRetalk 并填 Key 后才真正生效，关掉总开关则完全跳过。
@@ -117,6 +129,11 @@ const VIDEO_GEN_PROVIDERS = ["none", "http"] as const;
 /** AI 画面是否真的可用：启用了 HTTP 供应商并且填写了 API Key，否则走素材库。 */
 export function isAiVideoEnabled(videoGen: AppConfig["videoGen"]): boolean {
   return videoGen.provider === "http" && Boolean(videoGen.apiKey);
+}
+
+/** 角色参考图生成是否可用：选择百炼并填写 API Key。 */
+export function isImageGenEnabled(imageGen: AppConfig["imageGen"]): boolean {
+  return imageGen.provider === "bailian" && Boolean(imageGen.apiKey);
 }
 const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic"] as const;
 

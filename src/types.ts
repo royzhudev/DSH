@@ -356,6 +356,22 @@ export interface ServerSettings {
   maxUploadBytes: number;
 }
 
+/** 角色/道具参考图的文生图供应商；独立于视频模型，可单独填 Key。 */
+export type ImageGenProviderName = "none" | "bailian";
+
+export interface ImageGenSettings {
+  provider: ImageGenProviderName;
+  /** 留空时沿用 videoGen.baseUrl，再回退到 DashScope 默认地址。 */
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  /** 输出尺寸，格式 width*height。 */
+  size: string;
+  negativePrompt: string;
+  promptExtend: boolean;
+  timeoutMs: number;
+}
+
 export interface AppConfig {
   outputDir: string;
   workDir: string;
@@ -371,6 +387,7 @@ export interface AppConfig {
   subtitles: SubtitleStyle;
   materials: MaterialSettings;
   videoGen: VideoGenSettings;
+  imageGen: ImageGenSettings;
   lipsync: LipsyncSettings;
   douyin: DouyinSettings;
   server: ServerSettings;

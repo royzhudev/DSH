@@ -32,6 +32,7 @@ import {
   selectCastAssets,
   type UpdateCastOptions,
 } from "../cast/library.js";
+import { generateCastImage } from "../cast/imagegen.js";
 import { STORY_MAX_LENGTH, preflightScript, preflightVideoJob } from "../preflight.js";
 import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
@@ -132,6 +133,7 @@ interface ServerContext {
   publishes: PublishStore;
   webDir: string;
   pendingStates: Map<string, number>;
+  fetchImpl?: typeof fetch;
 }
 
 function securityHeaders(): Record<string, string> {
@@ -658,6 +660,7 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       castVoicePreview: "POST /api/cast/voice-preview {voice, name?, description?}",
       ttsVoices: "GET /api/tts/voices?provider=&model=",
       replaceCastImage: "POST /api/cast/:id/image (multipart: file)",
+      generateCastImage: "POST /api/cast/:id/image/generate（按外观设定调用图像模型生成参考图）",
       deleteCast: "DELETE /api/cast/:id",
       listMaterials: "GET /api/materials",
       uploadMaterial: "POST /api/materials (multipart: file, tags?, title?)",
@@ -1373,6 +1376,22 @@ async function handleRequest(
     return;
   }
 
+  const castImageGenerate = /^\/api\/cast\/([a-zA-Z0-9]+)\/image\/generate$/.exec(pathname);
+  if (castImageGenerate && method === "POST") {
+    const asset = await ctx.cast.find(castImageGenerate[1]!);
+    if (!asset) throw new AppError("角色/道具不存在", { code: "CAST_NOT_FOUND", status: 404 });
+    const generated = await generateCastImage(ctx.config, asset, ctx.logger, {
+      fetchImpl: ctx.fetchImpl,
+    });
+    try {
+      const updated = await ctx.cast.setImage(asset.id, generated.tempFile);
+      sendJson(res, 200, { cast: castView(updated) });
+    } finally {
+      await fsp.rm(generated.tempFile, { force: true }).catch(() => undefined);
+    }
+    return;
+  }
+
   const castImage = /^\/api\/cast\/([a-zA-Z0-9]+)\/image$/.exec(pathname);
   if (castImage) {
     const asset = await ctx.cast.find(castImage[1]!);
@@ -1665,6 +1684,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     publishes,
     webDir,
     pendingStates: new Map(),
+    fetchImpl: deps.fetchImpl,
   };
   const server = http.createServer((req, res) => {
     void handleRequest(req, res, ctx).catch((error: unknown) => {
