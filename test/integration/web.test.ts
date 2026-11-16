@@ -201,6 +201,7 @@ test(
     assert.match(scriptText, /videogen-test-task/);
     assert.match(scriptText, /data-test="douyin"/);
     assert.match(scriptText, /segment-edit-dialog/);
+    assert.match(scriptText, /imagegen-preset/);
     assert.match(scriptText, /\/api\/videos\/\$\{job\.id\}\/edit/);
 
     const apiIndex = (await (await request(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
@@ -217,6 +218,12 @@ test(
     const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },
       tts: { enabled: false, provider: "silent" },
+      imageGen: {
+        provider: "bailian",
+        model: "qwen-image-2.0-pro",
+        size: "1152*1536",
+        apiKey: "sk-image-abcdef",
+      },
       lipsync: { enabled: false, provider: "dashscope" },
     }, "PUT");
     assert.equal(putResponse.status, 200, await putResponse.clone().text());
@@ -224,12 +231,17 @@ test(
       settings: {
         script: { model: string };
         tts: { provider: string; enabled: boolean };
+        imageGen: { provider: string; model: string; size: string; apiKeySet: boolean };
         lipsync: { enabled: boolean; provider: string };
       };
     };
     assert.equal(updated.settings.script.model, "ui-model");
     assert.equal(updated.settings.tts.provider, "silent");
     assert.equal(updated.settings.tts.enabled, false);
+    assert.equal(updated.settings.imageGen.provider, "bailian");
+    assert.equal(updated.settings.imageGen.model, "qwen-image-2.0-pro");
+    assert.equal(updated.settings.imageGen.size, "1152*1536");
+    assert.equal(updated.settings.imageGen.apiKeySet, true);
     assert.equal(updated.settings.lipsync.enabled, false);
     assert.equal(updated.settings.lipsync.provider, "dashscope");
     assert.equal(config.script.model, "ui-model");

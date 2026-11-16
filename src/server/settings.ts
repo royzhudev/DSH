@@ -13,6 +13,7 @@ const EDITABLE_SECTIONS = [
   "subtitles",
   "materials",
   "videoGen",
+  "imageGen",
   "lipsync",
   "douyin",
 ] as const;
@@ -54,6 +55,7 @@ export interface SettingsView {
   subtitles: Record<string, unknown>;
   materials: Record<string, unknown>;
   videoGen: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
+  imageGen: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
   lipsync: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
   douyin: Record<string, unknown> & {
     clientSecretSet: boolean;
@@ -77,7 +79,7 @@ export function serializeSettings(config: AppConfig, settingsPath: string, updat
   for (const section of EDITABLE_SECTIONS) {
     sections[section] = maskSecretFields(section, config[section] as unknown as Record<string, unknown>);
   }
-  for (const section of ["script", "tts", "videoGen", "lipsync"] as const) {
+  for (const section of ["script", "tts", "videoGen", "imageGen", "lipsync"] as const) {
     if (!("apiKeySet" in sections[section])) sections[section].apiKeySet = false;
   }
   if (!("clientSecretSet" in sections.douyin)) sections.douyin.clientSecretSet = false;
@@ -88,6 +90,7 @@ export function serializeSettings(config: AppConfig, settingsPath: string, updat
     subtitles: sections.subtitles,
     materials: sections.materials,
     videoGen: sections.videoGen as SettingsView["videoGen"],
+    imageGen: sections.imageGen as SettingsView["imageGen"],
     lipsync: sections.lipsync as SettingsView["lipsync"],
     douyin: {
       ...sections.douyin,

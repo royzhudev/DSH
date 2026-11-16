@@ -2472,6 +2472,17 @@ body.auth-locked .app-shell {
   gap: 4px;
 }
 
+.cast-generate-btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.cast-generate-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .cast-picker {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
