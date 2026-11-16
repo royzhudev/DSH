@@ -1693,22 +1693,6 @@ async function renderMaterials() {
     }
   }
 
-  voicePreview?.addEventListener("click", () => {
-    void previewCastVoice(voicePreview, {
-      voice: voiceInput?.value.trim() ?? "",
-      name: nameInput.value.trim(),
-      description: descInput.value.trim(),
-      statusId: "cast-voice-preview-status",
-    });
-  });
-  editVoicePreview?.addEventListener("click", () => {
-    void previewCastVoice(editVoicePreview, {
-      voice: document.getElementById("cast-edit-voice")?.value.trim() ?? "",
-      name: document.getElementById("cast-edit-name")?.value.trim() ?? "",
-      description: document.getElementById("cast-edit-desc")?.value.trim() ?? "",
-      statusId: "cast-edit-voice-preview-status",
-    });
-  });
   dropzone.addEventListener("click", (event) => {
     if (event.target === fileInput) return;
     fileInput.click();
@@ -2414,20 +2398,6 @@ async function renderPublish() {
         </div>
       </section>
     </div>`;
-
-  document.querySelectorAll(".segment-edit-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      openSegmentEdit(job, Number(button.dataset.seg));
-    });
-  });
-  document.getElementById("close-segment-edit-dialog")?.addEventListener("click", closeSegmentEdit);
-  document.getElementById("cancel-segment-edit")?.addEventListener("click", closeSegmentEdit);
-  const editForm = document.getElementById("segment-edit-form");
-  editForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void submitSegmentEdit(job);
-  });
-  if (job.edit?.status === "running") startEditPolling(job.id);
 
   document.getElementById("connect-douyin")?.addEventListener("click", () => {
     void connectDouyin();
