@@ -657,6 +657,7 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       createCast: "POST /api/cast (multipart: kind, name, description?, file?)",
       updateCast: "PATCH /api/cast/:id {name?, description?, kind?}",
       castImage: "GET /api/cast/:id/image",
+      clearCastImage: "DELETE /api/cast/:id/image",
       castVoicePreview: "POST /api/cast/voice-preview {voice, name?, description?}",
       ttsVoices: "GET /api/tts/voices?provider=&model=",
       replaceCastImage: "POST /api/cast/:id/image (multipart: file)",
@@ -1398,6 +1399,11 @@ async function handleRequest(
     if (!asset) throw new AppError("角色/道具不存在", { code: "CAST_NOT_FOUND", status: 404 });
     if (method === "POST") {
       await handleCastUpload(req, res, ctx, asset.id);
+      return;
+    }
+    if (method === "DELETE") {
+      const updated = await ctx.cast.clearImage(asset.id);
+      sendJson(res, 200, { cast: castView(updated) });
       return;
     }
     if (method === "GET") {

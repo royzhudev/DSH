@@ -97,6 +97,25 @@ test(
     assert.equal(patchResponse.status, 200);
     assert.equal(((await patchResponse.json()) as { cast: CastView }).cast.description, "红色围巾");
 
+    // 参考图可以单独清空，角色设定保留；之后还能重新上传。
+    const clearResponse = await request(`${app.url}/api/cast/${created.cast.id}/image`, { method: "DELETE" });
+    assert.equal(clearResponse.status, 200, await clearResponse.clone().text());
+    const cleared = (await clearResponse.json()) as { cast: CastView };
+    assert.equal(cleared.cast.imageUrl, undefined);
+    assert.equal((await request(`${app.url}/api/cast/${created.cast.id}/image`)).status, 404);
+    const afterClear = (await (await request(`${app.url}/api/cast`)).json()) as { cast: CastView[] };
+    assert.equal(afterClear.cast[0]?.imageUrl, undefined);
+    assert.equal(afterClear.cast[0]?.name, "林小满");
+
+    const reupload = new FormData();
+    reupload.append("file", new Blob([await fs.readFile(heroImage)], { type: "image/png" }), "hero.png");
+    const reuploadResponse = await request(`${app.url}/api/cast/${created.cast.id}/image`, {
+      method: "POST",
+      body: reupload,
+    });
+    assert.equal(reuploadResponse.status, 200, await reuploadResponse.clone().text());
+    assert.ok(((await reuploadResponse.json()) as { cast: CastView }).cast.imageUrl);
+
     // 剧本预览：返回分镜的场景/镜头/角色，且在调用模型前完成预检。
     const previewResponse = await request(`${app.url}/api/scripts/generate`, {
       method: "POST",

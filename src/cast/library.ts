@@ -220,6 +220,28 @@ export class CastLibrary {
     });
   }
 
+  /** 只清空参考图，保留角色/道具设定，之后可以按外观重新生成。 */
+  async clearImage(id: string): Promise<CastAsset> {
+    return this.withLock(async () => {
+      const assets = await this.scanInternal();
+      const target = assets.find((asset) => asset.id === id);
+      if (!target) throw new AppError("角色/道具不存在", { code: "CAST_NOT_FOUND", status: 404 });
+      const previous = target.imageFile;
+      if (!previous) {
+        throw new AppError("该角色/道具还没有参考图", { code: "CAST_IMAGE_MISSING", status: 404 });
+      }
+      delete target.imageFile;
+      delete target.width;
+      delete target.height;
+      delete target.sizeBytes;
+      target.updatedAt = new Date().toISOString();
+      await this.persist(assets);
+      await fs.rm(path.join(this.dir, previous), { force: true });
+      this.logger.info(`已清空参考图：${target.name}`);
+      return target;
+    });
+  }
+
   async remove(id: string): Promise<boolean> {
     return this.withLock(async () => {
       const assets = await this.scanInternal();
