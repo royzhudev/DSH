@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import fsp from "node:fs/promises";
 import { TTS_PROVIDER_NAMES } from "../types.js";
@@ -59,6 +60,22 @@ export interface JobRecord {
   /** 任务创建时的配置快照，保证运行期间设置变更不影响本任务。 */
   config: AppConfig;
   /** 最近一次分镜局部编辑的状态。 */
+  edit?: VideoEditState;
+}
+
+/** 写入任务目录的索引文件；成片和脚本等大字段仍以 result.json 为准。 */
+interface PersistedJob {
+  version: 1;
+  id: string;
+  topic: string;
+  options: JobOptions;
+  state: JobState;
+  progress: JobProgress;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  errorStage?: JobStage;
   edit?: VideoEditState;
 }
 
@@ -172,6 +189,7 @@ export function buildJobConfig(config: AppConfig, options: JobOptions): AppConfi
 export class JobManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly queue: string[] = [];
+  private readonly persistQueue = new Map<string, Promise<void>>();
   private draining = false;
 
   constructor(
@@ -179,7 +197,9 @@ export class JobManager {
     private readonly logger: Logger,
     private readonly videoEditFactory: VideoEditProviderFactory = (settings, logger) =>
       new DashScopeVideoEditProvider(settings, logger),
-  ) {}
+  ) {
+    this.loadPersisted();
+  }
 
   create(topic: string, options: JobOptions = {}): JobRecord {
     validateOptions(options, this.config);
@@ -197,6 +217,7 @@ export class JobManager {
     this.jobs.set(id, record);
     this.queue.push(id);
     this.logger.info(`任务入队：${id}（${topic}）`);
+    void this.persistSafely(record);
     setImmediate(() => {
       void this.drain();
     });
@@ -279,6 +300,7 @@ export class JobManager {
       prompt: trimmed,
       startedAt: new Date().toISOString(),
     };
+    void this.persistSafely(record);
     void this.runVideoEdit(record, segmentIndex, trimmed);
     return record;
   }
@@ -342,6 +364,7 @@ export class JobManager {
         status: "succeeded",
         finishedAt: new Date().toISOString(),
       };
+      await this.persistSafely(record);
       this.logger.info(`局部修改完成：${record.id} 分镜 ${segmentIndex}`);
     } catch (error) {
       record.edit = {
@@ -350,8 +373,170 @@ export class JobManager {
         error: toErrorMessage(error),
         finishedAt: new Date().toISOString(),
       };
+      await this.persistSafely(record);
       this.logger.error(`局部修改失败：${record.id} 分镜 ${segmentIndex}`, error);
     }
+  }
+
+  private jobDir(id: string): string {
+    return path.join(this.config.outputDir, id);
+  }
+
+  private persistedMeta(record: JobRecord): PersistedJob {
+    return {
+      version: 1,
+      id: record.id,
+      topic: record.topic,
+      options: record.options,
+      state: record.state,
+      progress: record.progress,
+      createdAt: record.createdAt,
+      ...(record.startedAt ? { startedAt: record.startedAt } : {}),
+      ...(record.finishedAt ? { finishedAt: record.finishedAt } : {}),
+      ...(record.error ? { error: record.error } : {}),
+      ...(record.errorStage ? { errorStage: record.errorStage } : {}),
+      ...(record.edit ? { edit: record.edit } : {}),
+    };
+  }
+
+  /** 原子写入 job.json，避免进程在写入中途退出留下半个文件。 */
+  private async persist(record: JobRecord): Promise<void> {
+    const dir = this.jobDir(record.id);
+    await fsp.mkdir(dir, { recursive: true });
+    const target = path.join(dir, "job.json");
+    const temp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    await fsp.writeFile(temp, JSON.stringify(this.persistedMeta(record), null, 2), "utf8");
+    await fsp.rename(temp, target);
+  }
+
+  /** 同一个任务的多次保存按调用顺序串行执行，避免“排队中”的旧状态覆盖最终状态。 */
+  private persistSafely(record: JobRecord): Promise<void> {
+    const previous = this.persistQueue.get(record.id) ?? Promise.resolve();
+    const next = previous
+      .then(() => this.persist(record))
+      .catch((error: unknown) => {
+        this.logger.warn(`保存任务记录失败（不影响成片）：${record.id}：${toErrorMessage(error)}`);
+      });
+    this.persistQueue.set(record.id, next);
+    void next.finally(() => {
+      if (this.persistQueue.get(record.id) === next) this.persistQueue.delete(record.id);
+    });
+    return next;
+  }
+
+  /**
+   * 从 output 目录恢复历史任务：优先读 job.json，老版本任务则直接用 result.json 重建。
+   * 运行中/排队中的任务在进程重启后不可能继续，标记为中断，避免页面一直转圈。
+   */
+  private loadPersisted(): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(this.config.outputDir, { withFileTypes: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") this.logger.warn(`读取历史任务目录失败：${toErrorMessage(error)}`);
+      return;
+    }
+    let restored = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^\d{8}-\d{6}-[0-9a-z]{8}$/.test(entry.name)) continue;
+      const record = this.readPersisted(entry.name, path.join(this.config.outputDir, entry.name));
+      if (!record) continue;
+      this.jobs.set(record.id, record);
+      restored += 1;
+    }
+    if (restored > 0) this.logger.info(`已恢复 ${restored} 条历史任务记录`);
+  }
+
+  private readPersisted(id: string, dir: string): JobRecord | undefined {
+    const resultPath = path.join(dir, "result.json");
+    let result: PipelineResult | undefined;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(resultPath, "utf8")) as PipelineResult;
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.segments) && parsed.script) {
+        result = parsed;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.logger.warn(`历史任务 ${id} 的 result.json 无法读取：${toErrorMessage(error)}`);
+      }
+    }
+
+    let meta: Partial<PersistedJob> | undefined;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, "job.json"), "utf8")) as Partial<PersistedJob>;
+      if (parsed && typeof parsed === "object") meta = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.logger.warn(`历史任务 ${id} 的 job.json 无法读取，改用 result.json：${toErrorMessage(error)}`);
+      }
+    }
+
+    if (!meta && !result) return undefined;
+
+    const stat = (() => {
+      try {
+        return fs.statSync(dir);
+      } catch {
+        return undefined;
+      }
+    })();
+    const createdAt = meta?.createdAt ?? result?.createdAt ?? stat?.birthtime.toISOString() ?? new Date().toISOString();
+    const finishedAt = meta?.finishedAt ?? result?.finishedAt;
+    let state: JobState =
+      meta?.state === "failed" || meta?.state === "running" || meta?.state === "queued" || meta?.state === "succeeded"
+        ? meta.state
+        : result
+          ? "succeeded"
+          : "failed";
+    let error = meta?.error;
+    let errorStage = meta?.errorStage;
+    let interrupted = false;
+    const progress = meta?.progress ?? { stage: "done", percent: 100, message: "成片已生成" };
+    if (state === "running" || state === "queued") {
+      state = "failed";
+      error = "服务重启，任务已中断，请重新生成";
+      errorStage = progress.stage;
+      interrupted = true;
+    }
+    if (state === "succeeded" && !result) {
+      state = "failed";
+      error = "成片记录缺失，无法恢复这个任务";
+      errorStage = "concat";
+    }
+
+    let edit = meta?.edit;
+    if (edit?.status === "running") {
+      edit = { ...edit, status: "failed", error: "服务重启，局部修改已中断", finishedAt: new Date().toISOString() };
+    }
+
+    if (result) {
+      // 输出目录可能随部署迁移；以当前 job 目录重新定位，避免继续引用旧路径。
+      const rebased = (value: string | undefined, fallback: string): string =>
+        path.join(dir, path.basename(value || fallback));
+      result.jobId = id;
+      result.videoPath = rebased(result.videoPath, "video.mp4");
+      result.srtPath = rebased(result.srtPath, "subtitles.srt");
+      result.scriptPath = rebased(result.scriptPath, "script.json");
+      result.resultPath = rebased(result.resultPath, "result.json");
+      if (result.posterPath) result.posterPath = rebased(result.posterPath, "poster.jpg");
+    }
+
+    return {
+      id,
+      topic: meta?.topic ?? result?.topic ?? id,
+      options: (meta?.options && typeof meta.options === "object" ? meta.options : {}) as JobOptions,
+      state,
+      progress: interrupted ? { ...progress, message: "任务已中断" } : progress,
+      createdAt,
+      ...(meta?.startedAt ? { startedAt: meta.startedAt } : {}),
+      ...(finishedAt || interrupted ? { finishedAt: finishedAt ?? new Date().toISOString() } : {}),
+      ...(result ? { result } : {}),
+      ...(error ? { error } : {}),
+      ...(errorStage ? { errorStage } : {}),
+      ...(edit ? { edit } : {}),
+      config: this.config,
+    };
   }
 
   private async drain(): Promise<void> {
@@ -366,6 +551,7 @@ export class JobManager {
         record.startedAt = new Date().toISOString();
         record.progress = { stage: "script", percent: 1, message: "开始生成" };
         this.logger.info(`任务开始：${id}`);
+        await this.persistSafely(record);
         try {
           const result = await runPipeline({
             topic: record.topic,
@@ -384,6 +570,7 @@ export class JobManager {
           record.state = "succeeded";
           record.finishedAt = new Date().toISOString();
           record.progress = { stage: "done", percent: 100, message: "成片已生成" };
+          await this.persistSafely(record);
           this.logger.info(`任务完成：${id}（${result.durationSec.toFixed(1)}s）`);
         } catch (error) {
           record.state = "failed";
@@ -391,6 +578,7 @@ export class JobManager {
           record.errorStage = record.progress.stage;
           record.finishedAt = new Date().toISOString();
           record.progress = { ...record.progress, message: "任务失败" };
+          await this.persistSafely(record);
           this.logger.error(`任务失败：${id}`, error);
         }
       }
