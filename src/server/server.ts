@@ -11,6 +11,7 @@ import { TTS_PROVIDER_NAMES } from "../types.js";
 import type {
   AppConfig,
   CastAsset,
+  DouyinH5Share,
   DouyinToken,
   JobOptions,
   ScriptProviderName,
@@ -21,7 +22,7 @@ import { AppError, toErrorMessage } from "../errors.js";
 import { isAiVideoEnabled } from "../config.js";
 import { MaterialLibrary, materialType } from "../materials/library.js";
 import { materialTagPool } from "../materials/match.js";
-import { ensureDir, isInside, sanitizeFilename, sha256 } from "../util/fs.js";
+import { ensureDir, isInside, sanitizeFilename, sha256, shortId } from "../util/fs.js";
 import {
   CastLibrary,
   castImageType,
@@ -64,6 +65,8 @@ import {
   type UserRole,
 } from "./users.js";
 import { DouyinClient } from "../publish/douyin.js";
+import { DouyinH5Client, signCallback } from "../publish/douyin-h5.js";
+import { H5ShareStore } from "../publish/h5-store.js";
 import { DouyinTokenStore } from "../publish/token-store.js";
 import { PublishStore } from "../publish/store.js";
 
@@ -110,6 +113,8 @@ export interface VideoServer {
   douyin: DouyinClient;
   tokens: DouyinTokenStore;
   publishes: PublishStore;
+  douyinH5: DouyinH5Client;
+  h5Shares: H5ShareStore;
   close(): Promise<void>;
 }
 
@@ -131,6 +136,8 @@ interface ServerContext {
   douyin: DouyinClient;
   tokens: DouyinTokenStore;
   publishes: PublishStore;
+  douyinH5: DouyinH5Client;
+  h5Shares: H5ShareStore;
   webDir: string;
   pendingStates: Map<string, number>;
   fetchImpl?: typeof fetch;
@@ -176,7 +183,7 @@ function contentTypeFor(file: string): string {
   return CONTENT_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
 }
 
-async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -187,9 +194,15 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, u
     }
     chunks.push(buffer);
   }
+  return Buffer.concat(chunks);
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await readRawBody(req);
+  const size = raw.length;
   if (size === 0) return {};
   try {
-    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    const parsed = JSON.parse(raw.toString("utf8")) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new Error("not an object");
     }
@@ -668,6 +681,10 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       materialFile: "GET /api/materials/:id/file",
       deleteMaterial: "DELETE /api/materials/:id",
       douyinStatus: "GET /api/douyin/status",
+      douyinH5Share: "POST /api/douyin/h5/share {videoUrl, taskId?, title?, hashtags?, shareToPublish?, callbackUrl?}",
+      douyinH5Shares: "GET /api/douyin/h5/shares",
+      douyinH5ShareStatus: "GET /api/douyin/h5/shares/:shareId",
+      douyinWebhook: "POST /api/douyin/webhook",
       douyinAuthorize: "GET /api/douyin/authorize",
       douyinCallback: "GET /api/douyin/callback",
       editSegment: "POST /api/videos/:id/edit {segmentIndex, prompt}",
@@ -735,7 +752,12 @@ function requiredPermission(method: string, pathname: string): MenuPermission | 
 }
 
 function isPublicApi(pathname: string): boolean {
-  return pathname === "/api" || pathname.startsWith("/api/auth/") || pathname === "/api/douyin/callback";
+  return (
+    pathname === "/api" ||
+    pathname.startsWith("/api/auth/") ||
+    pathname === "/api/douyin/callback" ||
+    pathname === "/api/douyin/webhook"
+  );
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -1191,6 +1213,180 @@ function douyinStatus(ctx: ServerContext, token: DouyinToken | null): Record<str
   };
 }
 
+async function handleH5Share(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const videoUrl = typeof body.videoUrl === "string" ? body.videoUrl.trim() : "";
+  if (!videoUrl) {
+    throw new AppError("缺少 videoUrl：请传公网可访问的 https 视频地址", {
+      code: "INVALID_OPTIONS",
+      status: 400,
+    });
+  }
+  const title =
+    typeof body.title === "string" && body.title.trim()
+      ? body.title.trim().slice(0, 55)
+      : undefined;
+  const taskId = typeof body.taskId === "string" ? body.taskId.trim().slice(0, 100) : undefined;
+  const callbackUrl =
+    typeof body.callbackUrl === "string" && body.callbackUrl.trim() ? body.callbackUrl.trim() : undefined;
+  let hashtags: string[] = [];
+  if (body.hashtags !== undefined) {
+    if (!Array.isArray(body.hashtags) || !body.hashtags.every((tag) => typeof tag === "string")) {
+      throw new AppError("hashtags 必须是字符串数组", { code: "INVALID_OPTIONS", status: 400 });
+    }
+    hashtags = (body.hashtags as string[])
+      .map((tag) => tag.trim().replace(/^#+/, ""))
+      .filter(Boolean)
+      .slice(0, 10);
+  }
+  if (body.shareToPublish !== undefined && typeof body.shareToPublish !== "boolean") {
+    throw new AppError("shareToPublish 必须是布尔值", { code: "INVALID_OPTIONS", status: 400 });
+  }
+  const result = await ctx.douyinH5.createShare(
+    {
+      videoUrl,
+      ...(title !== undefined ? { title } : {}),
+      hashtags,
+      ...(typeof body.shareToPublish === "boolean" ? { shareToPublish: body.shareToPublish } : {}),
+      ...(taskId ? { taskId } : {}),
+      ...(callbackUrl ? { callbackUrl } : {}),
+    },
+    AbortSignal.timeout(30_000),
+  );
+  const now = new Date().toISOString();
+  const share: DouyinH5Share = {
+    id: shortId(),
+    ...(taskId ? { taskId } : {}),
+    shareId: result.shareId,
+    schema: result.schema,
+    videoUrl,
+    title: title ?? "AI 成片",
+    hashtags,
+    state: "pending",
+    ...(callbackUrl ? { callbackUrl } : {}),
+    createdAt: now,
+    updatedAt: now,
+  };
+  await ctx.h5Shares.add(share);
+  sendJson(res, 201, {
+    share: {
+      id: share.id,
+      taskId: share.taskId,
+      shareId: share.shareId,
+      schema: share.schema,
+      expiresAt: result.expiresAt,
+      state: share.state,
+    },
+  });
+}
+
+async function deliverH5Callback(
+  ctx: ServerContext,
+  share: DouyinH5Share,
+): Promise<void> {
+  if (!share.callbackUrl) return;
+  const payload = {
+    event: "create_video",
+    shareId: share.shareId,
+    taskId: share.taskId,
+    state: share.state,
+    itemId: share.itemId,
+    videoId: share.videoId,
+    openId: share.openId,
+    error: share.error,
+  };
+  const raw = JSON.stringify(payload);
+  try {
+    const response = await (ctx.fetchImpl ?? fetch)(share.callbackUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-dsh-signature": signCallback(ctx.config.douyin.clientSecret ?? "", raw),
+      },
+      body: raw,
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      ctx.logger.warn(`H5 回调返回 HTTP ${response.status}：${share.callbackUrl}`);
+    }
+  } catch (error) {
+    ctx.logger.warn(`H5 回调失败（${share.shareId}）：${toErrorMessage(error)}`);
+  }
+}
+
+async function handleDouyinWebhook(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  const raw = await readRawBody(req);
+  let body: Record<string, unknown>;
+  try {
+    const parsed = raw.length > 0 ? (JSON.parse(raw.toString("utf8")) as unknown) : {};
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("invalid");
+    body = parsed as Record<string, unknown>;
+  } catch {
+    throw new AppError("Webhook 请求体必须是 JSON 对象", { code: "INVALID_JSON", status: 400 });
+  }
+  const event = typeof body.event === "string" ? body.event : "";
+  const content =
+    typeof body.content === "object" && body.content !== null && !Array.isArray(body.content)
+      ? (body.content as Record<string, unknown>)
+      : {};
+  if (event === "verify_webhook") {
+    const challenge = content.challenge;
+    if (body.client_key && body.client_key !== ctx.config.douyin.clientKey) {
+      throw new AppError("Webhook client_key 不匹配", { code: "DOUYIN_WEBHOOK_INVALID", status: 401 });
+    }
+    sendJson(res, 200, { challenge });
+    return;
+  }
+  if (event !== "create_video") {
+    sendJson(res, 200, { ok: true, ignored: true });
+    return;
+  }
+  const signature = req.headers["x-douyin-signature"];
+  if (!ctx.douyinH5.verifyWebhook(raw, typeof signature === "string" ? signature : undefined)) {
+    throw new AppError("Webhook 签名校验失败", { code: "DOUYIN_WEBHOOK_INVALID", status: 401 });
+  }
+  if (body.client_key && body.client_key !== ctx.config.douyin.clientKey) {
+    throw new AppError("Webhook client_key 不匹配", { code: "DOUYIN_WEBHOOK_INVALID", status: 401 });
+  }
+  const shareId = typeof content.share_id === "string" ? content.share_id : "";
+  if (!shareId) {
+    sendJson(res, 200, { ok: true, ignored: true });
+    return;
+  }
+  const share = await ctx.h5Shares.find(shareId);
+  if (!share) {
+    sendJson(res, 200, { ok: true, ignored: true });
+    return;
+  }
+  if (share.state === "success") {
+    sendJson(res, 200, { ok: true, duplicate: true });
+    return;
+  }
+  const itemId = typeof content.item_id === "string" ? content.item_id : undefined;
+  const videoId = typeof content.video_id === "string" ? content.video_id : undefined;
+  const openId = typeof body.from_user_id === "string" ? body.from_user_id : undefined;
+  const updated = await ctx.h5Shares.update(shareId, {
+    state: "success",
+    ...(itemId ? { itemId } : {}),
+    ...(videoId ? { videoId } : {}),
+    ...(openId ? { openId } : {}),
+  });
+  if (updated) {
+    ctx.logger.info(`抖音 H5 投稿成功：share_id=${shareId}${itemId ? ` item_id=${itemId}` : ""}`);
+    void deliverH5Callback(ctx, updated);
+  }
+  sendJson(res, 200, { ok: true });
+}
+
 async function handlePublish(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1586,6 +1782,29 @@ async function handleRequest(
     return;
   }
 
+  if (pathname === "/api/douyin/webhook" && method === "POST") {
+    await handleDouyinWebhook(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/douyin/h5/share" && method === "POST") {
+    await handleH5Share(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/douyin/h5/shares" && method === "GET") {
+    sendJson(res, 200, { shares: await ctx.h5Shares.list() });
+    return;
+  }
+
+  const h5ShareItem = /^\/api\/douyin\/h5\/shares\/([a-zA-Z0-9_-]+)$/.exec(pathname);
+  if (h5ShareItem && method === "GET") {
+    const share = await ctx.h5Shares.find(h5ShareItem[1]!);
+    if (!share) throw new AppError("H5 投稿记录不存在", { code: "DOUYIN_H5_NOT_FOUND", status: 404 });
+    sendJson(res, 200, { share });
+    return;
+  }
+
   if (pathname === "/api/douyin/authorize" && method === "GET") {
     if (!ctx.douyin.configured) {
       throw new AppError("请先在设置中填写抖音开放平台 client_key 与 client_secret", {
@@ -1672,8 +1891,10 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
   const sessions = new SessionStore();
   const loginThrottle = new LoginThrottle();
   const douyin = new DouyinClient(config, logger, deps.fetchImpl ?? fetch);
+  const douyinH5 = new DouyinH5Client(config, logger, deps.fetchImpl ?? fetch);
   const tokens = new DouyinTokenStore(path.join(config.cacheDir, "douyin-token.json"), logger);
   const publishes = new PublishStore(path.join(path.dirname(config.settingsFile), "publishes.json"), logger);
+  const h5Shares = new H5ShareStore(path.join(path.dirname(config.settingsFile), "douyin-h5-shares.json"), logger);
   const webDir = deps.webDir ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web");
   const ctx: ServerContext = {
     config,
@@ -1686,8 +1907,10 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     sessions,
     loginThrottle,
     douyin,
+    douyinH5,
     tokens,
     publishes,
+    h5Shares,
     webDir,
     pendingStates: new Map(),
     fetchImpl: deps.fetchImpl,
@@ -1713,8 +1936,10 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     users,
     sessions,
     douyin,
+    douyinH5,
     tokens,
     publishes,
+    h5Shares,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());

@@ -20,6 +20,7 @@
 - **成片局部修改**：任务完成后可以在分镜脚本里对任意一镜点「局部修改」，用一句话描述要改的元素（增删道具、换服装/背景、改风格等），平台调用百炼 `wan2.7-videoedit` 只重绘这一镜，保留原台词音轨和字幕时间轴，自动重新拼接成片；单镜需 2–10 秒、成片帧率至少 16fps。
 - **规则化自动剪辑**：每个分镜时长由配音时长决定，素材自动铺满 9:16 画幅，字幕烧录，分镜间统一淡入淡出转场，最后拼接为成片。
 - **抖音授权发布**：OAuth 授权、令牌自动刷新、上传成片并创建抖音作品；发布历史保存在本地。
+- **抖音 H5 投稿接口（可选）**：给外部程序提供 `POST /api/douyin/h5/share`，传入公网 https 视频地址即可拿到抖音分享 Schema（可转二维码/链接），用户确认发布后由抖音 Webhook 回传 `share_id`、`item_id`；不需要用户 OAuth，但 H5 场景仍需用户在抖音里点一次发布。
 - **模型配置**：网页设置页可修改脚本、配音、AI 画面、视频/字幕、素材与抖音参数，保存到 `data/settings.json`，新任务生效。
 - **产物完整**：成片 `video.mp4`、字幕 `subtitles.srt`、脚本 `script.json`、执行结果 `result.json`。
 
@@ -283,6 +284,38 @@ GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
 
 相关变量：`DOUYIN_CLIENT_KEY`、`DOUYIN_CLIENT_SECRET`、`DOUYIN_REDIRECT_URI`、`DOUYIN_SCOPE`、`DOUYIN_API_BASE_URL`。
 
+### 抖音 H5 投稿接口
+
+如果应用拿不到 `video.create.bind`（静默发布）权限，可以走官方 H5 投稿：外部程序把成片上传到自己的公网存储，再调用本服务的 H5 接口获取分享链接/二维码；用户在抖音里确认发布，抖音通过 Webhook 回传结果。**H5 不能完全静默，最后一步必须由用户确认。**
+
+1. 在开放平台申请 `h5.share`（H5 场景）、`open.get.ticket`、`jump.basic`，以及新版抖音要求的 `aweme.share`（投稿）和 `aweme.forward`（生成/查询 share_id）；具体以开放平台当前要求为准。
+2. 在控制台「设置 → 开发配置 → Webhooks」把请求网址填为 `https://<你的公网域名>/api/douyin/webhook`，并订阅 `create_video` 事件；服务会自动回应 `verify_webhook` 的 challenge。
+3. 用有「发布」菜单权限的账号调用：
+
+```http
+POST /api/douyin/h5/share
+Content-Type: application/json
+
+{
+  "taskId": "外部系统任务 ID（可选，原样回传）",
+  "videoUrl": "https://cdn.example.com/final.mp4",
+  "title": "短剧标题",
+  "hashtags": ["短剧", "AI成片"],
+  "shareToPublish": true,
+  "callbackUrl": "https://your-app.example.com/douyin/callback"
+}
+```
+
+返回 `share.schema`（`snssdk1128://...`，可直接生成二维码或在手机端打开）、`share.shareId` 和过期时间；`share.state` 初始为 `pending`。
+
+- `GET /api/douyin/h5/shares/:shareId` 查询状态，成功后包含 `itemId`、`videoId`、`openId`。
+- Webhook 使用 `X-Douyin-Signature: sha1(client_secret + 原始 body)` 校验；未知 `share_id` 会被安全忽略。
+- 配置 `callbackUrl` 后，服务会在收到成功回调时再向该地址 POST 一次；请求头 `X-DSH-Signature: sha1(client_secret + 原始 body)`，失败只记日志，不阻塞抖音重试，调用方可继续轮询查询接口。
+- `videoUrl` 必须是公网可访问的 https 地址（mp4/mov，单文件不超过 128MB）；本服务不替外部程序上传公网存储。
+- 记录保存在 `data/douyin-h5-shares.json`，最多保留 200 条。
+
+相关变量：`DOUYIN_CLIENT_KEY`、`DOUYIN_CLIENT_SECRET`、`DOUYIN_API_BASE_URL`。
+
 ### 视频与字幕
 
 - 默认 1080×1920、30fps、H.264 + AAC。
@@ -357,6 +390,10 @@ pnpm dev serve --port 8787
 | `GET` | `/api/videos/:id/publish` | 该任务的发布记录 |
 | `GET` | `/api/publishes` | 全部发布记录 |
 | `GET` | `/api/douyin/status` | 抖音配置/授权状态 |
+| `POST` | `/api/douyin/h5/share` | 创建 H5 投稿分享，`{videoUrl,taskId?,title?,hashtags?,shareToPublish?,callbackUrl?}` |
+| `GET` | `/api/douyin/h5/shares` | H5 投稿记录 |
+| `GET` | `/api/douyin/h5/shares/:shareId` | H5 投稿状态 |
+| `POST` | `/api/douyin/webhook` | 抖音 Webhook（公开，签名校验） |
 | `GET` | `/api/douyin/authorize` | 获取授权 URL |
 | `GET` | `/api/douyin/callback` | OAuth 回调 |
 | `POST` | `/api/douyin/refresh` | 手动刷新令牌 |

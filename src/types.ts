@@ -489,6 +489,28 @@ export interface DouyinToken {
   updatedAt: string;
 }
 
+export type DouyinH5ShareState = "pending" | "success" | "failed";
+
+/** H5 投稿任务；分享链接生成后等待抖音 Webhook 回传发布结果。 */
+export interface DouyinH5Share {
+  id: string;
+  /** 调用方自带的任务标识，原样回传，便于对账。 */
+  taskId?: string;
+  shareId: string;
+  schema: string;
+  videoUrl: string;
+  title: string;
+  hashtags: string[];
+  state: DouyinH5ShareState;
+  callbackUrl?: string;
+  itemId?: string;
+  videoId?: string;
+  openId?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PublishRecord {
   id: string;
   jobId: string;
