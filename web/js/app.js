@@ -1793,6 +1793,7 @@ function castCardHtml(asset, imageGenReady = false) {
       <div class="cast-actions">
         <button class="icon-btn" type="button" data-edit-cast="${attr(asset.id)}" title="编辑设定">${icon("pencil", 15)}</button>
         <button class="icon-btn" type="button" data-replace-cast="${attr(asset.id)}" title="${asset.imageFile ? "更换参考图" : "上传参考图"}">${icon("image", 15)}</button>
+        ${asset.imageFile ? `<button class="icon-btn" type="button" data-clear-cast="${attr(asset.id)}" title="清空参考图" aria-label="清空参考图">${icon("x", 15)}</button>` : ""}
         <button class="icon-btn" type="button" data-delete-cast="${attr(asset.id)}" title="删除">${icon("trash", 15)}</button>
       </div>
       <span class="material-meta">${formatDate(asset.updatedAt)}</span>
@@ -2002,6 +2003,20 @@ async function generateCastImage(id, button) {
     toast(error.message, "error");
     button.disabled = false;
     button.innerHTML = original;
+  }
+}
+
+async function clearCastImage(id) {
+  const asset = (state.cast ?? []).find((item) => item.id === id);
+  if (!asset?.imageFile) return;
+  if (!window.confirm(`确定清空「${asset.name}」的参考图？外观设定会保留，之后可以重新上传或按设定生成。`)) return;
+  try {
+    const data = await api(`/api/cast/${id}/image`, { method: "DELETE" });
+    state.cast = (state.cast ?? []).map((item) => (item.id === id ? data.cast : item));
+    toast("参考图已清空，可以按外观设定重新生成", "success");
+    await renderCast();
+  } catch (error) {
+    toast(error.message, "error");
   }
 }
 
@@ -2223,6 +2238,11 @@ async function renderCast() {
   for (const button of view.querySelectorAll("[data-generate-cast]")) {
     button.addEventListener("click", () => {
       void generateCastImage(button.dataset.generateCast, button);
+    });
+  }
+  for (const button of view.querySelectorAll("[data-clear-cast]")) {
+    button.addEventListener("click", () => {
+      void clearCastImage(button.dataset.clearCast);
     });
   }
   for (const button of view.querySelectorAll("[data-delete-cast]")) {

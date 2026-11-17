@@ -75,8 +75,21 @@ test("角色库：添加、重名、编辑、换图与删除", async () => {
       (error: NodeJS.ErrnoException) => error.code === "ENOENT",
     );
 
+    const cleared = await library.clearImage(hero.id);
+    assert.equal(cleared.imageFile, undefined);
+    assert.equal(cleared.width, undefined);
+    await assert.rejects(
+      fs.stat(path.join(library.dir, replaced.imageFile!)),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+    );
+    await assert.rejects(
+      library.clearImage(hero.id),
+      (error: unknown) => error instanceof AppError && error.code === "CAST_IMAGE_MISSING",
+    );
+
     const listed = await library.list();
     assert.equal(listed.length, 2);
+    assert.equal(listed.find((asset) => asset.id === hero.id)?.description, "红色围巾");
     assert.equal(await library.remove(watch.id), true);
     assert.equal(await library.remove(watch.id), false);
     assert.equal((await library.list()).length, 1);
