@@ -188,3 +188,10 @@ test("loadConfig 仍然拒绝大小写归一化后依然未知的供应商", asy
     (error: unknown) => error instanceof AppError && error.code === "CONFIG_INVALID",
   );
 });
+
+test("默认目标时长是 15 秒，允许 5 到 600 秒", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.script.targetDurationSec, 15);
+  assert.doesNotThrow(() => loadConfig({ cwd: dir, env: {}, overrides: { script: { targetDurationSec: 120 } } }));
+});

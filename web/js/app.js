@@ -748,8 +748,9 @@ async function renderCreate() {
     const known = new Set(cast.map((asset) => asset.id));
     state.castIds = state.castIds.filter((id) => known.has(id));
   }
-  const target = Number(settings.script.targetDurationSec) || 45;
-  const durations = [...new Set([15, 30, 45, 60, target])].sort((a, b) => a - b);
+  const target = Number(settings.script.targetDurationSec) || 15;
+  // 短视频默认 15 秒；长一点的成片用 90/120 秒，选中项由 .active 高亮。
+  const durations = [...new Set([15, 30, 45, 60, 90, 120, target])].sort((a, b) => a - b);
   const segmentOptions = [...new Set([1, 3, 4, 5, 6, Number(settings.script.maxSegments) || 6])].sort(
     (a, b) => a - b,
   );
@@ -949,7 +950,7 @@ function readCreateForm() {
     topic: document.getElementById("topic")?.value.trim() ?? "",
     story: document.getElementById("story")?.value.trim() ?? "",
     castIds: state.castDenied ? undefined : (state.castIds ?? []),
-    targetDurationSec: Number(activeDuration?.dataset.value ?? 45),
+    targetDurationSec: Number(activeDuration?.dataset.value ?? 15),
     maxSegments: Number(document.getElementById("segments")?.value ?? 6),
     voice,
     subtitlesEnabled: Boolean(document.getElementById("subtitles")?.checked),

@@ -29,3 +29,14 @@ test("网页渲染：素材库和发布页不混入其他页面的事件绑定",
   assert.doesNotMatch(publish, /openSegmentEdit|submitSegmentEdit|startEditPolling|segment-edit-form/);
   assert.match(publish, /connect-douyin/);
 });
+
+test("创作页目标时长：包含 90/120 秒选项，默认 15 秒且选中项高亮", async () => {
+  const source = await fs.readFile(path.join(process.cwd(), "web/js/app.js"), "utf8");
+  const body = functionBody(source, "renderCreate");
+  assert.match(body, /\[15, 30, 45, 60, 90, 120, target\]/, "创作页应提供 90/120 秒选项");
+  assert.match(body, /targetDurationSec\) \|\| 15/, "没有设置时默认 15 秒");
+  // 选中项通过与 data-value 比较加 active 类，保持现有高亮方式。
+  assert.match(body, /class="\$\{value === target \? "active" : ""\}"/, "当前时长要高亮");
+  // 提交任务时读取当前选中的按钮，没有选中时同样回落到 15 秒。
+  assert.match(source, /activeDuration\?\.dataset\.value \?\? 15/, "提交时默认也取 15 秒");
+});
