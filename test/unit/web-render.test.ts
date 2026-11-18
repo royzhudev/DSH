@@ -29,3 +29,15 @@ test("网页渲染：素材库和发布页不混入其他页面的事件绑定",
   assert.doesNotMatch(publish, /openSegmentEdit|submitSegmentEdit|startEditPolling|segment-edit-form/);
   assert.match(publish, /connect-douyin/);
 });
+
+test("创作页目标时长：15 秒默认选中，包含 90/120 秒且使用高亮样式", async () => {
+  const source = await fs.readFile(path.join(process.cwd(), "web/js/app.js"), "utf8");
+  const create = functionBody(source, "renderCreate");
+  assert.match(create, /const target = 15;/);
+  assert.match(create, /\[15, 30, 45, 60, 90, 120\]/);
+  assert.match(create, /value === target \? "active" : ""/);
+  assert.match(source, /targetDurationSec: Number\(activeDuration\?\.dataset\.value \?\? 15\)/);
+
+  const styles = await fs.readFile(path.join(process.cwd(), "web/styles.css"), "utf8");
+  assert.match(styles, /\.segmented button\.active\s*\{[^}]*background:\s*var\(--brand\)/s);
+});
