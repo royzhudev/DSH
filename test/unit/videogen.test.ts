@@ -9,7 +9,7 @@ import { createVideoGenProvider } from "../../src/videogen/index.js";
 import { AppError } from "../../src/errors.js";
 import { silentLogger } from "../../src/logger.js";
 import { probeMedia, runFfmpeg } from "../../src/media/ffmpeg.js";
-import { generateTestClip, makeTempDir, makeTestConfig } from "../helpers.js";
+import { generateTestClip, generateTestImage, makeTempDir, makeTestConfig } from "../helpers.js";
 
 interface MockVideoServer {
   url: string;
@@ -1132,4 +1132,94 @@ test("分镜提示词：包含本镜内容，并可按机位变化避免相邻�
   });
   assert.notEqual(base, varied);
   assert.ok(varied.includes("近景"));
+});
+
+test("HTTP 视频：Seedance 2.0 聚合渠道按 prompt/duration/ratio/images 提交并取回成片", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  const image = path.join(dir, "first-frame.png");
+  const reference = path.join(dir, "reference.png");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  await generateTestImage(image);
+  await generateTestImage(reference);
+  let submitBody: Record<string, unknown> | undefined;
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const send = (value: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.method === "POST" && url.pathname === "/v1/video/generations") {
+      submitBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      send({ id: "task-seedance", object: "video.generation", status: "queued" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/video/generations/task-seedance") {
+      // 词易 Token / Seedance 2.0 的完成结构：output.video_url。
+      send({ id: "task-seedance", status: "completed", output: { video_url: "/files/clip.mp4" } });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clip);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        channel: "aggregator-seedance2",
+        provider: "http",
+        protocol: "seedance",
+        baseUrl: `http://127.0.0.1:${port}`,
+        model: "Seedance 2.0",
+        apiKey: "tk-test",
+        submitPath: "/v1/video/generations",
+        pollPath: "/v1/video/generations/{id}",
+        resultPath: "output.video_url",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 4,
+        fallbackToMaterials: true,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    const generated = await provider.generate(
+      {
+        prompt: "黄昏海岸线，电影级光影",
+        durationSec: 3,
+        image,
+        references: [{ role: "character", name: "阿岚", file: reference }],
+      },
+      path.join(dir, "gen"),
+    );
+    assert.equal(generated.model, "Seedance 2.0");
+    assert.equal(generated.durationSec > 0.5, true);
+    assert.ok(submitBody, "应提交到 Seedance 聚合接口");
+    assert.equal(submitBody!.model, "Seedance 2.0");
+    assert.equal(submitBody!.prompt, "黄昏海岸线，电影级光影");
+    // 聚合平台只接受 4–15 秒，3 秒测试请求会按 4 秒提交。
+    assert.equal(submitBody!.duration, 4);
+    assert.equal(submitBody!.resolution, "720p");
+    assert.equal(submitBody!.ratio, "9:16");
+    const images = submitBody!.images as string[];
+    assert.equal(images.length, 2);
+    assert.match(images[0]!, /^data:image\/png;base64,/);
+    assert.match(images[1]!, /^data:image\/png;base64,/);
+    assert.equal("duration_sec" in submitBody!, false);
+    assert.equal("image" in submitBody!, false);
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
 });

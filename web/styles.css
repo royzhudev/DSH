@@ -1669,6 +1669,24 @@ svg {
   font-size: 12px;
 }
 
+/* 渠道自动生成的只读参数：弱化显示，避免用户误以为需要手填。 */
+#videogen-auto-fields .input {
+  background: var(--surface-2);
+  border-style: dashed;
+  color: var(--muted);
+}
+
+#videogen-auto-result-hint {
+  display: block;
+  margin-top: 8px;
+}
+
+/* hidden 属性会被 .field-grid-3 的 display:grid 覆盖，这里显式恢复。 */
+#videogen-auto-fields[hidden],
+#videogen-advanced[hidden] {
+  display: none;
+}
+
 .settings-note.warn {
   background: var(--warning-soft);
   color: #92400e;

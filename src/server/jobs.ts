@@ -17,6 +17,7 @@ import type {
 import type { Logger } from "../logger.js";
 import { createJobId, runPipeline } from "../pipeline.js";
 import { AppError, toErrorMessage } from "../errors.js";
+import { isVideoEditSupported } from "../config.js";
 import { STORY_MAX_LENGTH } from "../preflight.js";
 import { concatSegments } from "../render/concat.js";
 import { extractPoster } from "../media/ffmpeg.js";
@@ -293,6 +294,12 @@ export class JobManager {
     }
     if (trimmed.length > 2000) {
       throw new AppError("局部修改要求不能超过 2000 字", { code: "JOB_EDIT_PROMPT_TOO_LONG", status: 400 });
+    }
+    if (!isVideoEditSupported(record.config.videoGen)) {
+      throw new AppError(
+        "局部修改依赖阿里百炼的视频编辑模型；当前 AI 画面渠道不是阿里百炼，请切换到阿里百炼渠道后再使用。",
+        { code: "JOB_EDIT_UNSUPPORTED", status: 409 },
+      );
     }
     record.edit = {
       status: "running",
