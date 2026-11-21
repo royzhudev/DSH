@@ -159,6 +159,55 @@ test("HTTP 文生视频：提交、轮询、下载与 ffprobe 校验", async () 
   }
 });
 
+test("HTTP 视频：本机 ffprobe 不可用时立即报错，不伪装成待出片", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  // 模拟旧版 ffprobe-static 在 arm64 上路径不存在、或系统 ffprobe 输出异常的情况：
+  // 视频已下载成功，但本机无法解析。此时不能再返回 pending，否则页面会无限续查并反复下载。
+  const fakeProbe = path.join(dir, "fake-ffprobe.sh");
+  await fs.writeFile(fakeProbe, "#!/bin/sh\necho 'not json'\n", { mode: 0o755 });
+  const outputDir = path.join(dir, "gen");
+  const previousProbe = process.env.FFPROBE_PATH;
+  process.env.FFPROBE_PATH = fakeProbe;
+  process.env.VIDEOGEN_TEST_CLIP = clip;
+  const mock = await startVideoMock();
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        provider: "http",
+        baseUrl: mock.url,
+        model: "video-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 3,
+        fallbackToMaterials: true,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    await assert.rejects(
+      provider.generate({ prompt: "immediate 城市夜景", durationSec: 1 }, outputDir),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error instanceof VideoGenPendingError, false);
+        assert.equal(error.code, "VIDEOGEN_INVALID_VIDEO");
+        assert.match(error.message, /本机无法读取视频信息/);
+        return true;
+      },
+    );
+    // 已下载的半成品要清掉，不能在缓存里越堆越多。
+    assert.deepEqual(await fs.readdir(outputDir).catch(() => []), []);
+  } finally {
+    delete process.env.VIDEOGEN_TEST_CLIP;
+    if (previousProbe === undefined) delete process.env.FFPROBE_PATH;
+    else process.env.FFPROBE_PATH = previousProbe;
+    await mock.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("HTTP 图生视频：提交首帧与角色参考图 data URL", async () => {
   const dir = await makeTempDir();
   const clip = path.join(dir, "clip.mp4");

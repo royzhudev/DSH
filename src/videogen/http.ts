@@ -3,7 +3,7 @@ import path from "node:path";
 import type { GeneratedClip, VideoGenProvider, VideoGenRequest, VideoGenSettings } from "../types.js";
 import type { Logger } from "../logger.js";
 import { AppError, toErrorMessage } from "../errors.js";
-import { probeMedia } from "../media/ffmpeg.js";
+import { probeMedia, type MediaProbe } from "../media/ffmpeg.js";
 import { ensureDir, sha256 } from "../util/fs.js";
 
 const SUCCESS_STATES = new Set(["succeeded", "success", "completed", "complete", "done", "finished"]);
@@ -559,7 +559,21 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   /** 下载成片并校验时长；这一步失败时任务本身可能已成功，不影响已扣费的事实。 */
   private async collect(videoUrl: string, outputDir: string, signal: AbortSignal): Promise<GeneratedClip> {
     const file = await this.download(videoUrl, outputDir, signal);
-    const probe = await probeMedia(file);
+    let probe: MediaProbe;
+    try {
+      probe = await probeMedia(file);
+    } catch (error) {
+      // 下载已经成功，失败的是本机校验工具（例如 ffprobe 缺失或当前平台没有可执行二进制）。
+      // 这不是“平台还没出片”，必须清理残留文件并当成确定失败报出来；
+      // 否则调用方会把它误当成待出片任务无限续查，每次都重新下载同一段视频。
+      await fsp.rm(file, { force: true }).catch(() => {});
+      this.logger.warn(`生成视频已下载但本机无法校验：${toErrorMessage(error)}`);
+      throw new AppError(
+        `生成视频已下载，但本机无法读取视频信息：${toErrorMessage(error)}。` +
+          "请确认 ffprobe 可正常执行（可用 FFPROBE_PATH 指定），修复后点「取回视频」可继续取回该任务，不会重新生成或重复扣费。",
+        { code: "VIDEOGEN_INVALID_VIDEO", status: 502, cause: error },
+      );
+    }
     if (!probe.durationSec || probe.durationSec <= 0) {
       await fsp.rm(file, { force: true });
       throw new AppError("生成视频无法读取时长", { code: "VIDEOGEN_INVALID_VIDEO", status: 502 });

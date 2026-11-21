@@ -1,31 +1,110 @@
 import { spawn } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
+import path from "node:path";
 import ffmpegStatic from "ffmpeg-static";
-import ffprobeStatic from "ffprobe-static";
 import { AppError } from "../errors.js";
 
+const require = createRequire(import.meta.url);
 const MAX_CAPTURE = 2 * 1024 * 1024;
 
-export function getFfmpegPath(): string {
-  const override = process.env.FFMPEG_PATH?.trim();
-  const resolved = override || (ffmpegStatic as unknown as string | null);
-  if (!resolved) {
-    throw new AppError("未找到 ffmpeg 可执行文件，请设置 FFMPEG_PATH 或重新安装依赖", {
-      code: "FFMPEG_NOT_FOUND",
+function isExecutableFile(file: string): boolean {
+  try {
+    fsSync.accessSync(file, fsSync.constants.X_OK);
+    return fsSync.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 读取 ffprobe 依赖自带的二进制路径。
+ * 该包在“当前平台没有对应可选依赖”时会直接在加载时报错，
+ * 因此延迟到真正需要时再读取，并允许后续回退到系统 ffprobe。
+ */
+let bundledFfprobePath: string | null | undefined;
+function getBundledFfprobePath(): string | null {
+  if (bundledFfprobePath !== undefined) return bundledFfprobePath;
+  try {
+    const installer = require("@ffprobe-installer/ffprobe") as { path?: unknown };
+    bundledFfprobePath = typeof installer.path === "string" ? installer.path : null;
+  } catch {
+    bundledFfprobePath = null;
+  }
+  return bundledFfprobePath;
+}
+
+/** 内置静态二进制缺少当前平台时，回退到 PATH 里的系统可执行文件。 */
+function findOnPath(command: string): string | undefined {
+  const names = process.platform === "win32" ? [`${command}.exe`, command] : [command];
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir.trim()) continue;
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (isExecutableFile(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 解析媒体工具路径：显式环境变量 > 依赖自带静态二进制 > PATH 里的系统命令。
+ * 有些静态包只带 x64 二进制（例如旧版 ffprobe-static），在 arm64 上路径存在但不可执行，
+ * 这里主动检查文件是否可用，避免等到下载完视频才发现 ffprobe 起不来。
+ */
+function resolveMediaBinary(options: {
+  override: string | undefined;
+  bundled: string | null | undefined;
+  envName: string;
+  command: string;
+  label: string;
+  code: string;
+  reinstallHint: string;
+}): string {
+  const override = options.override?.trim();
+  if (override) {
+    if (isExecutableFile(override)) return override;
+    // 允许环境变量写成命令名（如 FFMPEG_PATH=ffmpeg），按 PATH 解析。
+    const fromPath = findOnPath(override);
+    if (fromPath) return fromPath;
+    throw new AppError(`${options.envName} 指向的 ${options.label}不可用：${override}（文件不存在或不可执行）`, {
+      code: options.code,
     });
   }
-  return resolved;
+  if (options.bundled && isExecutableFile(options.bundled)) return options.bundled;
+  const system = findOnPath(options.command);
+  if (system) return system;
+  throw new AppError(
+    `未找到可用的 ${options.label}：当前平台 ${process.platform}-${process.arch} 没有可执行的依赖二进制，` +
+      `系统 PATH 中也没有 ${options.command}。${options.reinstallHint}，或安装系统 ${options.command}，` +
+      `也可以用 ${options.envName} 指定路径。`,
+    { code: options.code },
+  );
+}
+
+export function getFfmpegPath(): string {
+  return resolveMediaBinary({
+    override: process.env.FFMPEG_PATH,
+    bundled: ffmpegStatic as unknown as string | null,
+    envName: "FFMPEG_PATH",
+    command: "ffmpeg",
+    label: "ffmpeg 可执行文件",
+    code: "FFMPEG_NOT_FOUND",
+    reinstallHint: "请重新安装依赖（ffmpeg-static）",
+  });
 }
 
 export function getFfprobePath(): string {
-  const override = process.env.FFPROBE_PATH?.trim();
-  const resolved = override || ffprobeStatic.path;
-  if (!resolved) {
-    throw new AppError("未找到 ffprobe 可执行文件，请设置 FFPROBE_PATH 或重新安装依赖", {
-      code: "FFPROBE_NOT_FOUND",
-    });
-  }
-  return resolved;
+  return resolveMediaBinary({
+    override: process.env.FFPROBE_PATH,
+    bundled: getBundledFfprobePath(),
+    envName: "FFPROBE_PATH",
+    command: "ffprobe",
+    label: "ffprobe 可执行文件",
+    code: "FFPROBE_NOT_FOUND",
+    reinstallHint: "请重新安装依赖（@ffprobe-installer/ffprobe）",
+  });
 }
 
 export interface RunProcessOptions {

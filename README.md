@@ -31,7 +31,7 @@
 - Node.js >= 20.11
 - pnpm（仓库使用 pnpm 11）
 - 系统安装 CJK 字体（推荐 `Noto Sans CJK SC`；Ubuntu：`sudo apt-get install fonts-noto-cjk`）
-- ffmpeg/ffprobe 由 `ffmpeg-static` / `ffprobe-static` 自动安装，无需系统预装
+- ffmpeg 由 `ffmpeg-static`、ffprobe 由 `@ffprobe-installer/ffprobe` 按当前平台自动安装，无需系统预装；也可用 `FFMPEG_PATH` / `FFPROBE_PATH` 指定系统二进制
 
 ```bash
 pnpm install
@@ -139,6 +139,8 @@ node dist/cli.js create --topic "城市夜景"
 - **不重复提交**：任务没出片时，服务端会记住它（30 分钟内有效），同一配置、描述与时长再次点击测试会复用该任务继续查询；也可以在“已有任务 ID”里填上平台返回的任务号点“取回视频”（等价于传 `resumeTaskId`）。只有拿到成片或任务真正失败后才清除记录。
 
 聚合平台返回结构差异较大，成片地址会按内容智能识别，兼容 `video_url`、`data[0].url`、`output.video_url`、`result.videos[].url` 等嵌套与数组形式；封面图、缩略图不会被误当成视频。任务已完成却找不到可用地址时，错误信息会带上响应片段，便于判断是字段不兼容还是平台异常。
+
+测试提交前会先检查本机 ffmpeg/ffprobe，不可用时直接提示并停止，不会先扣费再失败。取回视频时如果视频已经下载成功、但本机无法解析（例如 ffprobe 不可执行），会立即报错并清理半成品文件，不会把它当成“还没出片”而无限自动续查、反复下载。
 
 ## 用户与权限
 
