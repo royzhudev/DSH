@@ -23,15 +23,15 @@ export interface PreflightInput {
   logger?: Logger;
 }
 
-interface EnvironmentCheck {
+export interface EnvironmentCheck {
   ok: boolean;
   message?: string;
 }
 
 let environmentCheck: Promise<EnvironmentCheck> | undefined;
 
-/** ffmpeg/ffprobe 只验证一次，避免每个任务重复启动进程。 */
-function ensureMediaTools(): Promise<EnvironmentCheck> {
+/** ffmpeg/ffprobe 只验证一次，避免每个任务/测试重复启动进程。 */
+export function ensureMediaTools(): Promise<EnvironmentCheck> {
   environmentCheck ??= (async () => {
     try {
       await runFfmpeg(["-version"], { timeoutMs: 10_000, maxCapture: 4096 });

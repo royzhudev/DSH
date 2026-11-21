@@ -34,7 +34,7 @@ import {
   type UpdateCastOptions,
 } from "../cast/library.js";
 import { generateCastImage } from "../cast/imagegen.js";
-import { STORY_MAX_LENGTH, preflightScript, preflightVideoJob } from "../preflight.js";
+import { STORY_MAX_LENGTH, ensureMediaTools, preflightScript, preflightVideoJob } from "../preflight.js";
 import { reviewCreation } from "../creation/review.js";
 import { createScriptProvider } from "../script/index.js";
 import { normalizeDraftScript } from "../script/draft.js";
@@ -1034,6 +1034,15 @@ async function handleSettingsTest(
     }
     const outputDir = path.join(config.cacheDir, "settings-test");
     await ensureDir(outputDir);
+    // 生成和取回都要在本机用 ffprobe 校验视频。先检查媒体工具，
+    // 避免提交并扣费之后才发现无法取回（这与任务预检使用同一份探测结果）。
+    const mediaTools = await ensureMediaTools();
+    if (!mediaTools.ok && mediaTools.message) {
+      throw new AppError(`${mediaTools.message}。请先修复本机媒体工具再测试，避免生成扣费后无法取回视频`, {
+        code: "PREFLIGHT_FAILED",
+        status: 400,
+      });
+    }
     const key = settingsTestKey(config, prompt, durationSec);
     // 一次请求内最多等待 3 分钟；超时后任务通常仍在平台侧生成，继续复用而不是重新提交。
     const budgetMs = Math.min(config.videoGen.timeoutMs, 180_000);
