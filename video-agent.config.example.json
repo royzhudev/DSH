@@ -58,6 +58,7 @@
   },
   "settingsFile": "./data/settings.json",
   "videoGen": {
+    "channel": "none",
     "provider": "none",
     "baseUrl": "",
     "model": "video-gen-1",

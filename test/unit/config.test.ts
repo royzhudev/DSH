@@ -188,3 +188,35 @@ test("loadConfig 仍然拒绝大小写归一化后依然未知的供应商", asy
     (error: unknown) => error instanceof AppError && error.code === "CONFIG_INVALID",
   );
 });
+
+test("loadConfig 旧版没有 channel 的自定义画面地址仍按 custom 解释", async () => {
+  const dir = await makeTempDir();
+  await fs.mkdir(path.join(dir, "data"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "data", "settings.json"),
+    JSON.stringify({
+      videoGen: {
+        provider: "http",
+        protocol: "generic",
+        baseUrl: "https://gateway.example.com",
+        model: "custom-video-model",
+        submitPath: "/v1/videos/generations",
+        pollPath: "/v1/videos/generations/{id}",
+        apiKey: "custom-key",
+      },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.channel, "custom");
+  assert.equal(config.videoGen.baseUrl, "https://gateway.example.com");
+  assert.equal(config.videoGen.model, "custom-video-model");
+});
+
+test("loadConfig 默认画面渠道是阿里百炼 wan3.0-video", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.channel, "bailian-wan3");
+  assert.equal(config.videoGen.model, "wan3.0-video");
+  assert.equal(config.videoGen.protocol, "auto");
+});

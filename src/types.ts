@@ -311,14 +311,22 @@ export interface LipsyncProvider {
   sync(request: LipsyncRequest, outputDir: string, signal?: AbortSignal): Promise<LipsyncResult>;
 }
 
+/**
+ * 画面模型渠道：选中渠道后地址、模型、路径等参数由程序自动生成，
+ * 用户只需要填写对应平台的 API Key。custom 保留给其他聚合平台/自建网关。
+ */
+export type VideoGenChannel = "none" | "bailian-wan3" | "aggregator-seedance2" | "custom";
+
 export interface VideoGenSettings {
+  channel: VideoGenChannel;
   provider: VideoGenProviderName;
   baseUrl: string;
   /**
    * 接口协议：auto 按服务地址判断（DashScope 用 dashscope，其他用 generic）。
    * dashscope = 阿里百炼异步视频接口（提交带 X-DashScope-Async，任务在 output.task_id）。
+   * seedance = 第三方聚合平台的 Seedance 2.0 视频接口（OpenAI 风格提交 + 任务轮询）。
    */
-  protocol: "auto" | "dashscope" | "generic";
+  protocol: "auto" | "dashscope" | "generic" | "seedance";
   apiKey?: string;
   model: string;
   /** 已生成分镜的局部编辑模型；默认 wan2.7-videoedit。 */

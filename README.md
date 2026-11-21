@@ -198,9 +198,11 @@ cp video-agent.config.example.json video-agent.config.json
 
 ### AI 画面生成
 
-`videoGen.provider` 默认为 `http`，并预置阿里百炼（DashScope）的 Wan 视频模型：服务地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。**API Key 需要自己填写**（设置页「AI 画面生成」的 API Key，或 `VIDEOGEN_API_KEY`）；没有 Key 时任务会在本地预检阶段直接报错，不会发起付费请求。不需要 AI 画面时把供应商改为「不使用」。
+`videoGen.channel` 支持 `bailian-wan3`（默认，阿里百炼 Wan 3.0）、`aggregator-seedance2`（第三方聚合平台 Seedance 2.0，默认接词易 Token / Tokease）、`custom`（自定义 HTTP 网关）和 `none`。在设置页选中渠道后，模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成，**用户只需要填写该平台的 API Key**；只有选 `custom` 时才需要手填其余参数。切到新渠道后请换填对应平台的 Key。
 
-`protocol` 决定请求格式：`auto`（默认）按服务地址判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope` 或 `generic`。
+`videoGen.provider` 默认为 `http`，并预置阿里百炼（DashScope）的 Wan 视频模型：服务地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。**API Key 需要自己填写**（设置页「AI 画面生成」的 API Key，或 `VIDEOGEN_API_KEY`）；没有 Key 时任务会在本地预检阶段直接报错，不会发起付费请求。不需要 AI 画面时把渠道改为「不使用」。
+
+`protocol` 决定请求格式：`auto`（默认）按服务地址判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`protocol=seedance` 或模型名包含 `Seedance` 时用聚合平台协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance` 或 `generic`。
 
 服务地址填的是阿里百炼（`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com`）时会自动纠正成异步写法：协议若是「通用 HTTP 契约」会改回 `dashscope`，提交/查询路径还是通用默认值（`/v1/videos/generations`）也会换成上面的百炼路径；只填域名（少了 `https://`）或把完整接口地址粘进「服务地址」也会被纠正。这样就不会出现平台报 `AccessDenied: current user api does not support synchronous calls`（该接口只支持异步调用，需要 `X-DashScope-Async: enable`）。
 
@@ -219,11 +221,25 @@ GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
 
 轮询会识别 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` 等状态。百炼/万相 3.0 的分镜会带上角色库参考图：`media[type=reference_image]`（最多 10 张），没有参考图时才用 `media[type=first_frame]` 首帧——首帧和参考图在平台上互斥，同一请求不能混用；早期 Wan 模型仍走 `input.img_url`。
 
+第三方聚合平台 · Seedance 2.0（`protocol=seedance`，默认接词易 Token / Tokease）：
+
+```http
+POST https://tokease.cn/v1/video/generations
+Authorization: Bearer <API_KEY>
+
+{"model": "Seedance 2.0", "prompt": "...", "duration": 5, "resolution": "720p", "ratio": "9:16", "images": ["https://.../frame.png"]}
+
+GET https://tokease.cn/v1/video/generations/{task_id}
+→ {"id": "...", "status": "completed", "output": {"video_url": "https://..."}}
+```
+
+提交返回任务 `id`；轮询状态为 `queued` / `in_progress` / `completed` / `failed`，成功后取 `output.video_url`。Seedance 2.0 的时长是 **4–15 秒**（程序会把不足 4 秒的测试请求按 4 秒提交），分辨率支持 `480p/720p/1080p/4k`，比例支持 `16:9/9:16/1:1`；图生视频把首帧和角色参考图放进 `images`（最多 10 张）。该平台的文档要求图片是可公开访问的 URL 或 `asset://` 资源；本程序当前发送的是内联 data URL，若平台拒绝 data URL，需要先把参考图上传到可访问地址，或改用通用 HTTP 网关。
+
 > **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
 >
-> 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`（设置页「AI 画面生成 → 局部编辑模型」可改），走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。
+> 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`，走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。该功能**仅阿里百炼渠道可用**：选 Seedance 2.0 聚合渠道时页面会隐藏「局部修改」按钮，接口也会返回 409 提示切换渠道。
 >
-> 接入步骤：设置 → AI 画面生成 → 点「一键填入百炼 Wan 3.0 默认值」→ 填 API Key → 保存设置 → 点「生成测试视频」。默认值为：接口协议「阿里百炼 DashScope」、接口地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。
+> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0 或第三方聚合平台 · Seedance 2.0）→ 只填该渠道的 API Key → 保存设置 → 点「生成测试视频」。地址、模型、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填。
 >
 > 万相 3.0 的请求体是 `{model, input:{prompt, media[]}, parameters:{resolution, ratio, duration}}`：竖屏默认 `720P` + `9:16`，时长 2–30 秒；图生视频首帧放 `media:[{type:"first_frame", url:"data:image/png;base64,..."}]`。早期 Wan 模型仍用 `parameters.size` 与 `input.img_url`。
 >
@@ -265,9 +281,9 @@ GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
 
 状态与地址字段的兼容：除了 `status` / `state` 与 `video_url`，也识别嵌套结构（`data.status`、`data.task.status`、`data.output.video_url`、`output.url`、`videos[0].file_url` 等）与数组；封面、缩略图字段会被跳过。任务已完成但没解析到地址时，错误信息会带上响应结构摘要，提示用「视频地址字段」补一条点号路径（如 `data.output.video_url`），配置后没取到会自动回退识别。
 
-相关变量：`VIDEOGEN_PROVIDER`、`VIDEOGEN_PROTOCOL`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`。
+相关变量：`VIDEOGEN_CHANNEL`、`VIDEOGEN_PROVIDER`、`VIDEOGEN_PROTOCOL`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`。网页设置优先于这些变量；日常使用建议只在设置页选择渠道并填 Key，渠道会自动带出其余参数。
 
-> 默认内置阿里百炼（DashScope）异步视频协议；通用 HTTP 契约适合自建网关。使用 Runway、可灵、即梦等其它模型时，请通过网关把厂商 API 适配成通用格式。
+> 默认内置阿里百炼（DashScope）异步视频协议；通用 HTTP 契约适合自建网关和词易 Token 之外的聚合平台。使用 Runway、可灵、即梦等其它模型时，请通过网关把厂商 API 适配成通用格式。
 
 ### 抖音开放平台
 
