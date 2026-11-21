@@ -202,7 +202,7 @@ cp video-agent.config.example.json video-agent.config.json
 
 `videoGen.provider` 默认为 `http`，并预置阿里百炼（DashScope）的 Wan 视频模型：服务地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。**API Key 需要自己填写**（设置页「AI 画面生成」的 API Key，或 `VIDEOGEN_API_KEY`）；没有 Key 时任务会在本地预检阶段直接报错，不会发起付费请求。不需要 AI 画面时把渠道改为「不使用」。
 
-`protocol` 决定请求格式：`auto`（默认）按服务地址判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`protocol=seedance` 或模型名包含 `Seedance` 时用聚合平台协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance` 或 `generic`。
+`protocol` 决定请求格式：`auto`（默认）按服务地址与模型名判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`protocol=seedance` 或模型名包含 `Seedance` 时用聚合平台协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance` 或 `generic`。
 
 服务地址填的是阿里百炼（`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com`）时会自动纠正成异步写法：协议若是「通用 HTTP 契约」会改回 `dashscope`，提交/查询路径还是通用默认值（`/v1/videos/generations`）也会换成上面的百炼路径；只填域名（少了 `https://`）或把完整接口地址粘进「服务地址」也会被纠正。这样就不会出现平台报 `AccessDenied: current user api does not support synchronous calls`（该接口只支持异步调用，需要 `X-DashScope-Async: enable`）。
 
