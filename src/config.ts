@@ -27,7 +27,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4o-mini",
     temperature: 0.7,
-    targetDurationSec: 45,
+    targetDurationSec: 15,
     maxSegments: 6,
     timeoutMs: 120_000,
     fallbackToOffline: true,
