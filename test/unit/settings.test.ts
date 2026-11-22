@@ -114,3 +114,38 @@ test("SettingsStore 把大写供应商名保存成小写，创建任务不再报
   const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
   assert.equal(reloaded.tts.provider, "bailian");
 });
+
+test("SettingsStore 选中画面渠道后只填 API Key，其余参数自动生成并可重启恢复", async () => {
+  const dir = await makeTempDir();
+  const { config, store } = await makeStore(dir);
+  const saved = await store.update({
+    videoGen: { channel: "aggregator-seedance2", apiKey: "tk-seedance" },
+  });
+  assert.equal(config.videoGen.channel, "aggregator-seedance2");
+  assert.equal(config.videoGen.provider, "http");
+  assert.equal(config.videoGen.protocol, "seedance");
+  assert.equal(config.videoGen.baseUrl, "https://tokease.cn");
+  assert.equal(config.videoGen.model, "Seedance 2.0");
+  assert.equal(config.videoGen.submitPath, "/v1/video/generations");
+  assert.equal(config.videoGen.pollPath, "/v1/video/generations/{id}");
+  assert.equal(config.videoGen.resultPath, "output.video_url");
+  assert.equal(config.videoGen.apiKey, "tk-seedance");
+  assert.equal(saved.videoGen.apiKeySet, true);
+  assert.equal(saved.videoGen.model, "Seedance 2.0");
+  assert.equal(saved.videoGenChannels.find((item) => item.channel === "aggregator-seedance2")?.fields?.model, "Seedance 2.0");
+
+  // 重启服务后重新读取设置，渠道与自动参数都要保留。
+  const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
+  assert.equal(reloaded.videoGen.channel, "aggregator-seedance2");
+  assert.equal(reloaded.videoGen.model, "Seedance 2.0");
+  assert.equal(reloaded.videoGen.protocol, "seedance");
+
+  // 切回百炼同样只需要给渠道与 Key。
+  await store.update({ videoGen: { channel: "bailian-wan3", apiKey: null } });
+  assert.equal(config.videoGen.channel, "bailian-wan3");
+  assert.equal(config.videoGen.protocol, "dashscope");
+  assert.equal(config.videoGen.baseUrl, "https://dashscope.aliyuncs.com");
+  assert.equal(config.videoGen.model, "wan3.0-video");
+  assert.equal(config.videoGen.model, "wan3.0-video");
+  assert.equal(config.videoGen.apiKey, "");
+});

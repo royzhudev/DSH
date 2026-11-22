@@ -199,6 +199,8 @@ test(
     assert.match(scriptText, /data-test="videogen"/);
     assert.match(scriptText, /data-resume="videogen"/);
     assert.match(scriptText, /videogen-test-task/);
+    assert.match(scriptText, /videogen-channel/);
+    assert.match(scriptText, /videogen-auto-fields/);
     assert.match(scriptText, /data-test="douyin"/);
     assert.match(scriptText, /segment-edit-dialog/);
     assert.match(scriptText, /imagegen-preset/);
@@ -210,10 +212,25 @@ test(
 
     const settingsResponse = await request(`${app.url}/api/settings`);
     const initial = (await settingsResponse.json()) as {
-      settings: { script: { apiKeySet: boolean; provider: string; model: string } };
+      settings: {
+        script: { apiKeySet: boolean; provider: string; model: string };
+        videoGen: { channel: string; model: string; protocol: string };
+        videoGenChannels: Array<{
+          channel: string;
+          label: string;
+          fields?: { model: string; protocol: string };
+        }>;
+      };
     };
     assert.equal(initial.settings.script.apiKeySet, false);
     assert.equal(initial.settings.script.provider, "offline");
+    assert.equal(initial.settings.videoGen.channel, "bailian-wan3");
+    assert.equal(initial.settings.videoGen.model, "wan3.0-video");
+    const seedanceChannel = initial.settings.videoGenChannels.find(
+      (item) => item.channel === "aggregator-seedance2",
+    );
+    assert.equal(seedanceChannel?.fields?.model, "Seedance 2.0");
+    assert.equal(seedanceChannel?.fields?.protocol, "seedance");
 
     const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },
@@ -271,9 +288,27 @@ test(
     const disabledVideoGen = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "videogen" });
     assert.equal(disabledVideoGen.status, 400);
 
+    // 只传渠道与 Key：服务端应自动写入 Seedance 2.0 聚合平台的地址、模型与路径。
+    const channelPut = await jsonRequest(request, `${app.url}/api/settings`, {
+      videoGen: { channel: "aggregator-seedance2", apiKey: "tk-seedance" },
+    }, "PUT");
+    assert.equal(channelPut.status, 200, await channelPut.clone().text());
+    const channelSettings = (await channelPut.json()) as {
+      settings: {
+        videoGen: { channel: string; baseUrl: string; model: string; protocol: string; submitPath: string };
+      };
+    };
+    assert.equal(channelSettings.settings.videoGen.channel, "aggregator-seedance2");
+    assert.equal(channelSettings.settings.videoGen.baseUrl, "https://tokease.cn");
+    assert.equal(channelSettings.settings.videoGen.model, "Seedance 2.0");
+    assert.equal(channelSettings.settings.videoGen.protocol, "seedance");
+    assert.equal(channelSettings.settings.videoGen.submitPath, "/v1/video/generations");
+
     const videoGenPut = await jsonRequest(request, `${app.url}/api/settings`, {
       videoGen: {
+        channel: "custom",
         provider: "http",
+        protocol: "generic",
         baseUrl: videoGen.url,
         model: "test-model",
         apiKey: "videogen-key",
@@ -325,7 +360,7 @@ test(
 
     // 测试完成后关闭 AI 画面，避免影响后面的完整任务流程。
     const videoGenReset = await jsonRequest(request, `${app.url}/api/settings`, {
-      videoGen: { provider: "none" },
+      videoGen: { channel: "none", provider: "none" },
     }, "PUT");
     assert.equal(videoGenReset.status, 200, await videoGenReset.clone().text());
 

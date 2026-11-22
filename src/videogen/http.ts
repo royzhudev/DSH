@@ -198,7 +198,7 @@ function httpFailureMessage(status: number, text: string, requestUrl = ""): stri
   if (status === 429 || /throttl|rate.?limit|quota|limit.*exceed|并发/.test(lower)) {
     hints.push("平台限流或并发已满，稍等再试；已提交的任务可在设置页继续查询，不要重复提交");
   }
-  if (/duration|时长|seconds|秒/.test(lower)) hints.push("该模型可能不支持所填时长（百炼 Wan 常见为 5 秒，可先改用 5 秒）");
+  if (/duration|时长|seconds|秒/.test(lower)) hints.push("该模型可能不支持所填时长（百炼 Wan 常见 5 秒；Seedance 2.0 支持 4–15 秒）");
   if (/size|resolution|分辨率|像素|aspect/.test(lower)) hints.push("画面尺寸不被接受，可填 720*1280 或 1280*720");
   if (/model/.test(lower)) hints.push("模型名称不被平台接受，核对模型名是否与服务商一致");
   if (/prompt|描述/.test(lower)) hints.push("描述可能触发了内容审核，换个说法再试");
@@ -347,9 +347,14 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         : null;
   }
 
-  /** 接口协议：显式配置优先，auto 时按服务地址判断（DashScope 用异步任务接口）。 */
-  private protocol(): "dashscope" | "generic" {
+  /** 接口协议：显式配置优先，auto 时按模型/服务地址判断（DashScope 用异步任务接口）。 */
+  private protocol(): "dashscope" | "seedance" | "generic" {
     const configured = this.settings.protocol;
+    if (configured === "seedance") return "seedance";
+    if (configured === "auto" && /seedance/i.test(this.settings.model)) {
+      // 渠道未显式配置时，模型名已经写明 Seedance 2.0，按聚合平台的 content/images 协议发送。
+      return "seedance";
+    }
     if (configured === "dashscope") return "dashscope";
     // 地址或提交路径已经是百炼视频接口时，必须走异步协议：
     // 百炼的 video-synthesis 不支持同步调用，协议选错会直接 AccessDenied。
@@ -376,13 +381,31 @@ export class HttpVideoGenProvider implements VideoGenProvider {
 
   /**
    * 按协议组装提交体。DashScope（阿里百炼）用 {model, input, parameters}，
-   * 图生视频的首帧放 input.img_url；通用 HTTP 契约保持扁平字段。
+   * 图生视频的首帧放 input.img_url；Seedance 聚合协议用 {model, prompt, duration,
+   * resolution, ratio, images[]}；通用 HTTP 契约保持扁平字段。
    */
   private submitBody(
     request: VideoGenRequest,
     image: string | undefined,
     referenceImages: Array<{ role: string; name: string; image: string }>,
   ): Record<string, unknown> {
+    if (this.protocol() === "seedance") {
+      // 第三方聚合平台（词易 Token）的 Seedance 2.0 接受 4–15 秒；
+      // 平台也会按 images 数组做图生视频/多参考图，首帧与角色参考图都可放进去。
+      const duration = Math.min(15, Math.max(4, Math.round(request.durationSec)));
+      const images = [
+        ...(image ? [image] : []),
+        ...referenceImages.map((reference) => reference.image),
+      ].slice(0, 10);
+      return {
+        model: this.settings.model,
+        prompt: request.prompt,
+        duration,
+        resolution: "720p",
+        ratio: this.DASHSCOPE_RATIO,
+        ...(images.length > 0 ? { images } : {}),
+      };
+    }
     if (this.protocol() === "dashscope") {
       const duration = Math.max(1, Math.round(request.durationSec));
       const wan3 = /^wan3[.\-]/i.test(this.settings.model.trim());

@@ -1233,6 +1233,13 @@ function segmentEditDialogHtml() {
 function scriptSectionHtml(job) {
   if (!job.segments?.length) return "";
   const cast = job.cast ?? [];
+  // 局部修改依赖百炼视频编辑模型；Seedance 聚合渠道下按钮不可用，避免点了才报错。
+  const videoChannel = state.settings?.videoGenChannels?.find(
+    (item) => item.channel === state.settings?.videoGen?.channel,
+  );
+  const videoEditReady = videoChannel
+    ? videoChannel.editSupported
+    : state.settings?.videoGen?.channel !== "aggregator-seedance2";
   return `<section class="card mt-24">
     <div class="card-head">
       <div><div class="card-title">分镜脚本</div><div class="card-sub">${esc(job.script?.title ?? job.topic)}</div></div>
@@ -1279,7 +1286,7 @@ function scriptSectionHtml(job) {
                 ${segment.edited ? `<div><span class="pill pill-brand">已局部修改</span></div>` : ""}
                 <div class="material-meta">${formatDuration(segment.durationSec)}</div>
                 ${
-                  job.state === "succeeded" && segment.renderedFile
+                  job.state === "succeeded" && segment.renderedFile && videoEditReady
                     ? `<button class="btn btn-ghost btn-sm segment-edit-btn mt-8" type="button" data-seg="${esc(segment.index)}" ${job.edit?.status === "running" ? "disabled" : ""}>${icon("wand", 14)} 局部修改</button>`
                     : ""
                 }
@@ -2772,6 +2779,9 @@ async function renderSettings() {
   updateModelPill();
   const voiceCatalog = await loadVoiceCatalog(false, s.tts.provider, s.tts.model);
   const redirectUri = s.douyin.effectiveRedirectUri;
+  const videoChannels = s.videoGenChannels ?? [];
+  const activeVideoChannel =
+    videoChannels.find((item) => item.channel === s.videoGen.channel) ?? videoChannels[0];
 
   view.innerHTML = `
     <section class="page-head">
@@ -2869,67 +2879,90 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
-          <div><div class="card-title">AI 画面生成</div><div class="card-sub">可选：文生视频 + 图生视频，有角色参考图时自动沿用同一形象</div></div>
-          <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? "已启用" : "未启用"}</span>
+          <div><div class="card-title">AI 画面生成</div><div class="card-sub">选择模型渠道后只需填写 API Key，其余参数自动生成</div></div>
+          <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? (s.videoGen.apiKeySet ? "已启用" : "待填 API Key") : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼</strong>的 Wan 视频模型（<code>wan3.0-video</code>），API Key 需要自己填写；没有 Key 时任务会在本地预检阶段报错，不会产生费用。百炼各接口对异步的要求不一样：video-synthesis <strong>必须带异步请求头</strong> <code>X-DashScope-Async: enable</code>（缺少时报 <code>does not support synchronous calls</code>），任务查询接口是同步的，<strong>不能</strong>带这个头（带上会报 <code>does not support asynchronous calls</code>），程序只在提交时添加；平台在两个方向都用 403 表态时还会自动切换一次并重试。返回 <code>output.task_id</code> 后查询 <code>/api/v1/tasks/{id}</code> 得到 <code>output.video_url</code>；万相 3.0 用 <code>parameters.resolution/ratio/duration</code>，图生视频首帧放 <code>input.media[type=first_frame]</code>。通用 HTTP 契约则提交 <code>{model, prompt, duration_sec, aspect_ratio}</code> 并返回 video_url 或任务 id，图生视频额外携带 <code>image</code> 与 <code>reference_images</code>；返回字段兼容嵌套与数组形式。</span></div>
-          <div class="field-grid-3">
+          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；第三方聚合平台（默认词易 Token）走 <code>Seedance 2.0</code> 的 <code>/v1/video/generations</code> 任务接口。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
+          <div class="field-grid-2">
             <div class="field">
-              <label for="videogen-provider">供应商</label>
-              <select class="select" id="videogen-provider">
-                ${options([["none", "不使用"], ["http", "HTTP 文生/图生视频接口"]], s.videoGen.provider)}
+              <label for="videogen-channel">模型渠道</label>
+              <select class="select" id="videogen-channel">
+                ${options(videoChannels.map((item) => [item.channel, item.label]), s.videoGen.channel)}
               </select>
+              <span class="hint" id="videogen-channel-hint">${esc(activeVideoChannel?.description ?? "")}</span>
             </div>
             <div class="field">
-              <label for="videogen-model">模型</label>
-              <input class="input" id="videogen-model" value="${attr(s.videoGen.model)}" placeholder="video-gen-1" />
-            </div>
-            <div class="field">
-              <label for="videogen-edit-model">局部编辑模型</label>
-              <input class="input" id="videogen-edit-model" value="${attr(s.videoGen.editModel)}" placeholder="wan2.7-videoedit" />
-              <span class="hint">成片详情里的「局部修改」用这个模型；百炼默认 wan2.7-videoedit。</span>
-            </div>
-            <div class="field">
-              <label for="videogen-base-url">接口地址</label>
-              <input class="input" id="videogen-base-url" value="${attr(s.videoGen.baseUrl)}" placeholder="https://api.example.com" />
+              <label>自动生成参数</label>
+              <span class="hint" id="videogen-auto-hint">选中渠道后地址、模型、路径等参数自动生成，只需要填写 API Key。</span>
             </div>
           </div>
-          ${secretField("videogen-api-key", "API Key", { set: s.videoGen.apiKeySet, hint: s.videoGen.apiKeyHint })}
-          <div class="field-grid-3">
-            <div class="field">
-              <label for="videogen-submit-path">提交路径</label>
-              <input class="input" id="videogen-submit-path" value="${attr(s.videoGen.submitPath)}" />
+          <div id="videogen-key-wrap" ${activeVideoChannel?.channel === "none" ? "hidden" : ""}>
+            ${secretField("videogen-api-key", "API Key（只需填这一项）", { set: s.videoGen.apiKeySet, hint: s.videoGen.apiKeyHint }, "只填所选渠道的 API Key；其余参数由渠道自动生成，切换渠道后请换填对应平台的 Key")}
+          </div>
+          <div class="field-grid-3" id="videogen-auto-fields" ${activeVideoChannel?.fields ? "" : "hidden"}>
+            <div class="field"><label>模型（自动）</label><input class="input" id="videogen-auto-model" readonly /></div>
+            <div class="field"><label>接口地址（自动）</label><input class="input" id="videogen-auto-base-url" readonly /></div>
+            <div class="field"><label>接口协议（自动）</label><input class="input" id="videogen-auto-protocol" readonly /></div>
+            <div class="field"><label>提交路径（自动）</label><input class="input" id="videogen-auto-submit-path" readonly /></div>
+            <div class="field"><label>查询路径（自动）</label><input class="input" id="videogen-auto-poll-path" readonly /></div>
+            <div class="field"><label>轮询 / 超时（自动）</label><input class="input" id="videogen-auto-timing" readonly /></div>
+          </div>
+          <span class="hint" id="videogen-auto-result-hint"></span>
+          <div id="videogen-advanced" ${activeVideoChannel?.channel === "custom" ? "" : "hidden"}>
+            <div class="field-grid-3">
+              <div class="field">
+                <label for="videogen-provider">供应商</label>
+                <select class="select" id="videogen-provider">
+                  ${options([["none", "不使用"], ["http", "HTTP 文生/图生视频接口"]], s.videoGen.provider)}
+                </select>
+              </div>
+              <div class="field">
+                <label for="videogen-model">模型</label>
+                <input class="input" id="videogen-model" value="${attr(s.videoGen.model)}" placeholder="video-gen-1" />
+              </div>
+              <div class="field">
+                <label for="videogen-edit-model">局部编辑模型</label>
+                <input class="input" id="videogen-edit-model" value="${attr(s.videoGen.editModel)}" placeholder="wan2.7-videoedit" />
+                <span class="hint">成片详情里的「局部修改」用这个模型；仅阿里百炼渠道支持。</span>
+              </div>
+              <div class="field">
+                <label for="videogen-base-url">接口地址</label>
+                <input class="input" id="videogen-base-url" value="${attr(s.videoGen.baseUrl)}" placeholder="https://api.example.com" />
+              </div>
+            </div>
+            <div class="field-grid-3">
+              <div class="field">
+                <label for="videogen-submit-path">提交路径</label>
+                <input class="input" id="videogen-submit-path" value="${attr(s.videoGen.submitPath)}" />
+              </div>
+              <div class="field">
+                <label for="videogen-poll-path">查询路径模板</label>
+                <input class="input" id="videogen-poll-path" value="${attr(s.videoGen.pollPath)}" />
+              </div>
+              <div class="field">
+                <label for="videogen-protocol">接口协议</label>
+                <select class="select" id="videogen-protocol">
+                  ${options([
+                    ["auto", "自动（按服务地址）"],
+                    ["dashscope", "阿里百炼 DashScope"],
+                    ["seedance", "Seedance 2.0 聚合协议"],
+                    ["generic", "通用 HTTP 契约"],
+                  ], s.videoGen.protocol ?? "auto")}
+                </select>
+                <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送；Seedance 2.0 聚合协议使用 <code>prompt/duration/ratio/images</code> 提交。</div>
+              </div>
+            </div>
+            <div class="field-grid-3">
+              ${numberField("videogen-poll-interval", "轮询间隔（毫秒）", s.videoGen.pollIntervalMs, { min: 200, max: 60000, step: 100 })}
+              ${numberField("videogen-timeout", "超时（毫秒）", s.videoGen.timeoutMs, { min: 5000, max: 1800000, step: 1000 })}
+              ${numberField("videogen-clip-duration", "单段时长（秒）", s.videoGen.clipDurationSec, { min: 2, max: 60 })}
             </div>
             <div class="field">
-              <label for="videogen-poll-path">查询路径模板</label>
-              <input class="input" id="videogen-poll-path" value="${attr(s.videoGen.pollPath)}" />
+              <label for="videogen-result-path">视频地址字段 <span class="optional">可选，留空自动识别</span></label>
+              <input class="input" id="videogen-result-path" value="${attr(s.videoGen.resultPath ?? "")}" placeholder="例如 data.output.video_url" />
+              <span class="hint">自动兼容 video_url / url / output / data.* 等常见字段；聚合平台结构特殊时再填点号路径，取不到会自动回退</span>
             </div>
-            <div class="field">
-              <label for="videogen-protocol">接口协议</label>
-              <select class="select" id="videogen-protocol">
-                ${options([
-                  ["auto", "自动（按服务地址）"],
-                  ["dashscope", "阿里百炼 DashScope"],
-                  ["generic", "通用 HTTP 契约"],
-                ], s.videoGen.protocol ?? "auto")}
-              </select>
-              <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送（带 X-DashScope-Async: enable）；平台说只支持同步时会自动去掉该头重试一次，不用自己处理</div>
-            </div>
-          </div>
-          <div class="test-row">
-            <button class="btn btn-ghost btn-sm" type="button" id="videogen-preset">一键填入百炼 Wan 3.0 默认值</button>
-            <span class="hint" id="videogen-preset-hint">会把协议、地址、模型、路径恢复成阿里百炼的异步视频接口；填入后点「保存设置」再测试</span>
-          </div>
-          <div class="field-grid-3">
-            ${numberField("videogen-poll-interval", "轮询间隔（毫秒）", s.videoGen.pollIntervalMs, { min: 200, max: 60000, step: 100 })}
-            ${numberField("videogen-timeout", "超时（毫秒）", s.videoGen.timeoutMs, { min: 5000, max: 1800000, step: 1000 })}
-            ${numberField("videogen-clip-duration", "单段时长（秒）", s.videoGen.clipDurationSec, { min: 2, max: 60 })}
-          </div>
-          <div class="field">
-            <label for="videogen-result-path">视频地址字段 <span class="optional">可选，留空自动识别</span></label>
-            <input class="input" id="videogen-result-path" value="${attr(s.videoGen.resultPath ?? "")}" placeholder="例如 data.output.video_url" />
-            <span class="hint">自动兼容 video_url / url / output / data.* 等常见字段；聚合平台结构特殊时再填点号路径，取不到会自动回退</span>
           </div>
           ${switchField("videogen-fallback", "生成失败时回退素材库", s.videoGen.fallbackToMaterials)}
           <div class="test-generator">
@@ -3146,25 +3179,61 @@ async function renderSettings() {
     void saveSettings();
   });
 
-  // 百炼接错地址/协议时最容易反复踩坑，给一个一键恢复默认值的入口。
-  document.getElementById("videogen-preset")?.addEventListener("click", () => {
-    const set = (id, value) => {
+  // 渠道切换：选中预设渠道后自动回填地址、模型、路径与轮询参数，用户只需要填 Key。
+  const videoChannelSelect = document.getElementById("videogen-channel");
+  const videoChannelHint = document.getElementById("videogen-channel-hint");
+  const videoKeyWrap = document.getElementById("videogen-key-wrap");
+  const videoAutoFields = document.getElementById("videogen-auto-fields");
+  const videoAdvanced = document.getElementById("videogen-advanced");
+  const setVideoField = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  };
+  const videoField = (id) => document.getElementById(id)?.value ?? "";
+  const syncVideoChannel = (channel) => {
+    const option = videoChannels.find((item) => item.channel === channel);
+    const fields = option?.fields;
+    if (videoChannelHint) videoChannelHint.textContent = option?.description ?? "";
+    if (videoKeyWrap) videoKeyWrap.hidden = channel === "none";
+    if (videoAutoFields) videoAutoFields.hidden = !fields;
+    if (videoAdvanced) videoAdvanced.hidden = channel !== "custom";
+    if (fields) {
+      setVideoField("videogen-provider", fields.provider);
+      setVideoField("videogen-protocol", fields.protocol);
+      setVideoField("videogen-base-url", fields.baseUrl);
+      setVideoField("videogen-model", fields.model);
+      setVideoField("videogen-edit-model", fields.editModel);
+      setVideoField("videogen-submit-path", fields.submitPath);
+      setVideoField("videogen-poll-path", fields.pollPath);
+      setVideoField("videogen-poll-interval", String(fields.pollIntervalMs));
+      setVideoField("videogen-timeout", String(fields.timeoutMs));
+      setVideoField("videogen-clip-duration", String(fields.clipDurationSec));
+      setVideoField("videogen-result-path", fields.resultPath);
+    } else if (channel === "none") {
+      setVideoField("videogen-provider", "none");
+    } else if (videoField("videogen-provider") === "none") {
+      setVideoField("videogen-provider", "http");
+    }
+    const autoValues = {
+      "videogen-auto-model": videoField("videogen-model"),
+      "videogen-auto-base-url": videoField("videogen-base-url"),
+      "videogen-auto-protocol": videoField("videogen-protocol"),
+      "videogen-auto-submit-path": videoField("videogen-submit-path"),
+      "videogen-auto-poll-path": videoField("videogen-poll-path"),
+      "videogen-auto-timing": `${videoField("videogen-poll-interval")} 毫秒 / ${videoField("videogen-timeout")} 毫秒`,
+    };
+    for (const [id, value] of Object.entries(autoValues)) {
       const el = document.getElementById(id);
       if (el) el.value = value;
-    };
-    set("videogen-provider", "http");
-    set("videogen-protocol", "dashscope");
-    set("videogen-base-url", "https://dashscope.aliyuncs.com");
-    set("videogen-model", "wan3.0-video");
-    set("videogen-edit-model", "wan2.7-videoedit");
-    set("videogen-submit-path", "/api/v1/services/aigc/video-generation/video-synthesis");
-    set("videogen-poll-path", "/api/v1/tasks/{id}");
-    set("videogen-poll-interval", "3000");
-    set("videogen-timeout", "600000");
-    set("videogen-result-path", "");
-    const hint = document.getElementById("videogen-preset-hint");
-    if (hint) hint.textContent = "已填入百炼 Wan 3.0 默认值，点「保存设置」后即可测试";
-  });
+    }
+    const resultHint = document.getElementById("videogen-auto-result-hint");
+    if (resultHint) {
+      const resultPath = videoField("videogen-result-path");
+      resultHint.textContent = `视频地址字段（自动）：${resultPath || "自动识别"}`;
+    }
+  };
+  videoChannelSelect?.addEventListener("change", () => syncVideoChannel(videoChannelSelect.value));
+  syncVideoChannel(s.videoGen.channel);
 
   document.getElementById("imagegen-preset")?.addEventListener("click", () => {
     const set = (id, value) => {
@@ -3252,6 +3321,7 @@ function collectSettings() {
   if (ttsKey !== undefined) tts.apiKey = ttsKey;
 
   const videoGen = {
+    channel: value("videogen-channel"),
     provider: value("videogen-provider"),
     model: value("videogen-model").trim(),
     editModel: value("videogen-edit-model").trim() || "wan2.7-videoedit",

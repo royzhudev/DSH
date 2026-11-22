@@ -2,7 +2,22 @@ import path from "node:path";
 import fs from "node:fs";
 import { AppError } from "./errors.js";
 import { TTS_PROVIDER_NAMES } from "./types.js";
-import type { AppConfig, ScriptProviderName, TtsProviderName } from "./types.js";
+import type {
+  AppConfig,
+  ScriptProviderName,
+  TtsProviderName,
+  VideoGenChannel,
+  VideoGenSettings,
+} from "./types.js";
+
+export const DASHSCOPE_VIDEO_BASE_URL = "https://dashscope.aliyuncs.com";
+export const DASHSCOPE_VIDEO_SUBMIT_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
+export const DASHSCOPE_VIDEO_POLL_PATH = "/api/v1/tasks/{id}";
+/** 第三方聚合平台（词易 Token）的 Seedance 2.0 接口。 */
+export const AGGREGATOR_VIDEO_BASE_URL = "https://tokease.cn";
+export const AGGREGATOR_VIDEO_SUBMIT_PATH = "/v1/video/generations";
+export const AGGREGATOR_VIDEO_POLL_PATH = "/v1/video/generations/{id}";
+export const SEEDANCE2_MODEL = "Seedance 2.0";
 
 export const DEFAULT_CONFIG: AppConfig = {
   outputDir: "./output",
@@ -61,13 +76,15 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   videoGen: {
     // 默认接阿里百炼（DashScope）的 Wan 视频模型，API Key 由用户在设置页填写。
+    channel: "bailian-wan3",
     provider: "http",
+    // auto：默认地址是百炼时走 DashScope 异步协议，其他地址仍按通用契约，兼容旧配置。
     protocol: "auto",
-    baseUrl: "https://dashscope.aliyuncs.com",
+    baseUrl: DASHSCOPE_VIDEO_BASE_URL,
     model: "wan3.0-video",
     editModel: "wan2.7-videoedit",
-    submitPath: "/api/v1/services/aigc/video-generation/video-synthesis",
-    pollPath: "/api/v1/tasks/{id}",
+    submitPath: DASHSCOPE_VIDEO_SUBMIT_PATH,
+    pollPath: DASHSCOPE_VIDEO_POLL_PATH,
     pollIntervalMs: 3000,
     timeoutMs: 300_000,
     clipDurationSec: 5,
@@ -131,11 +148,151 @@ export function isAiVideoEnabled(videoGen: AppConfig["videoGen"]): boolean {
   return videoGen.provider === "http" && Boolean(videoGen.apiKey);
 }
 
+/** 局部修改依赖百炼视频编辑模型，Seedance 等聚合渠道不支持。 */
+export function isVideoEditSupported(videoGen: AppConfig["videoGen"]): boolean {
+  return videoGen.channel === "bailian-wan3" || isDashscopeBaseUrl(videoGen.baseUrl);
+}
+
 /** 角色参考图生成是否可用：选择百炼并填写 API Key。 */
 export function isImageGenEnabled(imageGen: AppConfig["imageGen"]): boolean {
   return imageGen.provider === "bailian" && Boolean(imageGen.apiKey);
 }
-const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic"] as const;
+
+const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic", "seedance"] as const;
+const VIDEO_GEN_CHANNELS: VideoGenChannel[] = [
+  "none",
+  "bailian-wan3",
+  "aggregator-seedance2",
+  "custom",
+];
+
+/** 渠道预置的非密钥参数；选中渠道后由服务端自动写入，用户只需要填 API Key。 */
+export type VideoGenChannelFields = Pick<
+  VideoGenSettings,
+  | "channel"
+  | "provider"
+  | "protocol"
+  | "baseUrl"
+  | "model"
+  | "editModel"
+  | "submitPath"
+  | "pollPath"
+  | "pollIntervalMs"
+  | "timeoutMs"
+  | "clipDurationSec"
+  | "resultPath"
+>;
+
+export interface VideoGenChannelOption {
+  channel: VideoGenChannel;
+  label: string;
+  description: string;
+  apiKeyLabel: string;
+  apiKeyHint: string;
+  /** 渠道是否支持成片详情的「局部修改」（依赖百炼视频编辑模型）。 */
+  editSupported: boolean;
+  /** 自动生成的参数；none/custom 没有。 */
+  fields?: VideoGenChannelFields;
+}
+
+const BAILIAN_WAN3_FIELDS: VideoGenChannelFields = {
+  channel: "bailian-wan3",
+  provider: "http",
+  protocol: "dashscope",
+  baseUrl: DASHSCOPE_VIDEO_BASE_URL,
+  model: "wan3.0-video",
+  editModel: "wan2.7-videoedit",
+  submitPath: DASHSCOPE_VIDEO_SUBMIT_PATH,
+  pollPath: DASHSCOPE_VIDEO_POLL_PATH,
+  pollIntervalMs: 3000,
+  timeoutMs: 600_000,
+  clipDurationSec: 5,
+  resultPath: "",
+};
+
+const AGGREGATOR_SEEDANCE2_FIELDS: VideoGenChannelFields = {
+  channel: "aggregator-seedance2",
+  provider: "http",
+  protocol: "seedance",
+  baseUrl: AGGREGATOR_VIDEO_BASE_URL,
+  model: SEEDANCE2_MODEL,
+  editModel: "wan2.7-videoedit",
+  submitPath: AGGREGATOR_VIDEO_SUBMIT_PATH,
+  pollPath: AGGREGATOR_VIDEO_POLL_PATH,
+  pollIntervalMs: 3000,
+  timeoutMs: 600_000,
+  clipDurationSec: 5,
+  resultPath: "output.video_url",
+};
+
+export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
+  {
+    channel: "none",
+    label: "不使用",
+    description: "关闭 AI 画面生成，只用素材库/渐变背景。",
+    apiKeyLabel: "API Key",
+    apiKeyHint: "",
+    editSupported: false,
+  },
+  {
+    channel: "bailian-wan3",
+    label: "阿里百炼 · wan3.0-video",
+    description:
+      "百炼异步视频接口，模型、地址、路径、轮询参数已预置；只需填百炼 API Key。",
+    apiKeyLabel: "阿里百炼 API Key",
+    apiKeyHint: "在阿里云百炼控制台创建，与 wan3.0-video 模型同一业务空间。",
+    editSupported: true,
+    fields: BAILIAN_WAN3_FIELDS,
+  },
+  {
+    channel: "aggregator-seedance2",
+    label: "第三方聚合平台 · Seedance 2.0",
+    description:
+      "默认词易 Token（Tokease）聚合平台，模型、地址、路径、轮询参数已预置；只需填该平台 API Key。",
+    apiKeyLabel: "聚合平台 API Key",
+    apiKeyHint: "在聚合平台（默认词易 Token）创建，需有权调用 Seedance 2.0。",
+    editSupported: false,
+    fields: AGGREGATOR_SEEDANCE2_FIELDS,
+  },
+  {
+    channel: "custom",
+    label: "自定义 HTTP 接口",
+    description: "其他聚合平台或自建网关：手动填写接口协议、地址、模型与路径。",
+    apiKeyLabel: "API Key",
+    apiKeyHint: "",
+    editSupported: true,
+  },
+];
+
+export function videoGenChannelOption(channel: VideoGenChannel): VideoGenChannelOption | undefined {
+  return VIDEO_GEN_CHANNEL_OPTIONS.find((option) => option.channel === channel);
+}
+
+/** 渠道要自动写入的参数；none 只关闭按钮，custom 保持用户填写。 */
+export function videoGenChannelFields(
+  channel: VideoGenChannel,
+): VideoGenChannelFields | undefined {
+  return videoGenChannelOption(channel)?.fields;
+}
+
+/** 从已有参数推断渠道，用于兼容旧设置文件（旧版本没有 channel 字段）。 */
+export function inferVideoGenChannel(videoGen: VideoGenSettings): VideoGenChannel {
+  if (videoGen.provider === "none") return "none";
+  const model = videoGen.model.trim().toLowerCase();
+  if (videoGen.protocol === "seedance" || model.includes("seedance")) {
+    return "aggregator-seedance2";
+  }
+  if (isDashscopeBaseUrl(videoGen.baseUrl)) return "bailian-wan3";
+  return "custom";
+}
+
+function readExplicitVideoGenChannel(patch: unknown): VideoGenChannel | undefined {
+  if (!isPlainObject(patch) || !isPlainObject(patch.videoGen)) return undefined;
+  const channel = patch.videoGen.channel;
+  if (typeof channel !== "string") return undefined;
+  const normalized = lowerToken(channel as VideoGenChannel);
+  return VIDEO_GEN_CHANNELS.includes(normalized) ? normalized : undefined;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -251,9 +408,13 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
 
   const videoGenProvider = envString(env, "VIDEOGEN_PROVIDER") as "none" | "http" | undefined;
   if (videoGenProvider) config.videoGen.provider = videoGenProvider;
+  config.videoGen.channel = set(
+    config.videoGen.channel,
+    envString(env, "VIDEOGEN_CHANNEL") as VideoGenChannel | undefined,
+  );
   config.videoGen.protocol = set(
     config.videoGen.protocol,
-    envString(env, "VIDEOGEN_PROTOCOL") as "auto" | "dashscope" | "generic" | undefined,
+    envString(env, "VIDEOGEN_PROTOCOL") as "auto" | "dashscope" | "generic" | "seedance" | undefined,
   );
   config.videoGen.baseUrl = set(config.videoGen.baseUrl, envString(env, "VIDEOGEN_BASE_URL"));
   config.videoGen.apiKey = set(config.videoGen.apiKey, envString(env, "VIDEOGEN_API_KEY"));
@@ -358,7 +519,14 @@ function validateConfig(config: AppConfig): void {
     );
   }
   if (!VIDEO_GEN_PROTOCOLS.includes(config.videoGen.protocol)) {
-    throw new AppError("AI 画面生成的协议只能是 auto、dashscope 或 generic", { code: "CONFIG_INVALID" });
+    throw new AppError("AI 画面生成的协议只能是 auto、dashscope、generic 或 seedance", {
+      code: "CONFIG_INVALID",
+    });
+  }
+  if (!VIDEO_GEN_CHANNELS.includes(config.videoGen.channel)) {
+    throw new AppError(`不支持的画面模型渠道：${config.videoGen.channel}`, {
+      code: "CONFIG_INVALID",
+    });
   }
   if (!VIDEO_GEN_PROVIDERS.includes(config.videoGen.provider)) {
     throw new AppError(`不支持的画面生成供应商：${config.videoGen.provider}`, {
@@ -434,6 +602,11 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     throw new AppError(`配置文件不存在：${configPath}`, { code: "CONFIG_NOT_FOUND" });
   }
 
+  const envChannel = readExplicitVideoGenChannel({
+    videoGen: { channel: envString(env, "VIDEOGEN_CHANNEL") },
+  });
+  let explicitChannel = envChannel ?? readExplicitVideoGenChannel(fileConfig);
+
   let config = mergeKnown(structuredClone(DEFAULT_CONFIG), fileConfig);
   applyEnv(config, env);
 
@@ -455,6 +628,10 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       });
     }
     config = mergeKnown(config, settingsConfig);
+    // 旧版设置文件没有 channel；只有显式写过渠道时才信任它，否则按参数推断。
+    explicitChannel =
+      readExplicitVideoGenChannel(settingsConfig) ??
+      explicitChannel;
   }
 
   config = mergeKnown(config, options.overrides ?? {});
@@ -475,6 +652,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.trim().replace(/\/+$/, "");
   normalizeProviderTokens(config);
   normalizeVideoGenProtocol(config);
+  config.videoGen.channel = explicitChannel ?? inferVideoGenChannel(config.videoGen);
 
   validateConfig(config);
   return config;
@@ -496,11 +674,9 @@ function normalizeProviderTokens(config: AppConfig): void {
   config.video.transition = lowerToken(config.video.transition);
   config.videoGen.provider = lowerToken(config.videoGen.provider);
   config.videoGen.protocol = lowerToken(config.videoGen.protocol);
+  config.videoGen.channel = lowerToken(config.videoGen.channel);
   config.lipsync.provider = lowerToken(config.lipsync.provider);
 }
-
-export const DASHSCOPE_VIDEO_SUBMIT_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
-export const DASHSCOPE_VIDEO_POLL_PATH = "/api/v1/tasks/{id}";
 
 function isDashscopeBaseUrl(baseUrl: string): boolean {
   try {

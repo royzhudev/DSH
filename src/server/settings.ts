@@ -1,9 +1,16 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { AppError } from "../errors.js";
-import { DEFAULT_CONFIG, loadConfig, type DeepPartial } from "../config.js";
+import {
+  DEFAULT_CONFIG,
+  VIDEO_GEN_CHANNEL_OPTIONS,
+  loadConfig,
+  videoGenChannelFields,
+  type DeepPartial,
+  type VideoGenChannelOption,
+} from "../config.js";
 import type { Logger } from "../logger.js";
-import type { AppConfig } from "../types.js";
+import type { AppConfig, VideoGenChannel } from "../types.js";
 import { ensureDir } from "../util/fs.js";
 
 const EDITABLE_SECTIONS = [
@@ -24,7 +31,7 @@ type Overlay = Partial<Record<EditableSection, Record<string, unknown>>> & { upd
 const SECRET_KEYS = new Set(["apiKey", "clientSecret"]);
 
 /** 取值是固定枚举的字段：保存时统一小写，避免 BAILIAN 这类写法存进配置后校验失败。 */
-const TOKEN_KEYS = new Set(["provider", "protocol", "fallback", "transition"]);
+const TOKEN_KEYS = new Set(["provider", "protocol", "fallback", "transition", "channel"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -55,6 +62,8 @@ export interface SettingsView {
   subtitles: Record<string, unknown>;
   materials: Record<string, unknown>;
   videoGen: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
+  /** 可选渠道及其自动生成参数，前端据此切换并回填表单。 */
+  videoGenChannels: readonly VideoGenChannelOption[];
   imageGen: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
   lipsync: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
   douyin: Record<string, unknown> & {
@@ -90,6 +99,7 @@ export function serializeSettings(config: AppConfig, settingsPath: string, updat
     subtitles: sections.subtitles,
     materials: sections.materials,
     videoGen: sections.videoGen as SettingsView["videoGen"],
+    videoGenChannels: VIDEO_GEN_CHANNEL_OPTIONS,
     imageGen: sections.imageGen as SettingsView["imageGen"],
     lipsync: sections.lipsync as SettingsView["lipsync"],
     douyin: {
@@ -140,6 +150,26 @@ function mergeOverlay(base: Overlay, patch: Record<string, unknown>): Overlay {
     merged[section] = { ...current, ...next };
   }
   return merged;
+}
+
+function requestedVideoGenChannel(patch: Record<string, unknown>): VideoGenChannel | undefined {
+  const videoGen = patch.videoGen;
+  if (!isRecord(videoGen) || typeof videoGen.channel !== "string") return undefined;
+  const channel = videoGen.channel.trim().toLowerCase() as VideoGenChannel;
+  return VIDEO_GEN_CHANNEL_OPTIONS.some((option) => option.channel === channel)
+    ? channel
+    : undefined;
+}
+
+/** 把渠道的预置参数写进保存对象；API Key 与其他用户可调开关不受影响。 */
+function applyVideoGenChannel(target: Record<string, unknown>, channel: VideoGenChannel): void {
+  target.channel = channel;
+  if (channel === "none") {
+    target.provider = "none";
+    return;
+  }
+  const fields = videoGenChannelFields(channel);
+  if (fields) Object.assign(target, fields);
 }
 
 function toConfigError(error: unknown): AppError {
@@ -220,6 +250,13 @@ export class SettingsStore {
         ...(merged[section] as Record<string, unknown>),
       };
     }
+    // 选中渠道后由服务端写入预置参数：客户端可以只传 channel 与 apiKey，
+    // 地址、模型、路径、轮询间隔都不会再依赖手填。
+    const requestedChannel = requestedVideoGenChannel(patch);
+    if (requestedChannel) {
+      applyVideoGenChannel(merged.videoGen!, requestedChannel);
+      applyVideoGenChannel(current.videoGen as Record<string, unknown>, requestedChannel);
+    }
     let next: AppConfig;
     try {
       next = loadConfig({
@@ -231,6 +268,8 @@ export class SettingsStore {
     } catch (error) {
       throw toConfigError(error);
     }
+    // 旧设置文件里的 channel 可能早于本次选择；以本次请求为准（custom 也要保留）。
+    if (requestedChannel) next.videoGen.channel = requestedChannel;
 
     const updatedAt = new Date().toISOString();
     await this.persist({ ...merged, updatedAt });
