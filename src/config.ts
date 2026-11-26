@@ -294,7 +294,7 @@ export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
     channel: "aggregator-seedance2",
     label: "One API Lumi · Seedance",
     description:
-      "One API Lumi（nexus.cytain.com）的 Seedance 2.5 / 2.0 / Fast / Mini；模型、地址、路径、轮询参数已预置，只需填 API Key 并选择模型。平台只接受公网参考图；填写下方「公网素材地址」后可图生视频，留空则含参考图的分镜按文字生成。",
+      "One API Lumi（nexus.cytain.com）的 Seedance 2.5 / 2.0 / Fast / Mini；模型、地址、路径、轮询参数已预置，只需填 API Key 并选择模型。平台只接受公网参考图；通过公网域名/IP 访问本控制台时会自动把角色/道具图转成签名链接，通常无需手填；仅本机访问且未配置时按文字生成。",
     apiKeyLabel: "One API Lumi API Key",
     apiKeyHint: "在 One API Lumi 创建，需有目标 Seedance 模型的调用权限。",
     editSupported: false,

@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { startServer } from "../../src/server/server.js";
 import { silentLogger } from "../../src/logger.js";
-import { generateTestClip, makeTempDir, makeTestConfig, setupTestAdmin, withCookie } from "../helpers.js";
+import { generateTestClip, generateTestImage, makeTempDir, makeTestConfig, setupTestAdmin, withCookie } from "../helpers.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -158,3 +158,27 @@ test(
     assert.equal(script.segments[0]!.narration, "林小满推门进店，雨水滴下来。");
   },
 );
+
+test("公网图片：自动签名链接无需登录即可取图，篡改或过期后 404", async (t) => {
+  const dir = await makeTempDir();
+  const config = makeTestConfig(dir, { server: { port: 0 } });
+  const app = await startServer(config, silentLogger);
+  t.after(async () => {
+    await app.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.mkdir(config.castDir, { recursive: true });
+  const image = path.join(config.castDir, "char-public.png");
+  await generateTestImage(image);
+  const url = app.publicMedia.url(app.url, image);
+  assert.ok(url);
+
+  const response = await fetch(url!);
+  assert.equal(response.status, 200, "平台取图不应要求登录");
+  assert.equal(response.headers.get("content-type"), "image/png");
+  assert.ok((await response.arrayBuffer()).byteLength > 0);
+
+  assert.equal((await fetch(url!.replace(/token=[^&]+/, "token=invalid"))).status, 404);
+  assert.equal((await fetch(url!.replace(/expires=\d+/, "expires=1"))).status, 404);
+  assert.equal((await fetch(url!.replace("char-public.png", "missing.png"))).status, 404);
+});

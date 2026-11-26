@@ -43,6 +43,7 @@ import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
 import { isStaleVoiceId, voiceCatalog } from "../tts/voice-catalog.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
 import { buildJobConfig, JobManager } from "./jobs.js";
+import { PublicMediaHost, publicBaseUrlFromRequest } from "./publicMedia.js";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
 import {
   LoginThrottle,
@@ -107,6 +108,7 @@ export interface VideoServer {
   jobs: JobManager;
   library: MaterialLibrary;
   cast: CastLibrary;
+  publicMedia: PublicMediaHost;
   settings: SettingsStore;
   users: UserStore;
   sessions: SessionStore;
@@ -129,6 +131,7 @@ interface ServerContext {
   jobs: JobManager;
   library: MaterialLibrary;
   cast: CastLibrary;
+  publicMedia: PublicMediaHost;
   settings: SettingsStore;
   users: UserStore;
   sessions: SessionStore;
@@ -1477,6 +1480,20 @@ async function handleRequest(
     return;
   }
 
+  // One API Lumi 等平台需要公网图片地址：角色库图片通过带签名的临时链接提供，
+  // 不经过登录校验，否则平台侧无法取图。链接默认 24 小时过期，只能访问角色库图片。
+  if (pathname.startsWith("/api/public/media/") && (method === "GET" || method === "HEAD")) {
+    const relative = pathname.slice("/api/public/media/".length);
+    const expires = Number(url.searchParams.get("expires"));
+    const token = url.searchParams.get("token") ?? "";
+    const file = ctx.publicMedia.resolve(relative, expires, token);
+    if (!file) {
+      throw new AppError("图片链接无效或已过期", { code: "PUBLIC_MEDIA_NOT_FOUND", status: 404 });
+    }
+    await serveFile(req, res, file, contentTypeFor(file));
+    return;
+  }
+
   if ((method === "GET" || method === "HEAD") && !pathname.startsWith("/api/")) {
     const ext = path.extname(pathname).toLowerCase();
     if (ext && CONTENT_TYPES[ext]) {
@@ -1729,7 +1746,7 @@ async function handleRequest(
       castAssets: selectedCast,
       logger: ctx.logger,
     });
-    const record = ctx.jobs.create(topic, options);
+    const record = ctx.jobs.create(topic, options, publicBaseUrlFromRequest(req));
     res.writeHead(202, {
       ...securityHeaders(),
       "content-type": "application/json; charset=utf-8",
@@ -1920,7 +1937,12 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     env: deps.env ?? process.env,
     logger,
   });
-  const jobs = new JobManager(config, logger);
+  const publicMedia = new PublicMediaHost(
+    config.castDir,
+    path.join(config.cacheDir, "public-media-secret"),
+    logger,
+  );
+  const jobs = new JobManager(config, logger, undefined, publicMedia);
   const library = new MaterialLibrary(config.libraryDir, logger);
   const cast = new CastLibrary(config.castDir, logger);
   const users = new UserStore(path.join(path.dirname(config.settingsFile), "users.json"), logger);
@@ -1938,6 +1960,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     jobs,
     library,
     cast,
+    publicMedia,
     settings,
     users,
     sessions,
@@ -1968,6 +1991,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     jobs,
     library,
     cast,
+    publicMedia,
     settings,
     users,
     sessions,
