@@ -48,7 +48,6 @@ export async function generateCastImage(
   const prompt = buildCastImagePrompt(asset);
   const provider = new DashScopeImageProvider(config.imageGen, logger, {
     fetchImpl: deps.fetchImpl,
-    fallbackBaseUrl: config.videoGen.baseUrl,
   });
   const tempFile = path.join(config.cacheDir, "cast-images", `${asset.id}-${shortId()}.png`);
   const result = await provider.generate(prompt, tempFile);

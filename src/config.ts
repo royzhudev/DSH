@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { AppError } from "./errors.js";
 import { TTS_PROVIDER_NAMES } from "./types.js";
+import { DASHSCOPE_IMAGE_BASE_URL, DEFAULT_IMAGE_GEN_MODEL } from "./imagegen/models.js";
 import type {
   AppConfig,
   ScriptProviderName,
@@ -133,11 +134,12 @@ export const DEFAULT_CONFIG: AppConfig = {
     publicAssetToken: "",
   },
   imageGen: {
-    // 角色参考图默认接阿里百炼 Qwen-Image；只填 API Key 即可，地址留空沿用画面生成地址。
+    // 角色参考图默认接阿里百炼 Qwen-Image；只填 API Key 即可，地址固定默认到百炼，
+    // 不再沿用视频/聚合平台的地址（否则百炼 Key 会被发到聚合平台并返回 401）。
     provider: "bailian",
-    baseUrl: "",
+    baseUrl: DASHSCOPE_IMAGE_BASE_URL,
     apiKey: undefined,
-    model: "qwen-image-2.0-pro",
+    model: DEFAULT_IMAGE_GEN_MODEL,
     size: "1152*1536",
     negativePrompt:
       "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",
@@ -715,6 +717,12 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   }
   config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.trim().replace(/\/+$/, "");
   config.videoGen.publicBaseUrl = config.videoGen.publicBaseUrl.trim().replace(/\/+$/, "");
+  config.imageGen.baseUrl = config.imageGen.baseUrl.trim().replace(/\/+$/, "");
+  // 留空表示使用百炼默认地址；绝不能回退到 videoGen.baseUrl，百炼 Key 不能用于聚合平台。
+  if (!config.imageGen.baseUrl) config.imageGen.baseUrl = DASHSCOPE_IMAGE_BASE_URL;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(config.imageGen.baseUrl)) {
+    config.imageGen.baseUrl = `https://${config.imageGen.baseUrl}`;
+  }
   config.videoGen.publicAssetToken = config.videoGen.publicAssetToken.trim();
   if (config.videoGen.publicBaseUrl && !/^https?:\/\//i.test(config.videoGen.publicBaseUrl)) {
     throw new AppError("AI 画面生成的公网素材地址必须以 http:// 或 https:// 开头", {
@@ -747,6 +755,7 @@ function normalizeProviderTokens(config: AppConfig): void {
   config.videoGen.protocol = lowerToken(config.videoGen.protocol);
   config.videoGen.channel = lowerToken(config.videoGen.channel);
   config.lipsync.provider = lowerToken(config.lipsync.provider);
+  config.imageGen.provider = lowerToken(config.imageGen.provider);
 }
 
 function isDashscopeBaseUrl(baseUrl: string): boolean {

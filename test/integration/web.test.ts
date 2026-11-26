@@ -207,6 +207,9 @@ test(
     assert.match(scriptText, /data-test="douyin"/);
     assert.match(scriptText, /segment-edit-dialog/);
     assert.match(scriptText, /imagegen-preset/);
+    assert.match(scriptText, /imagegen-model/);
+    assert.match(scriptText, /imagegen-model-hint/);
+    assert.match(scriptText, /imagegen-base-url/);
     assert.match(scriptText, /\/api\/videos\/\$\{job\.id\}\/edit/);
 
     const apiIndex = (await (await request(`${app.url}/api`)).json()) as { name: string; endpoints: unknown };
@@ -224,6 +227,8 @@ test(
           models?: Array<{ id: string; label: string }>;
           fields?: { model: string; protocol: string };
         }>;
+        imageGen: { model: string; baseUrl: string; provider: string };
+        imageGenModels: Array<{ id: string; label: string; supportsNegativePrompt: boolean }>;
       };
     };
     assert.equal(initial.settings.script.apiKeySet, false);
@@ -236,13 +241,22 @@ test(
     assert.equal(seedanceChannel?.fields?.model, "doubao-seedance-2-5-260628");
     assert.equal(seedanceChannel?.fields?.protocol, "seedance");
     assert.equal(seedanceChannel?.models?.length, 4);
+    assert.equal(initial.settings.imageGen.baseUrl, "https://dashscope.aliyuncs.com");
+    assert.ok(
+      initial.settings.imageGenModels.some((item) => item.id === "qwen-image-3.0-pro"),
+    );
+    assert.ok(
+      initial.settings.imageGenModels.some((item) => item.id === "qwen-image-2.1-turbo"),
+    );
+    const qwen21 = initial.settings.imageGenModels.find((item) => item.id === "qwen-image-2.1-pro");
+    assert.equal(qwen21?.supportsNegativePrompt, false);
 
     const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },
       tts: { enabled: false, provider: "silent" },
       imageGen: {
         provider: "bailian",
-        model: "qwen-image-2.0-pro",
+        model: "qwen-image-3.0-pro",
         size: "1152*1536",
         apiKey: "sk-image-abcdef",
       },
@@ -261,7 +275,7 @@ test(
     assert.equal(updated.settings.tts.provider, "silent");
     assert.equal(updated.settings.tts.enabled, false);
     assert.equal(updated.settings.imageGen.provider, "bailian");
-    assert.equal(updated.settings.imageGen.model, "qwen-image-2.0-pro");
+    assert.equal(updated.settings.imageGen.model, "qwen-image-3.0-pro");
     assert.equal(updated.settings.imageGen.size, "1152*1536");
     assert.equal(updated.settings.imageGen.apiKeySet, true);
     assert.equal(updated.settings.lipsync.enabled, false);

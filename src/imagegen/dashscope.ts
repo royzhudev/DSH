@@ -5,9 +5,13 @@ import type { Logger } from "../logger.js";
 import type { ImageGenSettings } from "../types.js";
 import { probeMedia } from "../media/ffmpeg.js";
 import { ensureDir } from "../util/fs.js";
+import {
+  DASHSCOPE_IMAGE_BASE_URL,
+  DASHSCOPE_IMAGE_GENERATION_PATH,
+  DEFAULT_IMAGE_GEN_MODEL,
+  imageGenModelOption,
+} from "./models.js";
 
-const DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com";
-const GENERATION_PATH = "/api/v1/services/aigc/multimodal-generation/generation";
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 
 export interface ImageGenResult {
@@ -20,8 +24,6 @@ export interface ImageGenResult {
 
 export interface ImageGenDeps {
   fetchImpl?: typeof fetch;
-  /** imageGen.baseUrl 留空时沿用视频接口的地址，用户只需要填 Key。 */
-  fallbackBaseUrl?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -40,6 +42,7 @@ function pickString(source: Record<string, unknown> | undefined, keys: string[])
 /**
  * 阿里百炼 Qwen-Image 文生图：同步 multimodal-generation 接口。
  * 默认参数（模型、尺寸、负向提示词、提示词改写）在设置里预置，用户只需填 API Key。
+ * 接口地址默认为百炼；不沿用视频/聚合平台地址，避免把百炼 Key 发到别的平台而返回 401。
  * 生成结果 URL 只有 24 小时有效期，这里立刻下载到本地再交给角色库入库。
  */
 export class DashScopeImageProvider {
@@ -47,21 +50,19 @@ export class DashScopeImageProvider {
   private readonly settings: ImageGenSettings;
   private readonly logger: Logger;
   private readonly fetchImpl: typeof fetch;
-  private readonly fallbackBaseUrl: string;
 
   constructor(settings: ImageGenSettings, logger: Logger, deps: ImageGenDeps = {}) {
     this.settings = settings;
     this.logger = logger;
     this.fetchImpl = deps.fetchImpl ?? fetch;
-    this.fallbackBaseUrl = deps.fallbackBaseUrl?.trim() || "";
   }
 
   private get model(): string {
-    return this.settings.model.trim() || "qwen-image-2.0-pro";
+    return this.settings.model.trim() || DEFAULT_IMAGE_GEN_MODEL;
   }
 
   private get baseUrl(): string {
-    return this.settings.baseUrl.trim() || this.fallbackBaseUrl || DEFAULT_BASE_URL;
+    return this.settings.baseUrl.trim() || DASHSCOPE_IMAGE_BASE_URL;
   }
 
   private async withTimeout<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -91,6 +92,18 @@ export class DashScopeImageProvider {
     });
   }
 
+  /** 401/403 通常是 Key 与接口地址不属于同一平台，或 Key 没有所选模型权限。 */
+  private async failAuth(response: Response, url: URL): Promise<never> {
+    const text = await response.text().catch(() => "");
+    throw new AppError(
+      `生成角色参考图鉴权失败（HTTP ${response.status}）：${text.slice(0, 300)}。` +
+        `当前请求发往 ${url.origin}；常见原因是 API Key 与接口地址不属于同一平台，或该 Key 没有所选模型的权限。` +
+        `阿里百炼 API Key 只能调用百炼地址（默认 ${DASHSCOPE_IMAGE_BASE_URL}），不能用于 One API Lumi 等聚合平台；` +
+        `如果「AI 画面生成」选的是聚合平台，请在「AI 角色图生成」里把接口地址填回百炼地址，或换用该平台的 Key。`,
+      { code: "IMAGE_GEN_AUTH_FAILED", status: 502 },
+    );
+  }
+
   async generate(prompt: string, outputFile: string): Promise<ImageGenResult> {
     if (!this.settings.apiKey) {
       throw new AppError("还没有填写图像生成 API Key，请到「设置 → AI 角色图生成」填写", {
@@ -105,21 +118,26 @@ export class DashScopeImageProvider {
         status: 400,
       });
     }
-    const url = new URL(GENERATION_PATH, this.baseUrl);
+    const url = new URL(DASHSCOPE_IMAGE_GENERATION_PATH, this.baseUrl);
+    const option = imageGenModelOption(this.model);
+    const parameters: Record<string, unknown> = {
+      size: this.settings.size,
+      n: 1,
+      prompt_extend: this.settings.promptExtend,
+      watermark: false,
+    };
+    // qwen-image-2.1 系列不支持 negative_prompt，传了会直接 400；其他模型保持原行为。
+    if (this.settings.negativePrompt && option?.supportsNegativePrompt !== false) {
+      parameters.negative_prompt = this.settings.negativePrompt;
+    }
     const body = {
       model: this.model,
       input: {
         messages: [{ role: "user", content: [{ text: text.slice(0, 6000) }] }],
       },
-      parameters: {
-        size: this.settings.size,
-        n: 1,
-        negative_prompt: this.settings.negativePrompt,
-        prompt_extend: this.settings.promptExtend,
-        watermark: false,
-      },
+      parameters,
     };
-    this.logger.info(`生成角色参考图：${this.model}，${this.settings.size}`);
+    this.logger.info(`生成角色参考图：${this.model}，${this.settings.size}，接口 ${url.origin}`);
     const response = await this.withTimeout((signal) =>
       this.fetchImpl(url, {
         method: "POST",
@@ -131,7 +149,10 @@ export class DashScopeImageProvider {
         signal,
       }),
     );
-    if (!response.ok) await this.fail(response, "生成角色参考图");
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) await this.failAuth(response, url);
+      await this.fail(response, "生成角色参考图");
+    }
 
     const json = (await response.json()) as Record<string, unknown>;
     const code = pickString(json, ["code"]);
