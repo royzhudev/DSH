@@ -235,15 +235,15 @@ GET https://nexus.cytain.com/api/v3/contents/generations/tasks/{task_id}
 
 支持 `doubao-seedance-2-5-260628`（4–30 秒、最高 1080p）、`doubao-seedance-2-0-260128`（4–15 秒、最高 4k）、`doubao-seedance-2-0-fast-260128` 和 `doubao-seedance-2-0-mini-260615`（4–15 秒、最高 720p），设置页可切换。提交返回任务 `id`；轮询状态为 `queued` / `running` / `succeeded` / `failed` / `cancelled` / `expired`，成功后取 `content.video_url`。比例支持 `adaptive/21:9/16:9/4:3/1:1/3:4/9:16`，程序默认竖屏 `9:16`、`720p`。
 
-注意：One API 的 OpenAI 兼容前缀 `/v1` 不适用于 Seedance 任务接口（拼成 `/v1/api/v3/...` 会 404）；程序会自动把 `https://nexus.cytain.com/v1` 收回域名。该接口要求所有图片是**公网 HTTP(S) URL**，不接受 Base64 data URL 或 `asset://`。本程序的角色/道具图默认保存在本地、不会上传，含参考图的分镜会按纯文字生成并告警。
+注意：One API 的 OpenAI 兼容前缀 `/v1` 不适用于 Seedance 任务接口（拼成 `/v1/api/v3/...` 会 404）；程序会自动把 `https://nexus.cytain.com/v1` 收回域名。该接口要求所有图片是**公网 HTTP(S) URL**，不接受 Base64 data URL 或 `asset://`。本程序的角色/道具图保存在本地；通过公网域名或公网 IP 访问控制台时，程序会自动识别当前访问地址，把角色/道具图以带签名的临时链接（默认 24 小时过期，只对角色库图片生效）提供给平台，含参考图的分镜可直接图生视频，不需要手填地址。仅在 localhost/局域网访问且未配置公网地址时，才会按纯文字生成并在任务告警里说明。
 
-需要 Seedance 图生视频时，把本控制台部署到外网，在设置页「AI 画面生成 → 公网素材地址」填写它的公网地址（例如 `https://video.example.com`）并保存。服务端会生成随机令牌，通过 `/api/public/cast/{token}/{id}` 提供**无需登录、只能读取单张图**的只读链接；平台拉取该 URL 后即可用本地角色/道具图做首帧或参考图。清除公网地址会同时清除令牌。百炼 Wan 仍直接读本地图，不受影响，也不需要使用这个地址。
+也可以把本控制台部署到外网后，在设置页「AI 画面生成 → 公网素材地址」显式填写它的公网地址（例如 `https://video.example.com`）并保存；服务端会生成随机令牌，通过 `/api/public/cast/{token}/{id}` 提供**无需登录、只能读取单张图**的只读链接。显式配置优先于自动识别，清除地址会同时清除令牌。图生视频的图片链接由 `/api/public/...` 提供，**不需要登录**（平台侧不会带 Cookie），反向代理需要放行该路径且不要加 Basic Auth；HTTPS 在代理上终止时请转发 `X-Forwarded-Proto`，否则自动识别会按 `http://` 生成链接。百炼 Wan 仍直接读本地图，不受影响，也不需要使用这个地址。
 
 > **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
 >
 > 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`，走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。该功能**仅阿里百炼渠道可用**：选 One API Lumi Seedance 渠道时页面会隐藏「局部修改」按钮，接口也会返回 409 提示切换渠道。
 >
-> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0 或 One API Lumi · Seedance）→ 只填该渠道的 API Key（Seedance 再选模型；要图生视频再填公网素材地址）→ 保存设置 → 点「生成测试视频」。地址、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填。
+> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0 或 One API Lumi · Seedance）→ 只填该渠道的 API Key（Seedance 再选模型）→ 保存设置 → 点「生成测试视频」。地址、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填；图生视频通常也不需要填公网素材地址，通过公网域名/IP 访问控制台即可自动识别。
 >
 > 万相 3.0 的请求体是 `{model, input:{prompt, media[]}, parameters:{resolution, ratio, duration}}`：竖屏默认 `720P` + `9:16`，时长 2–30 秒；图生视频首帧放 `media:[{type:"first_frame", url:"data:image/png;base64,..."}]`。早期 Wan 模型仍用 `parameters.size` 与 `input.img_url`。
 >

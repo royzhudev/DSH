@@ -21,6 +21,7 @@ import { isVideoEditSupported } from "../config.js";
 import { STORY_MAX_LENGTH } from "../preflight.js";
 import { concatSegments } from "../render/concat.js";
 import { extractPoster } from "../media/ffmpeg.js";
+import type { PublicMediaHost } from "./publicMedia.js";
 import { DashScopeVideoEditProvider } from "../videoedit/dashscope.js";
 import type { VideoEditRequest, VideoEditResult } from "../videoedit/dashscope.js";
 import { sha256 } from "../util/fs.js";
@@ -62,6 +63,8 @@ export interface JobRecord {
   config: AppConfig;
   /** 最近一次分镜局部编辑的状态。 */
   edit?: VideoEditState;
+  /** 创建任务时的公网访问地址；用于把本地角色图转成平台可访问的签名链接。 */
+  publicBaseUrl?: string;
 }
 
 /** 写入任务目录的索引文件；成片和脚本等大字段仍以 result.json 为准。 */
@@ -78,6 +81,7 @@ interface PersistedJob {
   error?: string;
   errorStage?: JobStage;
   edit?: VideoEditState;
+  publicBaseUrl?: string;
 }
 
 export interface SerializedJob {
@@ -198,11 +202,12 @@ export class JobManager {
     private readonly logger: Logger,
     private readonly videoEditFactory: VideoEditProviderFactory = (settings, logger) =>
       new DashScopeVideoEditProvider(settings, logger),
+    private readonly publicMedia?: PublicMediaHost,
   ) {
     this.loadPersisted();
   }
 
-  create(topic: string, options: JobOptions = {}): JobRecord {
+  create(topic: string, options: JobOptions = {}, publicBaseUrl?: string): JobRecord {
     validateOptions(options, this.config);
     const jobConfig = buildJobConfig(this.config, options);
     const id = createJobId();
@@ -214,6 +219,7 @@ export class JobManager {
       progress: { stage: "queued", percent: 0, message: "等待执行" },
       createdAt: new Date().toISOString(),
       config: jobConfig,
+      ...(publicBaseUrl ? { publicBaseUrl } : {}),
     };
     this.jobs.set(id, record);
     this.queue.push(id);
@@ -403,6 +409,7 @@ export class JobManager {
       ...(record.error ? { error: record.error } : {}),
       ...(record.errorStage ? { errorStage: record.errorStage } : {}),
       ...(record.edit ? { edit: record.edit } : {}),
+      ...(record.publicBaseUrl ? { publicBaseUrl: record.publicBaseUrl } : {}),
     };
   }
 
@@ -542,6 +549,7 @@ export class JobManager {
       ...(error ? { error } : {}),
       ...(errorStage ? { errorStage } : {}),
       ...(edit ? { edit } : {}),
+      ...(meta?.publicBaseUrl ? { publicBaseUrl: meta.publicBaseUrl } : {}),
       config: this.config,
     };
   }
@@ -569,6 +577,10 @@ export class JobManager {
             castIds: record.options.castIds,
             dialogue: record.options.dialogue,
             script: record.options.script,
+            publicMediaUrl:
+              record.publicBaseUrl && this.publicMedia
+                ? (file: string) => this.publicMedia!.url(record.publicBaseUrl!, file)
+                : undefined,
             onProgress: (progress) => {
               record.progress = progress;
             },

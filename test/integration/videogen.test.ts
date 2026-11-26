@@ -130,6 +130,71 @@ test(
 );
 
 test(
+  "流水线：One API Lumi 未填公网地址时自动使用当前公网地址做图生视频",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, {
+      script: { provider: "offline", targetDurationSec: 8, maxSegments: 2 },
+      videoGen: {
+        channel: "aggregator-seedance2",
+        provider: "http",
+        protocol: "seedance",
+        baseUrl: "http://127.0.0.1:1",
+        model: "doubao-seedance-2-0-260128",
+        submitPath: "/api/v3/contents/generations/tasks",
+        pollPath: "/api/v3/contents/generations/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5000,
+        clipDurationSec: 2,
+        fallbackToMaterials: true,
+      },
+    });
+    const heroImage = path.join(dir, "hero.png");
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x884466:s=64x64", "-frames:v", "1", heroImage]);
+    const library = new CastLibrary(config.castDir, silentLogger);
+    const hero = await library.add({
+      kind: "character",
+      name: "猪猪侠",
+      description: "戴红色头盔的卡通角色",
+      imagePath: heroImage,
+    });
+    const clip = path.join(dir, "generated.mp4");
+    await generateTestClip(clip, { durationSec: 1.5, size: "160x160" });
+    const requests: VideoGenRequest[] = [];
+    const provider: VideoGenProvider = {
+      name: "fake",
+      model: "doubao-seedance-2-0-260128",
+      generate: async (request) => {
+        requests.push(request);
+        return { file: clip, durationSec: 1.5, provider: "fake", model: "doubao-seedance-2-0-260128" };
+      },
+    };
+    const result = await runPipeline({
+      topic: "钟表店",
+      story: "猪猪侠在钟表店遇到一位神秘客人。",
+      castIds: [hero.id],
+      config,
+      logger: silentLogger,
+      videoGenProvider: provider,
+      publicMediaUrl: (file) => {
+        assert.equal(path.dirname(file), config.castDir, "只应给角色库里的图片签名");
+        return `https://auto.example.com/api/public/media/${encodeURIComponent(path.basename(file))}`;
+      },
+    });
+    assert.equal(result.segments[0]!.imageToVideo, true);
+    assert.ok(requests[0]!.imageUrl?.startsWith("https://auto.example.com/api/public/media/"));
+    assert.ok(requests[0]!.references?.[0]?.url?.startsWith("https://auto.example.com/api/public/media/"));
+    assert.equal(
+      result.warnings?.some((warning) => warning.includes("只接受公网参考图")),
+      false,
+      "自动识别公网地址后不应再提示纯文字生成",
+    );
+    assert.equal(await fs.stat(result.videoPath).then((stat) => stat.size > 0), true);
+  },
+);
+
+test(
   "流水线：多个分镜各用各的生成视频，重复内容会给出告警",
   { timeout: 240_000 },
   async () => {

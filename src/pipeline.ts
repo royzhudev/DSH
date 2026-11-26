@@ -119,6 +119,11 @@ export interface RunPipelineOptions {
   script?: Script;
   /** 对话模式：分镜按人物台词生成，并按说话人分配音色。 */
   dialogue?: boolean;
+  /**
+   * 把本地角色/道具图转成平台可访问的公网 URL。
+   * 用于网页任务自动识别当前公网访问地址（One API Lumi 只接受公网图片）。
+   */
+  publicMediaUrl?: (file: string) => string | undefined;
 }
 
 const STAGE_LABELS: Record<JobStage, string> = {
@@ -701,13 +706,18 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     }
     const videoChannel = videoGenChannelOption(config.videoGen.channel);
     const needsPublicImages = videoChannel?.referenceImagesSupported === false;
-    const publicImagesReady = needsPublicImages && hasPublicAssetBase(config.videoGen);
+    // 优先用设置页显式配置的公网素材地址；没配置时用创建任务请求的公网
+    // Host 自动生成签名链接。这样用户只选渠道和角色也能图生视频。
+    const explicitPublicImages = needsPublicImages && hasPublicAssetBase(config.videoGen);
+    const signedPublicImages =
+      needsPublicImages && !explicitPublicImages && Boolean(options.publicMediaUrl);
+    const publicImagesReady = explicitPublicImages || signedPublicImages;
     const referenceImagesSupported = !needsPublicImages || publicImagesReady;
     const castCharacters = cast.filter((asset) => asset.kind === "character");
     const plansWithCast = plans.filter((plan) => plan.cast.some((asset) => asset.kind === "character"));
     if (videoGen && needsPublicImages && !publicImagesReady && cast.some((asset) => asset.imageFile)) {
       warnings.push(
-        "当前 AI 画面渠道只接受公网参考图，本地角色/道具图不会上传；本次按纯文字生成画面，角色一致性可能下降。需要图生视频，请在设置页填写本服务的「公网素材地址」，平台会通过带令牌的只读链接读取本地角色图。",
+        "当前 AI 画面渠道只接受公网参考图，本地角色/道具图不会上传；本次按纯文字生成画面，角色一致性可能下降。需要图生视频，请通过公网域名或公网 IP 访问本控制台，或在设置页填写本服务的「公网素材地址」，程序会把本地角色图以带令牌的只读链接提供给平台。",
       );
     }
     if (!videoGen && castCharacters.length > 0) {
@@ -734,11 +744,16 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           ? plan.cast
               .filter((asset) => asset.imageFile)
               .map((asset) => {
-                const url = needsPublicImages ? publicCastImageUrl(config.videoGen, asset.id) : undefined;
+                const localFile = path.join(config.castDir, asset.imageFile!);
+                const url = needsPublicImages
+                  ? explicitPublicImages
+                    ? publicCastImageUrl(config.videoGen, asset.id)
+                    : options.publicMediaUrl?.(localFile)
+                  : undefined;
                 return {
                   role: asset.kind,
                   name: asset.name,
-                  file: path.join(config.castDir, asset.imageFile!),
+                  file: localFile,
                   ...(url ? { url } : {}),
                 };
               })
