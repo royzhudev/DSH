@@ -252,3 +252,33 @@ test("loadConfig 把 One API Lumi 的 /v1 前缀收回域名并迁移旧 Seedanc
   assert.equal(config.videoGen.pollPath, "/api/v3/contents/generations/tasks/{id}");
   assert.equal(config.videoGen.resultPath, "content.video_url");
 });
+
+test("loadConfig 把旧版词易 Token 的 Seedance 设置迁到 One API Lumi", async () => {
+  const dir = await makeTempDir();
+  await fs.mkdir(path.join(dir, "data"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "data", "settings.json"),
+    JSON.stringify({
+      videoGen: {
+        channel: "aggregator-seedance2",
+        provider: "http",
+        protocol: "seedance",
+        baseUrl: "https://tokease.cn",
+        model: "Seedance 2.0",
+        apiKey: "sk-old",
+        submitPath: "/v1/video/generations",
+        pollPath: "/v1/video/generations/{id}",
+        resultPath: "output.video_url",
+      },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.channel, "aggregator-seedance2");
+  assert.equal(config.videoGen.baseUrl, "https://nexus.cytain.com");
+  assert.equal(config.videoGen.model, "doubao-seedance-2-0-260128");
+  assert.equal(config.videoGen.submitPath, "/api/v3/contents/generations/tasks");
+  assert.equal(config.videoGen.pollPath, "/api/v3/contents/generations/tasks/{id}");
+  assert.equal(config.videoGen.resultPath, "content.video_url");
+  assert.equal(config.videoGen.apiKey, "sk-old");
+});

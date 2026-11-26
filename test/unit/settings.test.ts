@@ -155,3 +155,25 @@ test("SettingsStore 选中 One API Lumi 渠道后只填 API Key，模型可切�
   assert.equal(config.videoGen.model, "wan3.0-video");
   assert.equal(config.videoGen.apiKey, "");
 });
+
+test("SettingsStore 保存公网素材地址时生成随机令牌，清除地址时一并清除", async () => {
+  const dir = await makeTempDir();
+  const { config, store } = await makeStore(dir);
+  await store.update({
+    videoGen: {
+      channel: "aggregator-seedance2",
+      apiKey: "sk-lumi",
+      publicBaseUrl: "https://video.example.com/",
+    },
+  });
+  assert.equal(config.videoGen.publicBaseUrl, "https://video.example.com");
+  const firstToken = config.videoGen.publicAssetToken;
+  assert.ok(firstToken.length >= 20);
+  const view = await store.update({ videoGen: { publicBaseUrl: "https://video.example.com" } });
+  assert.equal(view.videoGen.publicAssetToken, firstToken, "同一地址再次保存不应换令牌");
+
+  await store.update({ videoGen: { publicBaseUrl: "" } });
+  assert.equal(config.videoGen.publicAssetToken, "");
+  const cleared = await store.update({ videoGen: { apiKey: "sk-lumi" } });
+  assert.equal(cleared.videoGen.publicAssetToken, "");
+});

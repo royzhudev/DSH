@@ -203,6 +203,7 @@ test(
     assert.match(scriptText, /videogen-auto-fields/);
     assert.match(scriptText, /videogen-channel-model/);
     assert.match(scriptText, /videogen-model-select-wrap/);
+    assert.match(scriptText, /videogen-public-base-url/);
     assert.match(scriptText, /data-test="douyin"/);
     assert.match(scriptText, /segment-edit-dialog/);
     assert.match(scriptText, /imagegen-preset/);

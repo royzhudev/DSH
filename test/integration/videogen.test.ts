@@ -248,3 +248,66 @@ test(
     }
   },
 );
+
+test(
+  "流水线：One API Lumi 配置公网素材地址后，用公网角色图做图生视频",
+  { timeout: 240_000 },
+  async () => {
+    const dir = await makeTempDir();
+    const config = makeTestConfig(dir, {
+      script: { provider: "offline", targetDurationSec: 8, maxSegments: 2 },
+      videoGen: {
+        channel: "aggregator-seedance2",
+        provider: "http",
+        protocol: "seedance",
+        baseUrl: "http://127.0.0.1:1",
+        model: "doubao-seedance-2-0-260128",
+        submitPath: "/api/v3/contents/generations/tasks",
+        pollPath: "/api/v3/contents/generations/tasks/{id}",
+        pollIntervalMs: 200,
+        timeoutMs: 5000,
+        clipDurationSec: 2,
+        fallbackToMaterials: true,
+        publicBaseUrl: "https://video.example.com",
+        publicAssetToken: "tok_public",
+      },
+    });
+    const heroImage = path.join(dir, "hero.png");
+    await runFfmpeg(["-y", "-f", "lavfi", "-i", "color=c=0x884466:s=64x64", "-frames:v", "1", heroImage]);
+    const library = new CastLibrary(config.castDir, silentLogger);
+    const hero = await library.add({
+      kind: "character",
+      name: "林小满",
+      description: "25 岁女性，齐肩短发，米色风衣",
+      imagePath: heroImage,
+    });
+    const clip = path.join(dir, "generated.mp4");
+    await generateTestClip(clip, { durationSec: 1.5, size: "160x160" });
+    const requests: VideoGenRequest[] = [];
+    const provider: VideoGenProvider = {
+      name: "fake",
+      model: "doubao-seedance-2-0-260128",
+      generate: async (request) => {
+        requests.push(request);
+        return { file: clip, durationSec: 1.5, provider: "fake", model: "doubao-seedance-2-0-260128" };
+      },
+    };
+    const result = await runPipeline({
+      topic: "钟表店",
+      story: "林小满在钟表店遇到一位神秘客人。",
+      castIds: [hero.id],
+      config,
+      logger: silentLogger,
+      videoGenProvider: provider,
+    });
+    const expectedUrl = `https://video.example.com/api/public/cast/tok_public/${hero.id}`;
+    assert.equal(result.segments[0]!.imageToVideo, true);
+    assert.equal(requests[0]!.imageUrl, expectedUrl);
+    assert.equal(requests[0]!.references?.[0]?.url, expectedUrl);
+    assert.equal(
+      result.warnings?.some((warning) => warning.includes("只接受公网参考图")),
+      false,
+    );
+    assert.equal(await fs.stat(result.videoPath).then((stat) => stat.size > 0), true);
+  },
+);

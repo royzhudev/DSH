@@ -689,32 +689,40 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     };
     const isHttpUrl = (value: string): boolean => /^https?:\/\//i.test(value);
 
+    const requestedImageUrl = request.imageUrl?.trim();
     // One API Lumi 只接受公网 HTTP(S) 媒体，本地图片转成 data URL 会被平台拒绝。
-    // 正常任务在 pipeline 里已经按渠道能力过滤；这里再兜底，避免调用方绕过。
+    // 正常任务在 pipeline 里已经按渠道能力过滤/映射；这里再兜底，避免调用方绕过。
     if (this.protocol() === "seedance") {
-      const localInputs = [request.image, ...references.map((reference) => reference.file)].filter(
-        (value): value is string => typeof value === "string" && !isHttpUrl(value),
-      );
+      const localInputs = [
+        ...(requestedImageUrl || !request.image || isHttpUrl(request.image) ? [] : [request.image]),
+        ...references
+          .filter((reference) => !reference.url && !isHttpUrl(reference.file))
+          .map((reference) => reference.file),
+      ];
       if (localInputs.length > 0) {
         throw new AppError(
-          "One API Lumi Seedance 只接受公网 HTTP(S) 参考图；本地角色/首帧图（data URL）无法直接使用。请改用纯文生视频，或使用支持本地上传的渠道。",
+          "One API Lumi Seedance 只接受公网 HTTP(S) 参考图；本地角色/首帧图（data URL）无法直接使用。请配置公网素材地址，或改用支持本地上传的渠道。",
           { code: "VIDEOGEN_PUBLIC_MEDIA_REQUIRED", status: 400 },
         );
       }
     }
 
-    const image = request.image
-      ? isHttpUrl(request.image)
-        ? request.image
-        : await dataUrlFor(request.image)
-      : undefined;
+    const image = requestedImageUrl
+      ? requestedImageUrl
+      : request.image
+        ? isHttpUrl(request.image)
+          ? request.image
+          : await dataUrlFor(request.image)
+        : undefined;
     const referenceImages =
       references.length > 0
         ? await Promise.all(
             references.map(async (reference) => ({
               role: reference.role,
               name: reference.name,
-              image: isHttpUrl(reference.file) ? reference.file : await dataUrlFor(reference.file),
+              image:
+                reference.url ??
+                (isHttpUrl(reference.file) ? reference.file : await dataUrlFor(reference.file)),
             })),
           )
         : [];

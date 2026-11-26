@@ -1,4 +1,5 @@
 import fsp from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { AppError } from "../errors.js";
 import {
@@ -275,6 +276,27 @@ export class SettingsStore {
         requestedChannel,
         requestedModel,
       );
+    }
+    // 公网素材地址用于把本地角色图映射成平台可访问的只读 URL；令牌只生成一次，
+    // 清除地址时一并清除，避免旧的公开链接继续暴露角色图。
+    const mergedVideoGen = isRecord(merged.videoGen) ? merged.videoGen : undefined;
+    if (mergedVideoGen) {
+      const currentVideoGen = current.videoGen as Record<string, unknown>;
+      const publicBaseUrl =
+        typeof mergedVideoGen.publicBaseUrl === "string"
+          ? mergedVideoGen.publicBaseUrl.trim().replace(/\/+$/, "")
+          : String(currentVideoGen.publicBaseUrl ?? "").trim();
+      const existingToken =
+        typeof mergedVideoGen.publicAssetToken === "string"
+          ? mergedVideoGen.publicAssetToken.trim()
+          : String(currentVideoGen.publicAssetToken ?? "").trim();
+      const publicAssetToken = publicBaseUrl
+        ? existingToken || randomBytes(24).toString("base64url")
+        : "";
+      mergedVideoGen.publicBaseUrl = publicBaseUrl;
+      mergedVideoGen.publicAssetToken = publicAssetToken;
+      currentVideoGen.publicBaseUrl = publicBaseUrl;
+      currentVideoGen.publicAssetToken = publicAssetToken;
     }
     let next: AppConfig;
     try {

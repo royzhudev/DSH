@@ -4,7 +4,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import Busboy from "busboy";
 import { TTS_PROVIDER_NAMES } from "../types.js";
@@ -755,6 +755,7 @@ function isPublicApi(pathname: string): boolean {
   return (
     pathname === "/api" ||
     pathname.startsWith("/api/auth/") ||
+    pathname.startsWith("/api/public/cast/") ||
     pathname === "/api/douyin/callback" ||
     pathname === "/api/douyin/webhook"
   );
@@ -1503,6 +1504,32 @@ async function handleRequest(
         status: 403,
       });
     }
+  }
+
+  // 角色/道具图必须能被外部视频平台直接读取；用随机令牌代替登录 Cookie，
+  // 且只暴露单张图，不暴露角色库列表。未配置公网地址时令牌为空，路由不可用。
+  const publicCast = /^\/api\/public\/cast\/([A-Za-z0-9_-]+)\/([a-zA-Z0-9]+)$/.exec(pathname);
+  if (publicCast && (method === "GET" || method === "HEAD")) {
+    const expectedToken = ctx.config.videoGen.publicAssetToken.trim();
+    const suppliedToken = publicCast[1]!;
+    const tokenMatches =
+      Boolean(expectedToken) &&
+      expectedToken.length === suppliedToken.length &&
+      timingSafeEqual(Buffer.from(expectedToken), Buffer.from(suppliedToken));
+    if (!tokenMatches) {
+      throw new AppError("角色/道具图不存在", { code: "CAST_IMAGE_NOT_FOUND", status: 404 });
+    }
+    const asset = await ctx.cast.find(publicCast[2]!);
+    if (!asset?.imageFile) {
+      throw new AppError("角色/道具图不存在", { code: "CAST_IMAGE_NOT_FOUND", status: 404 });
+    }
+    const file = path.join(ctx.cast.dir, asset.imageFile);
+    if (!isInside(ctx.cast.dir, file)) {
+      throw new AppError("角色/道具图不存在", { code: "CAST_IMAGE_NOT_FOUND", status: 404 });
+    }
+    res.setHeader("cache-control", "public, max-age=300");
+    await serveFile(req, res, file, contentTypeFor(file));
+    return;
   }
 
   if (pathname === "/api/users" && method === "GET") {
