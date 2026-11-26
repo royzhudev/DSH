@@ -1,0 +1,99 @@
+.page {
+  padding: 24rpx 24rpx 48rpx;
+}
+
+.hero {
+  padding: 12rpx 8rpx 24rpx;
+}
+
+.hero-title {
+  font-size: 40rpx;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.hero-sub {
+  margin-top: 8rpx;
+  color: #646a73;
+  font-size: 24rpx;
+}
+
+.card {
+  margin-bottom: 24rpx;
+  padding: 28rpx;
+  background: #ffffff;
+  border-radius: 20rpx;
+}
+
+.label {
+  margin-bottom: 12rpx;
+  color: #1f2329;
+  font-size: 26rpx;
+  font-weight: 600;
+}
+
+.label.mt {
+  margin-top: 24rpx;
+}
+
+.state {
+  padding: 20rpx;
+  color: #646a73;
+  font-size: 26rpx;
+  background: #f5f6f8;
+  border-radius: 12rpx;
+}
+
+.row {
+  display: flex;
+  margin-top: 16rpx;
+}
+
+.row .btn + .btn {
+  margin-left: 16rpx;
+}
+
+.input {
+  padding: 20rpx;
+  color: #1f2329;
+  font-size: 28rpx;
+  background: #f5f6f8;
+  border-radius: 12rpx;
+}
+
+.hint {
+  margin-top: 12rpx;
+  color: #8a9099;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+
+.hint.center {
+  text-align: center;
+}
+
+.btn {
+  flex: 1;
+  margin: 0;
+  padding: 0 24rpx;
+  font-size: 28rpx;
+  line-height: 80rpx;
+  border-radius: 12rpx;
+}
+
+.btn.ghost {
+  color: #1f2329;
+  background: #f5f6f8;
+}
+
+.btn.primary {
+  width: 100%;
+  margin-top: 8rpx;
+  color: #ffffff;
+  font-weight: 600;
+  background: #fe2c55;
+}
+
+.btn.primary::after {
+  border: none;
+}

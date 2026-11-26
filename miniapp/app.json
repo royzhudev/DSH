@@ -1,0 +1,11 @@
+{
+  "pages": [
+    "pages/publish/publish"
+  ],
+  "window": {
+    "navigationBarTitleText": "发布到抖音",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f5f6f8"
+  }
+}

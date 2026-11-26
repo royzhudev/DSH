@@ -1,0 +1,40 @@
+<view class="page">
+  <view class="hero">
+    <view class="hero-title">发布到抖音</view>
+    <view class="hero-sub">个人号专用 · 发布前请在抖音发布页确认</view>
+  </view>
+
+  <view class="card">
+    <view class="label">视频</view>
+    <view class="state">{{videoState}}</view>
+    <view class="row">
+      <button class="btn ghost" bindtap="onChooseVideo">从相册选择</button>
+      <button class="btn ghost" tt:if="{{videoPath}}" bindtap="onClearVideo">清除</button>
+    </view>
+    <view class="hint" tt:if="{{videoUrl}}">已从平台链接获取成片；若下载失败，请改用相册选择。</view>
+    <view class="hint" tt:else>也可以先在平台下载成片到手机，再从这里选择。</view>
+  </view>
+
+  <view class="card">
+    <view class="label">标题</view>
+    <input
+      class="input"
+      value="{{title}}"
+      maxlength="60"
+      placeholder="视频标题（最多 60 字）"
+      bindinput="onTitleInput"
+    />
+    <view class="label mt">话题</view>
+    <input
+      class="input"
+      value="{{hashtags}}"
+      maxlength="120"
+      placeholder="用空格分隔，如：AI 视频 创作"
+      bindinput="onHashtagsInput"
+    />
+    <view class="hint">话题会追加到标题末尾，最多 5 个。</view>
+  </view>
+
+  <button class="btn primary" open-type="uploadDouyinVideo">发布到抖音</button>
+  <view class="hint center">点击后会在抖音发布页打开，确认后才会真正发布。</view>
+</view>

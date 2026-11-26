@@ -1,0 +1,12 @@
+{
+  "description": "DSH 抖音个人号发布助手（短视频自主挂载）",
+  "miniprogramRoot": "./",
+  "projectname": "dsh-douyin-publisher",
+  "appid": "testAppId",
+  "setting": {
+    "es6": true,
+    "minified": true,
+    "postcss": true,
+    "urlCheck": true
+  }
+}
