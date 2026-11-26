@@ -201,6 +201,8 @@ test(
     assert.match(scriptText, /videogen-test-task/);
     assert.match(scriptText, /videogen-channel/);
     assert.match(scriptText, /videogen-auto-fields/);
+    assert.match(scriptText, /videogen-channel-model/);
+    assert.match(scriptText, /videogen-model-select-wrap/);
     assert.match(scriptText, /data-test="douyin"/);
     assert.match(scriptText, /segment-edit-dialog/);
     assert.match(scriptText, /imagegen-preset/);
@@ -218,6 +220,7 @@ test(
         videoGenChannels: Array<{
           channel: string;
           label: string;
+          models?: Array<{ id: string; label: string }>;
           fields?: { model: string; protocol: string };
         }>;
       };
@@ -229,8 +232,9 @@ test(
     const seedanceChannel = initial.settings.videoGenChannels.find(
       (item) => item.channel === "aggregator-seedance2",
     );
-    assert.equal(seedanceChannel?.fields?.model, "Seedance 2.0");
+    assert.equal(seedanceChannel?.fields?.model, "doubao-seedance-2-5-260628");
     assert.equal(seedanceChannel?.fields?.protocol, "seedance");
+    assert.equal(seedanceChannel?.models?.length, 4);
 
     const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },
@@ -288,9 +292,9 @@ test(
     const disabledVideoGen = await jsonRequest(request, `${app.url}/api/settings/test`, { kind: "videogen" });
     assert.equal(disabledVideoGen.status, 400);
 
-    // 只传渠道与 Key：服务端应自动写入 Seedance 2.0 聚合平台的地址、模型与路径。
+    // 只传渠道与 Key：服务端应自动写入 One API Lumi 的地址、模型与路径。
     const channelPut = await jsonRequest(request, `${app.url}/api/settings`, {
-      videoGen: { channel: "aggregator-seedance2", apiKey: "tk-seedance" },
+      videoGen: { channel: "aggregator-seedance2", apiKey: "sk-lumi" },
     }, "PUT");
     assert.equal(channelPut.status, 200, await channelPut.clone().text());
     const channelSettings = (await channelPut.json()) as {
@@ -299,10 +303,10 @@ test(
       };
     };
     assert.equal(channelSettings.settings.videoGen.channel, "aggregator-seedance2");
-    assert.equal(channelSettings.settings.videoGen.baseUrl, "https://tokease.cn");
-    assert.equal(channelSettings.settings.videoGen.model, "Seedance 2.0");
+    assert.equal(channelSettings.settings.videoGen.baseUrl, "https://nexus.cytain.com");
+    assert.equal(channelSettings.settings.videoGen.model, "doubao-seedance-2-5-260628");
     assert.equal(channelSettings.settings.videoGen.protocol, "seedance");
-    assert.equal(channelSettings.settings.videoGen.submitPath, "/v1/video/generations");
+    assert.equal(channelSettings.settings.videoGen.submitPath, "/api/v3/contents/generations/tasks");
 
     const videoGenPut = await jsonRequest(request, `${app.url}/api/settings`, {
       videoGen: {

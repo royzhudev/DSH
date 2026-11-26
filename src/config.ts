@@ -13,11 +13,50 @@ import type {
 export const DASHSCOPE_VIDEO_BASE_URL = "https://dashscope.aliyuncs.com";
 export const DASHSCOPE_VIDEO_SUBMIT_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
 export const DASHSCOPE_VIDEO_POLL_PATH = "/api/v1/tasks/{id}";
-/** 第三方聚合平台（词易 Token）的 Seedance 2.0 接口。 */
-export const AGGREGATOR_VIDEO_BASE_URL = "https://tokease.cn";
-export const AGGREGATOR_VIDEO_SUBMIT_PATH = "/v1/video/generations";
-export const AGGREGATOR_VIDEO_POLL_PATH = "/v1/video/generations/{id}";
-export const SEEDANCE2_MODEL = "Seedance 2.0";
+/** One API Lumi（Nexus）的 Seedance 视频接口；任务接口挂在域名根下，不是 OpenAI 的 /v1 前缀。 */
+export const ONEAPI_LUMI_VIDEO_BASE_URL = "https://nexus.cytain.com";
+export const ONEAPI_LUMI_TASKS_PATH = "/api/v3/contents/generations/tasks";
+export const ONEAPI_LUMI_TASK_PATH = "/api/v3/contents/generations/tasks/{id}";
+
+export interface VideoGenModelOption {
+  id: string;
+  label: string;
+  hint: string;
+  minDurationSec: number;
+  maxDurationSec: number;
+}
+
+/** One API Lumi 文档里的 Seedance 模型；2.5 最高 1080p，2.0 系列为 4k/720p。 */
+export const SEEDANCE_MODEL_OPTIONS: readonly VideoGenModelOption[] = [
+  {
+    id: "doubao-seedance-2-5-260628",
+    label: "Seedance 2.5（4–30 秒，最高 1080p）",
+    hint: "支持首尾帧与参考图；时长 4–30 秒，分辨率最高 1080p。",
+    minDurationSec: 4,
+    maxDurationSec: 30,
+  },
+  {
+    id: "doubao-seedance-2-0-260128",
+    label: "Seedance 2.0（4–15 秒，最高 4k）",
+    hint: "时长 4–15 秒，分辨率最高 4k；支持参考图。",
+    minDurationSec: 4,
+    maxDurationSec: 15,
+  },
+  {
+    id: "doubao-seedance-2-0-fast-260128",
+    label: "Seedance 2.0 Fast（4–15 秒，最高 720p）",
+    hint: "生成更快，时长 4–15 秒，分辨率最高 720p。",
+    minDurationSec: 4,
+    maxDurationSec: 15,
+  },
+  {
+    id: "doubao-seedance-2-0-mini-260615",
+    label: "Seedance 2.0 Mini（4–15 秒，最高 720p）",
+    hint: "轻量模型，时长 4–15 秒，分辨率最高 720p。",
+    minDurationSec: 4,
+    maxDurationSec: 15,
+  },
+] as const;
 
 export const DEFAULT_CONFIG: AppConfig = {
   outputDir: "./output",
@@ -191,6 +230,10 @@ export interface VideoGenChannelOption {
   apiKeyHint: string;
   /** 渠道是否支持成片详情的「局部修改」（依赖百炼视频编辑模型）。 */
   editSupported: boolean;
+  /** 同一渠道下可选的模型；没有时模型固定为 fields.model。 */
+  models?: readonly VideoGenModelOption[];
+  /** 是否接受本地参考图。One API Lumi 只接受公网图片，本地角色图不会上传。 */
+  referenceImagesSupported?: boolean;
   /** 自动生成的参数；none/custom 没有。 */
   fields?: VideoGenChannelFields;
 }
@@ -210,19 +253,19 @@ const BAILIAN_WAN3_FIELDS: VideoGenChannelFields = {
   resultPath: "",
 };
 
-const AGGREGATOR_SEEDANCE2_FIELDS: VideoGenChannelFields = {
+const ONEAPI_LUMI_SEEDANCE_FIELDS: VideoGenChannelFields = {
   channel: "aggregator-seedance2",
   provider: "http",
   protocol: "seedance",
-  baseUrl: AGGREGATOR_VIDEO_BASE_URL,
-  model: SEEDANCE2_MODEL,
+  baseUrl: ONEAPI_LUMI_VIDEO_BASE_URL,
+  model: SEEDANCE_MODEL_OPTIONS[0]!.id,
   editModel: "wan2.7-videoedit",
-  submitPath: AGGREGATOR_VIDEO_SUBMIT_PATH,
-  pollPath: AGGREGATOR_VIDEO_POLL_PATH,
+  submitPath: ONEAPI_LUMI_TASKS_PATH,
+  pollPath: ONEAPI_LUMI_TASK_PATH,
   pollIntervalMs: 3000,
   timeoutMs: 600_000,
   clipDurationSec: 5,
-  resultPath: "output.video_url",
+  resultPath: "content.video_url",
 };
 
 export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
@@ -242,17 +285,20 @@ export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
     apiKeyLabel: "阿里百炼 API Key",
     apiKeyHint: "在阿里云百炼控制台创建，与 wan3.0-video 模型同一业务空间。",
     editSupported: true,
+    referenceImagesSupported: true,
     fields: BAILIAN_WAN3_FIELDS,
   },
   {
     channel: "aggregator-seedance2",
-    label: "第三方聚合平台 · Seedance 2.0",
+    label: "One API Lumi · Seedance",
     description:
-      "默认词易 Token（Tokease）聚合平台，模型、地址、路径、轮询参数已预置；只需填该平台 API Key。",
-    apiKeyLabel: "聚合平台 API Key",
-    apiKeyHint: "在聚合平台（默认词易 Token）创建，需有权调用 Seedance 2.0。",
+      "One API Lumi（nexus.cytain.com）的 Seedance 2.5 / 2.0 / Fast / Mini；模型、地址、路径、轮询参数已预置，只需填 API Key 并选择模型。平台只接受公网参考图，本地角色图不会上传，含参考图的分镜按文字生成。",
+    apiKeyLabel: "One API Lumi API Key",
+    apiKeyHint: "在 One API Lumi 创建，需有目标 Seedance 模型的调用权限。",
     editSupported: false,
-    fields: AGGREGATOR_SEEDANCE2_FIELDS,
+    referenceImagesSupported: false,
+    models: SEEDANCE_MODEL_OPTIONS,
+    fields: ONEAPI_LUMI_SEEDANCE_FIELDS,
   },
   {
     channel: "custom",
@@ -261,6 +307,7 @@ export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
     apiKeyLabel: "API Key",
     apiKeyHint: "",
     editSupported: true,
+    referenceImagesSupported: true,
   },
 ];
 
@@ -687,6 +734,51 @@ function isDashscopeBaseUrl(baseUrl: string): boolean {
   }
 }
 
+function isOneApiLumiBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "nexus.cytain.com";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One API Lumi 的 Seedance 路由挂在域名根下（/api/v3/...）；用户给的
+ * https://nexus.cytain.com/v1 是 OpenAI 兼容前缀，拼上 Seedance 路径会 404。
+ * 这里把已知前缀收回域名，并顺手迁移旧版词易 Token 的路径。
+ */
+function normalizeOneApiLumi(config: AppConfig): void {
+  if (!isOneApiLumiBaseUrl(config.videoGen.baseUrl)) return;
+  if (config.videoGen.protocol !== "seedance" && !/seedance/i.test(config.videoGen.model)) {
+    return;
+  }
+  try {
+    const url = new URL(config.videoGen.baseUrl);
+    const suffix = url.pathname.replace(/\/+$/, "");
+    if (
+      suffix === "/v1" ||
+      suffix === "/api/v3" ||
+      suffix === ONEAPI_LUMI_TASKS_PATH
+    ) {
+      config.videoGen.baseUrl = url.origin;
+    }
+  } catch {
+    return;
+  }
+  if (config.videoGen.protocol === "auto" || config.videoGen.protocol === "generic") {
+    config.videoGen.protocol = "seedance";
+  }
+  if (config.videoGen.submitPath === "/v1/video/generations") {
+    config.videoGen.submitPath = ONEAPI_LUMI_TASKS_PATH;
+  }
+  if (config.videoGen.pollPath === "/v1/video/generations/{id}") {
+    config.videoGen.pollPath = ONEAPI_LUMI_TASK_PATH;
+  }
+  if (config.videoGen.resultPath === "output.video_url") {
+    config.videoGen.resultPath = "content.video_url";
+  }
+}
+
 /**
  * 服务地址就是阿里百炼时，视频接口只支持异步调用（缺少 X-DashScope-Async: enable 会被
  * 平台以 AccessDenied「current user api does not support synchronous calls」拒绝）。
@@ -694,6 +786,7 @@ function isDashscopeBaseUrl(baseUrl: string): boolean {
  * 避免用户选错协议后只能看到一段平台报错。
  */
 function normalizeVideoGenProtocol(config: AppConfig): void {
+  normalizeOneApiLumi(config);
   if (!isDashscopeBaseUrl(config.videoGen.baseUrl)) return;
   // 常见的手填错误：把完整接口地址（或 compatible-mode 地址）当成「服务地址」。
   // 百炼的异步视频接口固定挂在域名根下，这里收回域名，避免路径重复。

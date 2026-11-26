@@ -1,5 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { SEEDANCE_MODEL_OPTIONS } from "../config.js";
 import type { GeneratedClip, VideoGenProvider, VideoGenRequest, VideoGenSettings } from "../types.js";
 import type { Logger } from "../logger.js";
 import { AppError, toErrorMessage } from "../errors.js";
@@ -7,7 +8,7 @@ import { probeMedia, type MediaProbe } from "../media/ffmpeg.js";
 import { ensureDir, sha256 } from "../util/fs.js";
 
 const SUCCESS_STATES = new Set(["succeeded", "success", "completed", "complete", "done", "finished"]);
-const FAILED_STATES = new Set(["failed", "failure", "error", "canceled", "cancelled"]);
+const FAILED_STATES = new Set(["failed", "failure", "error", "canceled", "cancelled", "expired"]);
 const IMAGE_MIME: Record<string, string> = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -198,7 +199,7 @@ function httpFailureMessage(status: number, text: string, requestUrl = ""): stri
   if (status === 429 || /throttl|rate.?limit|quota|limit.*exceed|并发/.test(lower)) {
     hints.push("平台限流或并发已满，稍等再试；已提交的任务可在设置页继续查询，不要重复提交");
   }
-  if (/duration|时长|seconds|秒/.test(lower)) hints.push("该模型可能不支持所填时长（百炼 Wan 常见 5 秒；Seedance 2.0 支持 4–15 秒）");
+  if (/duration|时长|seconds|秒/.test(lower)) hints.push("该模型可能不支持所填时长（百炼 Wan 常见 5 秒；Seedance 2.0 系列 4–15 秒、2.5 为 4–30 秒）");
   if (/size|resolution|分辨率|像素|aspect/.test(lower)) hints.push("画面尺寸不被接受，可填 720*1280 或 1280*720");
   if (/model/.test(lower)) hints.push("模型名称不被平台接受，核对模型名是否与服务商一致");
   if (/prompt|描述/.test(lower)) hints.push("描述可能触发了内容审核，换个说法再试");
@@ -352,7 +353,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     const configured = this.settings.protocol;
     if (configured === "seedance") return "seedance";
     if (configured === "auto" && /seedance/i.test(this.settings.model)) {
-      // 渠道未显式配置时，模型名已经写明 Seedance 2.0，按聚合平台的 content/images 协议发送。
+      // 渠道未显式配置时，模型名已经写明 Seedance，按 One API Lumi 的 content 数组协议发送。
       return "seedance";
     }
     if (configured === "dashscope") return "dashscope";
@@ -380,9 +381,9 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   }
 
   /**
-   * 按协议组装提交体。DashScope（阿里百炼）用 {model, input, parameters}，
-   * 图生视频的首帧放 input.img_url；Seedance 聚合协议用 {model, prompt, duration,
-   * resolution, ratio, images[]}；通用 HTTP 契约保持扁平字段。
+   * 按协议组装提交体。DashScope（阿里百炼）用 {model, input, parameters}；
+   * One API Lumi Seedance 用 {model, content[], duration, resolution, ratio}；
+   * 通用 HTTP 契约保持扁平字段。
    */
   private submitBody(
     request: VideoGenRequest,
@@ -390,20 +391,32 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     referenceImages: Array<{ role: string; name: string; image: string }>,
   ): Record<string, unknown> {
     if (this.protocol() === "seedance") {
-      // 第三方聚合平台（词易 Token）的 Seedance 2.0 接受 4–15 秒；
-      // 平台也会按 images 数组做图生视频/多参考图，首帧与角色参考图都可放进去。
-      const duration = Math.min(15, Math.max(4, Math.round(request.durationSec)));
-      const images = [
-        ...(image ? [image] : []),
-        ...referenceImages.map((reference) => reference.image),
-      ].slice(0, 10);
+      // One API Lumi 的 Seedance 2.5 支持 4–30 秒，2.0 系列支持 4–15 秒。
+      const model = this.settings.model.trim();
+      const limits = SEEDANCE_MODEL_OPTIONS.find((item) => item.id === model);
+      const is25 = (limits?.maxDurationSec ?? 15) >= 30;
+      const minDuration = limits?.minDurationSec ?? 4;
+      const maxDuration = limits?.maxDurationSec ?? 15;
+      const duration = Math.min(maxDuration, Math.max(minDuration, Math.round(request.durationSec)));
+      // 参考图和首尾帧互斥：有角色参考图时优先保证人物一致性；2.5 最多 30 张，2.0 系列 9 张。
+      const media = (
+        referenceImages.length > 0
+          ? referenceImages.slice(0, is25 ? 30 : 9).map((reference) => ({
+              type: "image_url",
+              image_url: { url: reference.image },
+              role: "reference_image",
+            }))
+          : image
+            ? [{ type: "image_url", image_url: { url: image }, role: "first_frame" }]
+            : []
+      ) as Array<Record<string, unknown>>;
       return {
-        model: this.settings.model,
-        prompt: request.prompt,
+        model,
+        content: [{ type: "text", text: request.prompt }, ...media],
         duration,
         resolution: "720p",
-        ratio: this.DASHSCOPE_RATIO,
-        ...(images.length > 0 ? { images } : {}),
+        // Seedance 2.5 用首帧时必须 adaptive；2.0 系列继续用竖屏比例。
+        ratio: is25 && image && referenceImages.length === 0 ? "adaptive" : this.DASHSCOPE_RATIO,
       };
     }
     if (this.protocol() === "dashscope") {
@@ -674,15 +687,34 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       cache.set(file, dataUrl);
       return dataUrl;
     };
+    const isHttpUrl = (value: string): boolean => /^https?:\/\//i.test(value);
 
-    const image = request.image ? await dataUrlFor(request.image) : undefined;
+    // One API Lumi 只接受公网 HTTP(S) 媒体，本地图片转成 data URL 会被平台拒绝。
+    // 正常任务在 pipeline 里已经按渠道能力过滤；这里再兜底，避免调用方绕过。
+    if (this.protocol() === "seedance") {
+      const localInputs = [request.image, ...references.map((reference) => reference.file)].filter(
+        (value): value is string => typeof value === "string" && !isHttpUrl(value),
+      );
+      if (localInputs.length > 0) {
+        throw new AppError(
+          "One API Lumi Seedance 只接受公网 HTTP(S) 参考图；本地角色/首帧图（data URL）无法直接使用。请改用纯文生视频，或使用支持本地上传的渠道。",
+          { code: "VIDEOGEN_PUBLIC_MEDIA_REQUIRED", status: 400 },
+        );
+      }
+    }
+
+    const image = request.image
+      ? isHttpUrl(request.image)
+        ? request.image
+        : await dataUrlFor(request.image)
+      : undefined;
     const referenceImages =
       references.length > 0
         ? await Promise.all(
             references.map(async (reference) => ({
               role: reference.role,
               name: reference.name,
-              image: await dataUrlFor(reference.file),
+              image: isHttpUrl(reference.file) ? reference.file : await dataUrlFor(reference.file),
             })),
           )
         : [];
@@ -692,8 +724,14 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       }`,
     );
     const submitUrl = `${this.baseUrl}${this.settings.submitPath}`;
+    const protocolLabel =
+      this.protocol() === "dashscope"
+        ? "DashScope 异步协议"
+        : this.protocol() === "seedance"
+          ? "One API Lumi Seedance 协议"
+          : "通用 HTTP 契约";
     this.logger.info(
-      `提交画面生成任务：POST ${submitUrl}（${this.protocol() === "dashscope" ? "DashScope 异步协议" : "通用 HTTP 契约"}，模型 ${this.settings.model}）`,
+      `提交画面生成任务：POST ${submitUrl}（${protocolLabel}，模型 ${this.settings.model}）`,
     );
     let taskId: string | undefined;
     let submitted = false;

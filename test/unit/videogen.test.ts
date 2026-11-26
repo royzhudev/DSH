@@ -310,7 +310,7 @@ test("HTTP 视频：识别聚合平台常见的嵌套与数组返回结构", asy
       return { generated, submits };
     };
 
-    // tokease 风格：{code:0, data:{status:"completed", output:{video_url}}}
+    // 聚合平台风格：{code:0, data:{status:"completed", output:{video_url}}}
     const nested = await run({
       code: 0,
       message: "ok",
@@ -1134,14 +1134,10 @@ test("分镜提示词：包含本镜内容，并可按机位变化避免相邻�
   assert.ok(varied.includes("近景"));
 });
 
-test("HTTP 视频：Seedance 2.0 聚合渠道按 prompt/duration/ratio/images 提交并取回成片", async () => {
+test("HTTP 视频：One API Lumi Seedance 用 content[] 提交纯文字任务并轮询成片", async () => {
   const dir = await makeTempDir();
   const clip = path.join(dir, "clip.mp4");
-  const image = path.join(dir, "first-frame.png");
-  const reference = path.join(dir, "reference.png");
   await generateTestClip(clip, { durationSec: 1, size: "160x160" });
-  await generateTestImage(image);
-  await generateTestImage(reference);
   let submitBody: Record<string, unknown> | undefined;
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -1151,14 +1147,17 @@ test("HTTP 视频：Seedance 2.0 聚合渠道按 prompt/duration/ratio/images �
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(value));
     };
-    if (req.method === "POST" && url.pathname === "/v1/video/generations") {
+    if (req.method === "POST" && url.pathname === "/api/v3/contents/generations/tasks") {
       submitBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-      send({ id: "task-seedance", object: "video.generation", status: "queued" });
+      send({ id: "task-seedance", model: "doubao-seedance-2-5-260628" });
       return;
     }
-    if (req.method === "GET" && url.pathname === "/v1/video/generations/task-seedance") {
-      // 词易 Token / Seedance 2.0 的完成结构：output.video_url。
-      send({ id: "task-seedance", status: "completed", output: { video_url: "/files/clip.mp4" } });
+    if (req.method === "GET" && url.pathname === "/api/v3/contents/generations/tasks/task-seedance") {
+      send({
+        id: "task-seedance",
+        status: "succeeded",
+        content: { video_url: "/files/clip.mp4" },
+      });
       return;
     }
     if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
@@ -1180,11 +1179,11 @@ test("HTTP 视频：Seedance 2.0 聚合渠道按 prompt/duration/ratio/images �
         provider: "http",
         protocol: "seedance",
         baseUrl: `http://127.0.0.1:${port}`,
-        model: "Seedance 2.0",
-        apiKey: "tk-test",
-        submitPath: "/v1/video/generations",
-        pollPath: "/v1/video/generations/{id}",
-        resultPath: "output.video_url",
+        model: "doubao-seedance-2-5-260628",
+        apiKey: "sk-lumi",
+        submitPath: "/api/v3/contents/generations/tasks",
+        pollPath: "/api/v3/contents/generations/tasks/{id}",
+        resultPath: "content.video_url",
         pollIntervalMs: 200,
         timeoutMs: 10_000,
         clipDurationSec: 4,
@@ -1193,33 +1192,134 @@ test("HTTP 视频：Seedance 2.0 聚合渠道按 prompt/duration/ratio/images �
     });
     const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
     const generated = await provider.generate(
-      {
-        prompt: "黄昏海岸线，电影级光影",
-        durationSec: 3,
-        image,
-        references: [{ role: "character", name: "阿岚", file: reference }],
-      },
+      { prompt: "黄昏海岸线，电影级光影", durationSec: 3 },
       path.join(dir, "gen"),
     );
-    assert.equal(generated.model, "Seedance 2.0");
+    assert.equal(generated.model, "doubao-seedance-2-5-260628");
     assert.equal(generated.durationSec > 0.5, true);
-    assert.ok(submitBody, "应提交到 Seedance 聚合接口");
-    assert.equal(submitBody!.model, "Seedance 2.0");
-    assert.equal(submitBody!.prompt, "黄昏海岸线，电影级光影");
-    // 聚合平台只接受 4–15 秒，3 秒测试请求会按 4 秒提交。
+    assert.ok(submitBody, "应提交到 One API Lumi 任务接口");
+    assert.equal(submitBody!.model, "doubao-seedance-2-5-260628");
+    assert.deepEqual(submitBody!.content, [
+      { type: "text", text: "黄昏海岸线，电影级光影" },
+    ]);
+    // 2.5 时长 4–30 秒，3 秒测试请求按 4 秒提交。
     assert.equal(submitBody!.duration, 4);
     assert.equal(submitBody!.resolution, "720p");
     assert.equal(submitBody!.ratio, "9:16");
-    const images = submitBody!.images as string[];
-    assert.equal(images.length, 2);
-    assert.match(images[0]!, /^data:image\/png;base64,/);
-    assert.match(images[1]!, /^data:image\/png;base64,/);
-    assert.equal("duration_sec" in submitBody!, false);
-    assert.equal("image" in submitBody!, false);
+    assert.equal("prompt" in submitBody!, false);
+    assert.equal("images" in submitBody!, false);
   } finally {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections?.();
     });
   }
+});
+
+test("HTTP 视频：One API Lumi Seedance 公网首帧走 first_frame 并自适应比例", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  let submitBody: Record<string, unknown> | undefined;
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const send = (value: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.method === "POST" && url.pathname === "/api/v3/contents/generations/tasks") {
+      submitBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      send({ id: "task-frame" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/v3/contents/generations/tasks/task-frame") {
+      send({ id: "task-frame", status: "succeeded", content: { video_url: "/files/clip.mp4" } });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/files/clip.mp4") {
+      const buffer = await fs.readFile(clip);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        channel: "aggregator-seedance2",
+        provider: "http",
+        protocol: "seedance",
+        baseUrl: `http://127.0.0.1:${port}`,
+        model: "doubao-seedance-2-5-260628",
+        apiKey: "sk-lumi",
+        submitPath: "/api/v3/contents/generations/tasks",
+        pollPath: "/api/v3/contents/generations/tasks/{id}",
+        resultPath: "content.video_url",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 4,
+        fallbackToMaterials: true,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+    await provider.generate(
+      {
+        prompt: "从这张首帧开始缓慢推进",
+        durationSec: 8,
+        image: "https://cdn.example.com/first.png",
+      },
+      path.join(dir, "gen"),
+    );
+    assert.ok(submitBody);
+    assert.equal(submitBody!.duration, 8);
+    assert.equal(submitBody!.ratio, "adaptive");
+    assert.deepEqual(submitBody!.content, [
+      { type: "text", text: "从这张首帧开始缓慢推进" },
+      {
+        type: "image_url",
+        image_url: { url: "https://cdn.example.com/first.png" },
+        role: "first_frame",
+      },
+    ]);
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});
+
+test("HTTP 视频：One API Lumi Seedance 拒绝本地 data URL 参考图", async () => {
+  const dir = await makeTempDir();
+  const image = path.join(dir, "reference.png");
+  await generateTestImage(image);
+  const config = makeTestConfig(dir, {
+    videoGen: {
+      channel: "aggregator-seedance2",
+      provider: "http",
+      protocol: "seedance",
+      baseUrl: "http://127.0.0.1:1",
+      model: "doubao-seedance-2-0-260128",
+      apiKey: "sk-lumi",
+      submitPath: "/api/v3/contents/generations/tasks",
+      pollPath: "/api/v3/contents/generations/tasks/{id}",
+      pollIntervalMs: 200,
+      timeoutMs: 10_000,
+      clipDurationSec: 4,
+      fallbackToMaterials: true,
+    },
+  });
+  const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+  await assert.rejects(
+    provider.generate({ prompt: "人物特写", durationSec: 5, image }, path.join(dir, "gen")),
+    (error: unknown) =>
+      error instanceof AppError && error.code === "VIDEOGEN_PUBLIC_MEDIA_REQUIRED",
+  );
 });
