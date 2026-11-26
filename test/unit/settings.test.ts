@@ -177,3 +177,27 @@ test("SettingsStore 保存公网素材地址时生成随机令牌，清除地址
   const cleared = await store.update({ videoGen: { apiKey: "sk-lumi" } });
   assert.equal(cleared.videoGen.publicAssetToken, "");
 });
+
+test("SettingsStore：抖音个人号小程序投稿模式可以保存并在重启后恢复", async () => {
+  const dir = await makeTempDir();
+  const { config, store } = await makeStore(dir);
+  try {
+    await store.update({
+      douyin: { mode: "miniapp", clientKey: "miniapp-client-key", clientSecret: "miniapp-client-secret" },
+    });
+    assert.equal(config.douyin.mode, "miniapp");
+    assert.equal(config.douyin.clientKey, "miniapp-client-key");
+    assert.equal(config.douyin.clientSecret, "miniapp-client-secret");
+
+    const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
+    assert.equal(reloaded.douyin.mode, "miniapp");
+    assert.equal(reloaded.douyin.clientKey, "miniapp-client-key");
+
+    await assert.rejects(
+      () => store.update({ douyin: { mode: "unknown" } }),
+      /抖音接入方式/,
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

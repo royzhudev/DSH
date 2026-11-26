@@ -43,7 +43,8 @@ import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
 import { isStaleVoiceId, voiceCatalog } from "../tts/voice-catalog.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
 import { buildJobConfig, JobManager } from "./jobs.js";
-import { PublicMediaHost, publicBaseUrlFromRequest } from "./publicMedia.js";
+import { PublicMediaHost, publicBaseUrlFromRequest, VIDEO_EXTENSIONS } from "./publicMedia.js";
+import QRCode from "qrcode";
 import { SettingsStore, effectiveRedirectUri } from "./settings.js";
 import {
   LoginThrottle,
@@ -109,6 +110,7 @@ export interface VideoServer {
   library: MaterialLibrary;
   cast: CastLibrary;
   publicMedia: PublicMediaHost;
+  publicVideo: PublicMediaHost;
   settings: SettingsStore;
   users: UserStore;
   sessions: SessionStore;
@@ -132,6 +134,7 @@ interface ServerContext {
   library: MaterialLibrary;
   cast: CastLibrary;
   publicMedia: PublicMediaHost;
+  publicVideo: PublicMediaHost;
   settings: SettingsStore;
   users: UserStore;
   sessions: SessionStore;
@@ -748,6 +751,7 @@ function requiredPermission(method: string, pathname: string): MenuPermission | 
   if (pathname === "/api/scripts/generate") return "create";
   if (pathname === "/api/videos") return method === "POST" ? "create" : "jobs";
   if (pathname.startsWith("/api/videos/") && pathname.endsWith("/publish")) return "publish";
+  if (pathname.startsWith("/api/videos/") && pathname.endsWith("/douyin/miniapp")) return "publish";
   if (pathname.startsWith("/api/videos/")) return "jobs";
   if (pathname === "/api/publishes") return "publish";
   if (pathname.startsWith("/api/douyin/")) return "publish";
@@ -1116,6 +1120,16 @@ async function handleSettingsTest(
     return;
   }
   if (kind === "douyin") {
+    if (ctx.config.douyin.mode === "miniapp") {
+      sendJson(res, 200, {
+        ok: true,
+        kind,
+        mode: "miniapp",
+        configured: true,
+        publicBaseUrlSet: Boolean(ctx.config.videoGen.publicBaseUrl.trim()),
+      });
+      return;
+    }
     const result = await ctx.douyin.verifyCredentials(AbortSignal.timeout(20_000));
     sendJson(res, 200, {
       ok: true,
@@ -1208,9 +1222,12 @@ async function handleGenerateScript(
 }
 
 function douyinStatus(ctx: ServerContext, token: DouyinToken | null): Record<string, unknown> {
+  const mode = ctx.config.douyin.mode;
   return {
-    configured: ctx.douyin.configured,
-    authorized: Boolean(token),
+    mode,
+    configured: mode === "miniapp" ? true : ctx.douyin.configured,
+    authorized: mode === "open-platform" && Boolean(token),
+    publicBaseUrlSet: Boolean(ctx.config.videoGen.publicBaseUrl.trim()),
     redirectUri: effectiveRedirectUri(ctx.config),
     scope: ctx.config.douyin.scope,
     token: token
@@ -1224,6 +1241,48 @@ function douyinStatus(ctx: ServerContext, token: DouyinToken | null): Record<str
         }
       : null,
   };
+}
+
+interface CreateH5ShareInput {
+  videoUrl: string;
+  title?: string;
+  hashtags?: string[];
+  shareToPublish?: boolean;
+  taskId?: string;
+  callbackUrl?: string;
+}
+
+async function createH5ShareRecord(
+  ctx: ServerContext,
+  input: CreateH5ShareInput,
+): Promise<{ share: DouyinH5Share; schema: string; expiresAt: string }> {
+  const result = await ctx.douyinH5.createShare(
+    {
+      videoUrl: input.videoUrl,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      hashtags: input.hashtags ?? [],
+      ...(input.shareToPublish !== undefined ? { shareToPublish: input.shareToPublish } : {}),
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      ...(input.callbackUrl ? { callbackUrl: input.callbackUrl } : {}),
+    },
+    AbortSignal.timeout(30_000),
+  );
+  const now = new Date().toISOString();
+  const share: DouyinH5Share = {
+    id: shortId(),
+    ...(input.taskId ? { taskId: input.taskId } : {}),
+    shareId: result.shareId,
+    schema: result.schema,
+    videoUrl: input.videoUrl,
+    title: input.title ?? "AI 成片",
+    hashtags: input.hashtags ?? [],
+    state: "pending",
+    ...(input.callbackUrl ? { callbackUrl: input.callbackUrl } : {}),
+    createdAt: now,
+    updatedAt: now,
+  };
+  await ctx.h5Shares.add(share);
+  return { share, schema: result.schema, expiresAt: result.expiresAt };
 }
 
 async function handleH5Share(
@@ -1259,42 +1318,63 @@ async function handleH5Share(
   if (body.shareToPublish !== undefined && typeof body.shareToPublish !== "boolean") {
     throw new AppError("shareToPublish 必须是布尔值", { code: "INVALID_OPTIONS", status: 400 });
   }
-  const result = await ctx.douyinH5.createShare(
-    {
-      videoUrl,
-      ...(title !== undefined ? { title } : {}),
-      hashtags,
-      ...(typeof body.shareToPublish === "boolean" ? { shareToPublish: body.shareToPublish } : {}),
-      ...(taskId ? { taskId } : {}),
-      ...(callbackUrl ? { callbackUrl } : {}),
-    },
-    AbortSignal.timeout(30_000),
-  );
-  const now = new Date().toISOString();
-  const share: DouyinH5Share = {
-    id: shortId(),
-    ...(taskId ? { taskId } : {}),
-    shareId: result.shareId,
-    schema: result.schema,
+  const created = await createH5ShareRecord(ctx, {
     videoUrl,
-    title: title ?? "AI 成片",
+    ...(title !== undefined ? { title } : {}),
     hashtags,
-    state: "pending",
+    ...(typeof body.shareToPublish === "boolean" ? { shareToPublish: body.shareToPublish } : {}),
+    ...(taskId ? { taskId } : {}),
     ...(callbackUrl ? { callbackUrl } : {}),
-    createdAt: now,
-    updatedAt: now,
-  };
-  await ctx.h5Shares.add(share);
+  });
   sendJson(res, 201, {
     share: {
-      id: share.id,
-      taskId: share.taskId,
-      shareId: share.shareId,
-      schema: share.schema,
-      expiresAt: result.expiresAt,
-      state: share.state,
+      id: created.share.id,
+      taskId: created.share.taskId,
+      shareId: created.share.shareId,
+      schema: created.schema,
+      expiresAt: created.expiresAt,
+      state: created.share.state,
     },
   });
+}
+
+async function handleJobMiniappShare(
+  res: http.ServerResponse,
+  ctx: ServerContext,
+  jobId: string,
+): Promise<void> {
+  if (ctx.config.douyin.mode !== "miniapp") {
+    throw new AppError("当前不是个人号小程序投稿模式，请在设置中切换接入方式", {
+      code: "DOUYIN_MODE_INVALID",
+      status: 400,
+    });
+  }
+  const record = ctx.jobs.get(jobId);
+  if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+  if (record.state !== "succeeded" || !record.result) {
+    throw new AppError("成片尚未生成，无法发布", { code: "JOB_NOT_READY", status: 409 });
+  }
+  const base = ctx.config.videoGen.publicBaseUrl.trim().replace(/\/+$/, "");
+  if (!base || !/^https:\/\//i.test(base)) {
+    throw new AppError(
+      "请先在「设置 → AI 画面生成」填写 https 公网素材地址，才能生成手机下载二维码",
+      { code: "DOUYIN_PUBLIC_BASE_REQUIRED", status: 400 },
+    );
+  }
+  const videoUrl = ctx.publicVideo.url(base, record.result.videoPath);
+  if (!videoUrl) {
+    throw new AppError("成片不在可公开的输出目录中，无法生成下载链接", {
+      code: "DOUYIN_VIDEO_UNAVAILABLE",
+      status: 400,
+    });
+  }
+  const qrDataUrl = await QRCode.toDataURL(videoUrl, {
+    margin: 1,
+    width: 320,
+    errorCorrectionLevel: "M",
+  });
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  sendJson(res, 200, { videoUrl, expiresAt, qrDataUrl });
 }
 
 async function deliverH5Callback(
@@ -1406,6 +1486,12 @@ async function handlePublish(
   ctx: ServerContext,
   jobId: string,
 ): Promise<void> {
+  if (ctx.config.douyin.mode === "miniapp") {
+    throw new AppError("个人号小程序投稿模式请使用手机下载二维码，在小程序里选择成片发布", {
+      code: "DOUYIN_MODE_INVALID",
+      status: 400,
+    });
+  }
   const record = ctx.jobs.get(jobId);
   if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
   if (record.state !== "succeeded" || !record.result) {
@@ -1489,6 +1575,20 @@ async function handleRequest(
     const file = ctx.publicMedia.resolve(relative, expires, token);
     if (!file) {
       throw new AppError("图片链接无效或已过期", { code: "PUBLIC_MEDIA_NOT_FOUND", status: 404 });
+    }
+    await serveFile(req, res, file, contentTypeFor(file));
+    return;
+  }
+
+  // 抖音个人号小程序投稿需要手机先下载成片到相册；这里用带签名的临时链接
+  // 暴露输出目录里的视频，默认 24 小时过期，只能访问已生成的成片。
+  if (pathname.startsWith("/api/public/video/") && (method === "GET" || method === "HEAD")) {
+    const relative = pathname.slice("/api/public/video/".length);
+    const expires = Number(url.searchParams.get("expires"));
+    const token = url.searchParams.get("token") ?? "";
+    const file = ctx.publicVideo.resolve(relative, expires, token);
+    if (!file) {
+      throw new AppError("视频链接无效或已过期", { code: "PUBLIC_VIDEO_NOT_FOUND", status: 404 });
     }
     await serveFile(req, res, file, contentTypeFor(file));
     return;
@@ -1757,6 +1857,12 @@ async function handleRequest(
     return;
   }
 
+  const jobMiniappShare = /^\/api\/videos\/([a-zA-Z0-9-]+)\/douyin\/miniapp$/.exec(pathname);
+  if (jobMiniappShare && method === "POST") {
+    await handleJobMiniappShare(res, ctx, jobMiniappShare[1]!);
+    return;
+  }
+
   const jobPublish = /^\/api\/videos\/([a-zA-Z0-9-]+)\/publish$/.exec(pathname);
   if (jobPublish && method === "POST") {
     await handlePublish(req, res, ctx, jobPublish[1]!);
@@ -1942,6 +2048,12 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     path.join(config.cacheDir, "public-media-secret"),
     logger,
   );
+  const publicVideo = new PublicMediaHost(
+    config.outputDir,
+    path.join(config.cacheDir, "public-video-secret"),
+    logger,
+    { extensions: VIDEO_EXTENSIONS, publicPath: "/api/public/video/" },
+  );
   const jobs = new JobManager(config, logger, undefined, publicMedia);
   const library = new MaterialLibrary(config.libraryDir, logger);
   const cast = new CastLibrary(config.castDir, logger);
@@ -1961,6 +2073,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     library,
     cast,
     publicMedia,
+    publicVideo,
     settings,
     users,
     sessions,
@@ -1992,6 +2105,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     library,
     cast,
     publicMedia,
+    publicVideo,
     settings,
     users,
     sessions,

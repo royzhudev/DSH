@@ -70,6 +70,7 @@
     "fallbackToMaterials": true
   },
   "douyin": {
+    "mode": "open-platform",
     "clientKey": "",
     "redirectUri": "",
     "scope": "user_info,video.create",

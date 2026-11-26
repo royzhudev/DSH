@@ -6,7 +6,15 @@ import path from "node:path";
 import type { Logger } from "../logger.js";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+export const VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const PUBLIC_URL_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface PublicMediaHostOptions {
+  /** 允许公开的扩展名，默认角色图。 */
+  extensions?: ReadonlySet<string>;
+  /** 公开路由前缀，默认 /api/public/media/。 */
+  publicPath?: string;
+}
 
 /**
  * 取任务创建请求里的对外地址，用于生成平台可访问的图片链接。
@@ -93,20 +101,24 @@ function isInside(root: string, file: string): boolean {
 export class PublicMediaHost {
   private readonly root: string;
   private readonly secret: Buffer;
+  private readonly extensions: ReadonlySet<string>;
+  private readonly publicPath: string;
 
-  constructor(castDir: string, secretFile: string, logger?: Logger) {
+  constructor(castDir: string, secretFile: string, logger?: Logger, options: PublicMediaHostOptions = {}) {
     this.root = path.resolve(castDir);
     this.secret = loadOrCreateSecret(secretFile, logger);
+    this.extensions = options.extensions ?? IMAGE_EXTENSIONS;
+    this.publicPath = options.publicPath ?? "/api/public/media/";
   }
 
-  /** 生成签名链接；文件不在角色库目录内时返回 undefined。 */
+  /** 生成签名链接；文件不在公开目录内时返回 undefined。 */
   url(baseUrl: string, file: string): string | undefined {
     const relative = this.relativeOf(file);
     if (!relative) return undefined;
     const expires = Date.now() + PUBLIC_URL_TTL_MS;
     const token = this.token(relative, expires);
     const encoded = relative.split("/").map((part) => encodeURIComponent(part)).join("/");
-    return `${baseUrl.replace(/\/+$/, "")}/api/public/media/${encoded}?expires=${expires}&token=${token}`;
+    return `${baseUrl.replace(/\/+$/, "")}${this.publicPath}${encoded}?expires=${expires}&token=${token}`;
   }
 
   /** 校验签名并返回本地文件；过期、签名不符或路径不合法时返回 undefined。 */
@@ -116,7 +128,7 @@ export class PublicMediaHost {
     if (!relative || relative.split("/").some((part) => !part || part === ".." || part === ".")) {
       return undefined;
     }
-    if (!IMAGE_EXTENSIONS.has(path.extname(relative).toLowerCase())) return undefined;
+    if (!this.extensions.has(path.extname(relative).toLowerCase())) return undefined;
     const expected = this.token(relative, expires);
     if (
       expected.length !== token.length ||
@@ -133,7 +145,7 @@ export class PublicMediaHost {
     const resolved = path.resolve(file);
     if (!isInside(this.root, resolved)) return undefined;
     const relative = path.relative(this.root, resolved).split(path.sep).join("/");
-    if (!IMAGE_EXTENSIONS.has(path.extname(relative).toLowerCase())) return undefined;
+    if (!this.extensions.has(path.extname(relative).toLowerCase())) return undefined;
     return relative;
   }
 

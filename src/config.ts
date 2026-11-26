@@ -156,6 +156,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     fallbackToUnsynced: true,
   },
   douyin: {
+    mode: "open-platform",
     clientKey: "",
     redirectUri: "",
     scope: "user_info,video.create",
@@ -505,6 +506,9 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     envBoolean(env, "VIDEOGEN_FALLBACK_MATERIALS"),
   );
 
+  config.douyin.mode = set(config.douyin.mode, envString(env, "DOUYIN_MODE") as
+    | AppConfig["douyin"]["mode"]
+    | undefined);
   config.douyin.clientKey = set(config.douyin.clientKey, envString(env, "DOUYIN_CLIENT_KEY"));
   config.douyin.clientSecret = set(config.douyin.clientSecret, envString(env, "DOUYIN_CLIENT_SECRET"));
   config.douyin.redirectUri = set(config.douyin.redirectUri, envString(env, "DOUYIN_REDIRECT_URI"));
@@ -619,8 +623,11 @@ function validateConfig(config: AppConfig): void {
       );
     }
   }
-  if (!config.douyin.scope.trim()) {
-    throw new AppError("抖音授权 scope 不能为空", { code: "CONFIG_INVALID" });
+  if (config.douyin.mode !== "open-platform" && config.douyin.mode !== "miniapp") {
+    throw new AppError("抖音接入方式只能是 open-platform 或 miniapp", { code: "CONFIG_INVALID" });
+  }
+  if (config.douyin.mode === "open-platform" && !config.douyin.scope.trim()) {
+    throw new AppError("抖音开放平台模式下授权 scope 不能为空", { code: "CONFIG_INVALID" });
   }
 
   config.video.width = Math.round(config.video.width / 2) * 2;

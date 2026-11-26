@@ -1157,9 +1157,22 @@ function publishRecordsHtml(job) {
       .join("")}`;
 }
 
+function miniappPublishCardHtml(job) {
+  const douyin = state.douyin;
+  return `<section class="card"><div class="card-head"><div><div class="card-title">发布到抖音</div><div class="card-sub">个人号小程序投稿，发布前手动确认</div></div><span class="pill pill-warning">人工确认</span></div>
+    <div class="card-body">
+      ${douyin.publicBaseUrlSet ? "" : `<div class="settings-note">${icon("alert", 16)}<span>还没有配置 https 公网素材地址，暂时不能生成下载二维码。可以先把成片下载到手机相册，再在小程序里选择视频。</span></div>`}
+      <div class="hint">先在手机上下载成片，再打开已开通「短视频自主挂载」的个人主体小程序，选择相册里的成片并确认发布。小程序会用抖音官方发布器拉起投稿页，不经过服务端静默发布。</div>
+      ${douyin.publicBaseUrlSet ? `<button class="btn btn-primary btn-block mt-12" id="miniapp-publish-btn" type="button">${icon("qrcode", 15)} 生成手机下载二维码</button>` : `<a class="btn btn-primary btn-block mt-12" href="/api/videos/${attr(job.id)}/video" download>${icon("download", 15)} 下载成片</a>`}
+      <div id="miniapp-publish-result"></div>
+      <div class="hint mt-8">发布结果只在抖音 App 内确认，网页不会自动显示已发布；500+ 粉等资格以抖音开放平台当前审核为准。</div>
+    </div></section>`;
+}
+
 function publishCardHtml(job) {
   const douyin = state.douyin;
   if (!douyin) return "";
+  if (douyin.mode === "miniapp") return miniappPublishCardHtml(job);
   if (!douyin.configured) {
     return `<section class="card"><div class="card-head"><div><div class="card-title">发布到抖音</div><div class="card-sub">需要先配置开放平台应用</div></div></div>
       <div class="card-body">
@@ -1403,6 +1416,12 @@ function renderJobView() {
       void publishJob(job);
     });
   }
+  const miniappPublishButton = document.getElementById("miniapp-publish-btn");
+  if (miniappPublishButton) {
+    miniappPublishButton.addEventListener("click", () => {
+      void createMiniappShare(job);
+    });
+  }
 }
 
 function openSegmentEdit(job, index) {
@@ -1592,6 +1611,39 @@ async function publishJob(job) {
     toast(error.message, "error");
     button.disabled = false;
     button.innerHTML = `${icon("send", 15)} 发布到抖音`;
+  }
+}
+
+async function createMiniappShare(job) {
+  const button = document.getElementById("miniapp-publish-btn");
+  const result = document.getElementById("miniapp-publish-result");
+  if (!button || !result) return;
+  button.disabled = true;
+  button.innerHTML = `<span class="spinner"></span> 生成中…`;
+  result.innerHTML = "";
+  try {
+    const data = await api(`/api/videos/${job.id}/douyin/miniapp`, { method: "POST" });
+    result.innerHTML = `<div class="miniapp-share-result">
+      <img class="miniapp-share-qr" src="${attr(data.qrDataUrl)}" alt="成片下载二维码" />
+      <div class="miniapp-share-body">
+        <div class="miniapp-share-title">用手机扫码下载成片</div>
+        <div class="miniapp-share-actions">
+          <a class="btn btn-primary btn-sm" href="${attr(data.videoUrl)}" target="_blank" rel="noreferrer">${icon("external", 15)} 打开下载链接</a>
+          <button class="btn btn-ghost btn-sm" type="button" id="miniapp-copy-video">${icon("copy", 15)} 复制链接</button>
+        </div>
+        <div class="hint">链接 24 小时内有效。下载到相册后，打开小程序「发布到抖音」，选择这条成片并确认发布。</div>
+      </div>
+    </div>`;
+    document.getElementById("miniapp-copy-video")?.addEventListener("click", () => {
+      void copyText(data.videoUrl);
+    });
+    toast("已生成手机下载二维码", "success");
+  } catch (error) {
+    result.innerHTML = `<div class="settings-note">${icon("alert", 16)}<span>${esc(error.message)}</span></div>`;
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.innerHTML = `${icon("qrcode", 15)} 生成手机下载二维码`;
   }
 }
 
@@ -2337,6 +2389,17 @@ async function copyText(text) {
 }
 
 function douyinSetupHtml(douyin) {
+  if (douyin?.mode === "miniapp") {
+    return `<div class="mt-16">
+      <div class="hint">个人号小程序投稿</div>
+      <ol class="setup-steps">
+        <li>在抖音开放平台创建个人主体小程序，申请并开通「短视频自主挂载」能力；绑定有效粉丝数超过 500 的普通抖音号。</li>
+        <li>把仓库 <code>miniapp/</code> 目录导入抖音开发者工具，替换 <code>project.config.json</code> 里的 AppID，上传并提交审核。</li>
+        <li>成片生成后，在任务详情页生成手机下载二维码，把成片保存到相册；打开小程序选择成片，在抖音发布器里确认发布。</li>
+      </ol>
+      <div class="settings-note">${icon("info", 16)}<span>这个模式不需要 client_key / client_secret，也不经过服务端静默发布；实际能否发布由抖音小程序的短视频挂载审核和账号资格决定。</span></div>
+    </div>`;
+  }
   const redirectUri = douyin?.redirectUri || "http://127.0.0.1:8787/api/douyin/callback";
   return `<div class="mt-16">
     <div class="hint">回调地址（需在抖音开放平台登记）</div>
@@ -2361,9 +2424,15 @@ async function renderPublish() {
   const publishes = data.publishes ?? [];
   state.publishes = publishes;
 
-  const authorized = Boolean(douyin.authorized);
+  const miniapp = douyin.mode === "miniapp";
+  const authorized = !miniapp && Boolean(douyin.authorized);
   const configured = Boolean(douyin.configured);
-  const account = authorized
+  const account = miniapp
+    ? `<div class="settings-note mt-16">${icon("info", 16)}<span>${douyin.publicBaseUrlSet ? "成片生成后，在任务详情页生成手机下载二维码，下载到相册后在已开通短视频挂载的小程序里选择发布。" : "还没配置公网素材地址；可以先在手机上打开任务下载成片，再在小程序里从相册选择。"}</span></div>
+      <div class="account-actions">
+        <a class="btn btn-primary" href="#/settings">${icon("sliders", 15)} 查看设置</a>
+      </div>`
+    : authorized
     ? `<div class="account">
         <div class="avatar">${douyin.token?.avatar ? `<img src="${attr(douyin.token.avatar)}" alt="" />` : esc((douyin.token?.nickname || "抖").slice(0, 1))}</div>
         <div>
@@ -2385,13 +2454,13 @@ async function renderPublish() {
     <section class="page-head">
       <p class="eyebrow">Publishing</p>
       <h2>发布到抖音</h2>
-      <p>通过抖音开放平台授权后，可以把生成的成片直接发布到自己的抖音号。令牌只保存在本机。</p>
+      <p>${miniapp ? "个人号小程序投稿：把成片下载到手机相册，在已开通「短视频自主挂载」的小程序里选择成片，再由抖音发布器确认发布；不需要 OAuth。" : "通过抖音开放平台授权后，可以把生成的成片直接发布到自己的抖音号。令牌只保存在本机。"}</p>
     </section>
     <div class="publish-grid">
       <section class="card account-card">
         <div class="card-head">
-          <div><div class="card-title">抖音账号</div><div class="card-sub">OAuth 授权状态</div></div>
-          <span class="pill ${authorized ? "pill-success" : configured ? "pill-warning" : "pill-soft"}">${authorized ? "已授权" : configured ? "待授权" : "未配置"}</span>
+          <div><div class="card-title">抖音账号</div><div class="card-sub">${miniapp ? "个人号小程序投稿" : "OAuth 授权状态"}</div></div>
+          <span class="pill ${miniapp ? (douyin.publicBaseUrlSet ? "pill-warning" : "pill-soft") : authorized ? "pill-success" : configured ? "pill-warning" : "pill-soft"}">${miniapp ? (douyin.publicBaseUrlSet ? "小程序待发布" : "待配公网地址") : authorized ? "已授权" : configured ? "待授权" : "未配置"}</span>
         </div>
         <div class="card-body">
           ${account}
@@ -2420,7 +2489,7 @@ async function renderPublish() {
                     </div>`,
                   )
                   .join("")}</div>`
-              : emptyState("send", "还没有发布记录", "生成成片后，在任务详情页点击「发布到抖音」。")
+              : emptyState("send", "还没有发布记录", miniapp ? "生成成片后，在任务详情页下载成片，再打开小程序选择成片发布。" : "生成成片后，在任务详情页点击「发布到抖音」。")
           }
         </div>
       </section>
@@ -3124,37 +3193,49 @@ async function renderSettings() {
 
       <section class="card settings-card">
         <div class="card-head">
-          <div><div class="card-title">抖音开放平台</div><div class="card-sub">用于授权抖音号并发布成片</div></div>
-          <span class="pill ${douyin?.authorized ? "pill-success" : douyin?.configured ? "pill-warning" : "pill-soft"}">${douyin?.authorized ? "已授权" : douyin?.configured ? "待授权" : "未配置"}</span>
+          <div><div class="card-title">抖音发布</div><div class="card-sub">个人号小程序投稿，或开放平台应用自动发布</div></div>
+          <span class="pill ${douyin?.mode === "miniapp" ? (douyin?.publicBaseUrlSet ? "pill-warning" : "pill-soft") : douyin?.authorized ? "pill-success" : douyin?.configured ? "pill-warning" : "pill-soft"}">${douyin?.mode === "miniapp" ? (douyin?.publicBaseUrlSet ? "小程序待发布" : "待配公网地址") : douyin?.authorized ? "已授权" : douyin?.configured ? "待授权" : "未配置"}</span>
         </div>
         <div class="card-body">
-          <div class="field-grid-2">
-            <div class="field">
-              <label for="douyin-client-key">client_key</label>
-              <input class="input" id="douyin-client-key" value="${attr(s.douyin.clientKey)}" placeholder="开放平台应用的 client_key" />
-            </div>
-            <div class="field">
-              <label for="douyin-scope">scope</label>
-              <input class="input" id="douyin-scope" value="${attr(s.douyin.scope)}" placeholder="user_info,video.create" />
-            </div>
+          <div class="field">
+            <label for="douyin-mode">接入方式</label>
+            <select class="select" id="douyin-mode">
+              <option value="miniapp" ${s.douyin.mode === "miniapp" ? "selected" : ""}>个人号小程序投稿（人工确认发布）</option>
+              <option value="open-platform" ${s.douyin.mode !== "miniapp" ? "selected" : ""}>开放平台应用（企业/网站应用，自动发布）</option>
+            </select>
           </div>
-          ${secretField("douyin-client-secret", "client_secret", { set: s.douyin.clientSecretSet, hint: s.douyin.clientSecretHint })}
-          <div class="field-grid-2">
-            <div class="field">
-              <label for="douyin-redirect-uri">回调地址 <span class="optional">留空使用默认</span></label>
-              <input class="input" id="douyin-redirect-uri" value="${attr(s.douyin.redirectUri)}" placeholder="${attr(redirectUri)}" />
+          <div class="settings-note" id="douyin-miniapp-note" ${s.douyin.mode === "miniapp" ? "" : "hidden"}>${icon("info", 16)}<span>个人号小程序投稿：在抖音开放平台创建个人主体小程序，申请「短视频自主挂载」并绑定有效粉丝超过 500 的普通抖音号。成片先下载到手机相册，再在小程序里选择视频、由抖音发布器确认发布；不需要 client_key / client_secret，也不是服务端静默发布。仓库 <span class="mono">miniapp/</span> 目录是配套小程序页面。</span></div>
+          <div id="douyin-credentials-fields" ${s.douyin.mode === "miniapp" ? "hidden" : ""}>
+            <div class="field-grid-2">
+              <div class="field">
+                <label for="douyin-client-key">client_key</label>
+                <input class="input" id="douyin-client-key" value="${attr(s.douyin.clientKey)}" placeholder="开放平台应用的 client_key" />
+              </div>
+              <div class="field" id="douyin-scope-field">
+                <label for="douyin-scope">scope</label>
+                <input class="input" id="douyin-scope" value="${attr(s.douyin.scope)}" placeholder="user_info,video.create" />
+              </div>
             </div>
-            <div class="field">
-              <label for="douyin-api-base">接口地址</label>
-              <input class="input" id="douyin-api-base" value="${attr(s.douyin.apiBaseUrl)}" />
-            </div>
+            ${secretField("douyin-client-secret", "client_secret", { set: s.douyin.clientSecretSet, hint: s.douyin.clientSecretHint })}
           </div>
-          <div class="settings-note">${icon("shield", 16)}<span>当前生效回调地址：<span class="mono">${esc(redirectUri)}</span> <button class="btn-link" type="button" data-copy="${attr(redirectUri)}">${icon("copy", 13)} 复制</button>。修改后请先保存，再发起授权。令牌只保存在本机 <span class="mono">.cache/douyin-token.json</span>。</span></div>
+          <div id="douyin-open-platform-fields" ${s.douyin.mode === "miniapp" ? "hidden" : ""}>
+            <div class="field-grid-2">
+              <div class="field">
+                <label for="douyin-redirect-uri">回调地址 <span class="optional">留空使用默认</span></label>
+                <input class="input" id="douyin-redirect-uri" value="${attr(s.douyin.redirectUri)}" placeholder="${attr(redirectUri)}" />
+              </div>
+              <div class="field">
+                <label for="douyin-api-base">接口地址</label>
+                <input class="input" id="douyin-api-base" value="${attr(s.douyin.apiBaseUrl)}" />
+              </div>
+            </div>
+            <div class="settings-note">${icon("shield", 16)}<span>当前生效回调地址：<span class="mono">${esc(redirectUri)}</span> <button class="btn-link" type="button" data-copy="${attr(redirectUri)}">${icon("copy", 13)} 复制</button>。修改后请先保存，再发起授权。令牌只保存在本机 <span class="mono">.cache/douyin-token.json</span>。</span></div>
+          </div>
           <div class="test-row">
-            <button class="btn btn-ghost btn-sm" type="button" data-test="douyin">测试应用配置</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-test="douyin">测试发布配置</button>
             <span class="test-result" id="test-douyin-result">测试使用已保存的配置</span>
-            ${douyin?.configured ? `<button class="btn btn-ghost btn-sm" type="button" id="settings-connect-douyin">${icon("external", 15)} ${douyin.authorized ? "重新授权" : "授权抖音"}</button>` : ""}
-            ${douyin?.authorized ? `<button class="btn btn-danger btn-sm" type="button" id="settings-disconnect-douyin">断开连接</button>` : ""}
+            ${s.douyin.mode !== "miniapp" && douyin?.configured ? `<button class="btn btn-ghost btn-sm" type="button" id="settings-connect-douyin">${icon("external", 15)} ${douyin.authorized ? "重新授权" : "授权抖音"}</button>` : ""}
+            ${s.douyin.mode !== "miniapp" && douyin?.authorized ? `<button class="btn btn-danger btn-sm" type="button" id="settings-disconnect-douyin">断开连接</button>` : ""}
             <span class="hint">应用信息保存后生效</span>
           </div>
         </div>
@@ -3323,6 +3404,22 @@ async function renderSettings() {
       void testProvider(button.dataset.resume, button, { resumeTaskId: taskId });
     });
   }
+  const douyinModeSelect = document.getElementById("douyin-mode");
+  const syncDouyinMode = () => {
+    const miniapp = (douyinModeSelect?.value ?? "open-platform") === "miniapp";
+    const note = document.getElementById("douyin-miniapp-note");
+    const credentials = document.getElementById("douyin-credentials-fields");
+    const openFields = document.getElementById("douyin-open-platform-fields");
+    if (note) note.hidden = !miniapp;
+    if (credentials) credentials.hidden = miniapp;
+    if (openFields) openFields.hidden = miniapp;
+    const connect = document.getElementById("settings-connect-douyin");
+    const disconnect = document.getElementById("settings-disconnect-douyin");
+    if (connect) connect.hidden = miniapp;
+    if (disconnect) disconnect.hidden = miniapp;
+  };
+  douyinModeSelect?.addEventListener("change", syncDouyinMode);
+  syncDouyinMode();
   document.getElementById("settings-connect-douyin")?.addEventListener("click", () => {
     void connectDouyin();
   });
@@ -3419,6 +3516,7 @@ function collectSettings() {
   if (lipsyncKey !== undefined) lipsync.apiKey = lipsyncKey;
 
   const douyin = {
+    mode: value("douyin-mode") || "open-platform",
     clientKey: value("douyin-client-key").trim(),
     redirectUri: value("douyin-redirect-uri").trim(),
     scope: value("douyin-scope").trim(),
@@ -3584,7 +3682,12 @@ async function testProvider(kind, button, options = {}) {
         result.className = data.pending ? "test-result warn" : "test-result ok";
         return;
       } else if (kind === "douyin") {
-        result.textContent = `连接成功：应用凭证有效，client_token 有效期 ${Number(data.expiresInSec) || 0} 秒`;
+        result.textContent =
+          data.mode === "miniapp"
+            ? data.publicBaseUrlSet
+              ? "小程序投稿已就绪：出片后可以生成手机下载二维码"
+              : "小程序投稿已就绪；配置 https 公网地址后可生成下载二维码"
+            : `连接成功：应用凭证有效，client_token 有效期 ${Number(data.expiresInSec) || 0} 秒`;
       } else {
         result.textContent = "连接成功";
       }
