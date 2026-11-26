@@ -355,8 +355,12 @@ export interface VideoGenSettings {
   publicAssetToken: string;
 }
 
+/** 抖音接入方式：企业应用走开放平台 OAuth；个人号走小程序投稿（人工确认）。 */
+export type DouyinMode = "open-platform" | "miniapp";
+
 /** 抖音开放平台应用配置；clientKey/clientSecret 需在开放平台申请。 */
 export interface DouyinSettings {
+  mode: DouyinMode;
   clientKey: string;
   clientSecret?: string;
   /** 为空时使用 http://<host>:<port>/api/douyin/callback。 */

@@ -1640,6 +1640,44 @@ svg {
   font-size: 11px;
 }
 
+.miniapp-share-result {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.miniapp-share-qr {
+  width: 156px;
+  height: 156px;
+  flex: none;
+  border-radius: 10px;
+  background: #fff;
+  padding: 4px;
+}
+
+.miniapp-share-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.miniapp-share-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.miniapp-share-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 /* ---------- Settings ---------- */
 .settings-layout {
   display: flex;

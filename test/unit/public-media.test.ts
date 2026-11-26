@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   PublicMediaHost,
+  VIDEO_EXTENSIONS,
   isPublicHost,
   publicBaseUrlFromRequest,
 } from "../../src/server/publicMedia.js";
@@ -103,4 +104,33 @@ test("publicBaseUrlFromRequest：按 Host 与反向代理协议生成对外地�
   );
   assert.equal(publicBaseUrlFromRequest(request("127.0.0.1:8787")), undefined);
   assert.equal(publicBaseUrlFromRequest(request(undefined)), undefined);
+});
+test("PublicMediaHost：视频签名链接只放行输出目录里的视频", async () => {
+  const dir = await makeTempDir();
+  const outputDir = path.join(dir, "output");
+  await fs.mkdir(path.join(outputDir, "job-1"), { recursive: true });
+  const video = path.join(outputDir, "job-1", "video.mp4");
+  await fs.writeFile(video, Buffer.from([0x00, 0x00, 0x00, 0x18]));
+  const host = new PublicMediaHost(outputDir, path.join(dir, "public-video-secret"), undefined, {
+    extensions: VIDEO_EXTENSIONS,
+    publicPath: "/api/public/video/",
+  });
+  try {
+    const url = host.url("https://dsh.example.com/", video);
+    assert.ok(url);
+    assert.match(
+      url!,
+      /^https:\/\/dsh\.example\.com\/api\/public\/video\/job-1\/video\.mp4\?expires=\d+&token=[A-Za-z0-9_-]+$/,
+    );
+    const parsed = new URL(url!);
+    const relative = decodeURIComponent(parsed.pathname.replace("/api/public/video/", ""));
+    const expires = Number(parsed.searchParams.get("expires"));
+    const token = parsed.searchParams.get("token")!;
+    assert.equal(host.resolve(relative, expires, token), video);
+    assert.equal(host.resolve("job-1/image.png", expires, token), undefined);
+    assert.equal(host.resolve("../public-video-secret", expires, token), undefined);
+    assert.equal(host.url("https://dsh.example.com", path.join(dir, "outside.mp4")), undefined);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
