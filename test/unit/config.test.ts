@@ -161,6 +161,32 @@ test("loadConfig 不改动非阿里百炼地址上的通用协议", async () => 
   assert.equal(config.videoGen.submitPath, "/v1/videos/generations");
 });
 
+test("loadConfig 把角色参考图地址默认到百炼，不沿用画面聚合平台", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({
+    cwd: dir,
+    env: {},
+    overrides: {
+      videoGen: { provider: "http", protocol: "seedance", baseUrl: "https://nexus.cytain.com" },
+      imageGen: { provider: "bailian", baseUrl: "" },
+    },
+  });
+  // 旧设置里 imageGen.baseUrl 为空；它曾回退到 videoGen.baseUrl，导致百炼 Key 被发到聚合平台后 401。
+  assert.equal(config.videoGen.baseUrl, "https://nexus.cytain.com");
+  assert.equal(config.imageGen.baseUrl, "https://dashscope.aliyuncs.com");
+  assert.equal(config.imageGen.provider, "bailian");
+});
+
+test("loadConfig 给只填域名的角色参考图地址补上 https://", async () => {
+  const dir = await makeTempDir();
+  const config = loadConfig({
+    cwd: dir,
+    env: {},
+    overrides: { imageGen: { baseUrl: "dashscope.aliyuncs.com" } },
+  });
+  assert.equal(config.imageGen.baseUrl, "https://dashscope.aliyuncs.com");
+});
+
 test("loadConfig 接受大小写混写的供应商名并统一成小写", async () => {
   const dir = await makeTempDir();
   // 设置页把选项标签（BAILIAN）原样存进配置 / 设置文件时，创建任务不应该被判为非法供应商。

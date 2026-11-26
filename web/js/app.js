@@ -2854,6 +2854,10 @@ async function renderSettings() {
   const videoModelOptions = activeVideoChannel?.models ?? [];
   const activeVideoModel =
     videoModelOptions.find((item) => item.id === s.videoGen.model) ?? videoModelOptions[0];
+  const imageGenModels = s.imageGenModels ?? [];
+  const activeImageModel = imageGenModels.find((item) => item.id === s.imageGen.model);
+  const customImageModel =
+    s.imageGen.model && !activeImageModel ? s.imageGen.model : "";
 
   view.innerHTML = `
     <section class="page-head">
@@ -3084,18 +3088,21 @@ async function renderSettings() {
           <span class="pill ${s.imageGen.provider === "bailian" && s.imageGen.apiKeySet ? "pill-brand" : "pill-soft"}">${s.imageGen.provider === "bailian" ? (s.imageGen.apiKeySet ? "已启用" : "待填 Key") : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼 Qwen-Image</strong>，模型、尺寸、负向提示词和提示词改写都已预置；填好 API Key 后，角色库每张卡片的「按外观生成参考图」即可直接调用。接口地址留空会沿用上面的 AI 画面地址，通常只需要填 Key。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span>默认接<strong>阿里百炼 Qwen-Image</strong>，可在「模型」中切换 3.0 / 2.1 / 2.0 各档，填同一个百炼 API Key 即可；尺寸、负向提示词和提示词改写已预置。接口地址固定走百炼，<strong>不会沿用上面的 AI 画面地址</strong>，避免把百炼 Key 发到聚合平台后报 401 Invalid token。</span></div>
           <div class="field-grid-3">
             <div class="field">
               <label for="imagegen-provider">供应商</label>
               <select class="select" id="imagegen-provider">
-                ${options([["bailian", "阿里百炼 Qwen-Image"], ["none", "不使用"]], s.imageGen.provider)}
+                ${options([["bailian", "阿里百炼（Qwen-Image）"], ["none", "不使用"]], s.imageGen.provider)}
               </select>
             </div>
             <div class="field">
-              <label for="imagegen-model">模型</label>
-              <input class="input" id="imagegen-model" value="${attr(s.imageGen.model)}" placeholder="qwen-image-2.0-pro" />
-              <span class="hint">百炼当前主流；也可换成 qwen-image-3.0 等兼容模型</span>
+              <label for="imagegen-model">模型（可切换）</label>
+              <select class="select" id="imagegen-model">
+                ${imageGenModels.map((item) => `<option value="${attr(item.id)}" ${item.id === activeImageModel?.id ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
+                ${customImageModel ? `<option value="${attr(customImageModel)}" selected>${esc(customImageModel)}（自定义）</option>` : ""}
+              </select>
+              <span class="hint" id="imagegen-model-hint">${esc(activeImageModel?.hint ?? "自定义模型：沿用通用参数生成；百炼 Key 只能调用百炼地址。")}</span>
             </div>
             <div class="field">
               <label for="imagegen-size">输出尺寸</label>
@@ -3105,13 +3112,14 @@ async function renderSettings() {
           </div>
           ${secretField("imagegen-api-key", "图像生成 API Key", { set: s.imageGen.apiKeySet, hint: s.imageGen.apiKeyHint })}
           <div class="field">
-            <label for="imagegen-base-url">接口地址 <span class="optional">留空沿用 AI 画面地址</span></label>
+            <label for="imagegen-base-url">接口地址 <span class="optional">百炼 Key 保持默认即可</span></label>
             <input class="input" id="imagegen-base-url" value="${attr(s.imageGen.baseUrl)}" placeholder="https://dashscope.aliyuncs.com" />
+            <span class="hint">留空使用阿里百炼默认地址；也可填业务空间专属域名（https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com）。不要填 One API Lumi 等聚合平台地址，百炼 Key 在那边会报 401 Invalid token。</span>
           </div>
           <div class="field">
             <label for="imagegen-negative">负向提示词 <span class="optional">可选</span></label>
             <textarea class="textarea" id="imagegen-negative" rows="2" maxlength="1000">${esc(s.imageGen.negativePrompt)}</textarea>
-            <span class="hint">预置了低画质、畸形手指、过度光滑等常见问题；留空表示不发送</span>
+            <span class="hint">预置了低画质、畸形手指、过度光滑等常见问题；留空表示不发送。Qwen-Image 2.1 系列不支持该参数，选择后会自动跳过。</span>
           </div>
           ${switchField("imagegen-prompt-extend", "自动改写提示词", s.imageGen.promptExtend)}
           <div class="field-grid-2">
@@ -3368,6 +3376,16 @@ async function renderSettings() {
   });
   syncVideoChannel(s.videoGen.channel);
 
+  const imageModelSelect = document.getElementById("imagegen-model");
+  const imageModelHint = document.getElementById("imagegen-model-hint");
+  const updateImageModelHint = () => {
+    if (!imageModelHint) return;
+    const selected = imageGenModels.find((item) => item.id === imageModelSelect?.value);
+    imageModelHint.textContent =
+      selected?.hint ?? "自定义模型：沿用通用参数生成；百炼 Key 只能调用百炼地址。";
+  };
+  imageModelSelect?.addEventListener("change", updateImageModelHint);
+
   document.getElementById("imagegen-preset")?.addEventListener("click", () => {
     const set = (id, value) => {
       const el = document.getElementById(id);
@@ -3375,13 +3393,15 @@ async function renderSettings() {
     };
     set("imagegen-provider", "bailian");
     set("imagegen-model", "qwen-image-2.0-pro");
+    set("imagegen-base-url", "https://dashscope.aliyuncs.com");
     set("imagegen-size", "1152*1536");
     set("imagegen-negative", "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。");
     const extend = document.getElementById("imagegen-prompt-extend");
     if (extend) extend.checked = true;
     set("imagegen-timeout", "300000");
+    updateImageModelHint();
     const hint = document.getElementById("imagegen-preset-hint");
-    if (hint) hint.textContent = "已填入百炼 Qwen-Image 默认值，点「保存设置」后即可在角色库生成";
+    if (hint) hint.textContent = "已填入百炼 Qwen-Image 默认值（地址、模型、尺寸），点「保存设置」后即可在角色库生成";
   });
 
   for (const button of view.querySelectorAll("[data-test]")) {

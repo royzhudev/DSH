@@ -13,7 +13,7 @@
 - **可替换 TTS**：默认使用 Edge TTS（免费、无需密钥，中文音色 `zh-CN-XiaoxiaoNeural`）；也可切换 OpenAI 兼容 `/audio/speech` 或静音占位。Edge 返回句级时间戳，用于字幕对齐。
 - **角色库与跨镜头一致性**：为人物/道具保存名称、外观设定和参考图；生成时把设定写进每个出场分镜的提示词，并把参考图作为图生视频输入，让同一人物、同一道具在后续镜头（甚至后续视频）保持同一形象。
 - **任务历史持久化**：生成完成、失败或中断的任务都会写入 `output/<任务 ID>/job.json`，服务重启或重新发布后自动恢复历史列表与详情；旧版本已有的 `result.json` 也会被自动识别。
-- **角色参考图 AI 生成（可选）**：设置里加一个百炼 Qwen-Image 配置，模型、尺寸、负向提示词和提示词改写都已预置，通常只填 API Key；角色库卡片可以按外观设定一键生成参考图，也可以继续上传本地图片；参考图可单独清空，设定保留，清空后可重新生成。生成结果直接入库，之后仍可随时换图。
+- **角色参考图 AI 生成（可选）**：设置里的「AI 角色图生成」可切换多个阿里百炼文生图模型（Qwen-Image 3.0 Pro / 3.0 / 2.1 Pro / 2.1 Turbo / 2.0 Pro），尺寸、负向提示词和提示词改写都已预置，填同一个百炼 API Key 即可换模型；接口地址默认固定到百炼，不会跟随 AI 画面地址（避免把百炼 Key 发到聚合平台后返回 401）。角色库卡片可以按外观设定一键生成参考图，也可以继续上传本地图片；参考图可单独清空，设定保留，清空后可重新生成。生成结果直接入库，之后仍可随时换图。
 - **AI 画面生成（可选）**：通过通用 HTTP 文生视频 / 图生视频接口为分镜生成画面；有角色参考图时自动携带 `image` 与 `reference_images`，失败时按配置回退素材库或渐变背景。
 - **预检与费用保护**：任务入队前与流水线开始前做本地预检（配置、密钥、剧本长度、参考图、目录可写、ffmpeg），问题一次性列出并标明阶段，不会先扣费再报错；离线脚本、静音配音、画面回退等降级会在任务详情里显式告警。
 - **测试视频**：设置页输入几句提示词，选择 3 秒或 5 秒，真实生成一条测试视频并内嵌播放，正式出片前先确认模型效果。
@@ -288,6 +288,24 @@ GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
 相关变量：`VIDEOGEN_CHANNEL`、`VIDEOGEN_PROVIDER`、`VIDEOGEN_PROTOCOL`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`、`VIDEOGEN_PUBLIC_BASE_URL`、`VIDEOGEN_PUBLIC_ASSET_TOKEN`。网页设置优先于这些变量；日常使用建议只在设置页选择渠道并填 Key，渠道会自动带出其余参数。
 
 > 默认内置阿里百炼（DashScope）异步视频协议；通用 HTTP 契约适合自建网关和 One API Lumi 之外的聚合平台。使用 Runway、可灵、即梦等其它模型时，请通过网关把厂商 API 适配成通用格式。
+
+### 角色参考图生成
+
+`imageGen.provider=bailian` 时使用阿里百炼的同步文生图接口 `POST {baseUrl}/api/v1/services/aigc/multimodal-generation/generation`，请求体为 `input.messages` + `parameters.size/negative_prompt/prompt_extend`，返回 `output.choices[].message.content[].image`，24 小时内下载入库。
+
+设置页「AI 角色图生成 → 模型（可切换）」提供以下模型，**填同一个百炼 API Key 即可切换**：
+
+| 模型 | 说明 |
+| --- | --- |
+| `qwen-image-3.0-pro` | 旗舰效果，擅长中英文文字渲染与真实材质；支持负向提示词 |
+| `qwen-image-3.0` | 3.0 标准档，质量与速度平衡；支持负向提示词 |
+| `qwen-image-2.1-pro` | 速度、效果、成本最均衡；不支持负向提示词 |
+| `qwen-image-2.1-turbo` | 性价比最高、速度更快；不支持负向提示词 |
+| `qwen-image-2.0-pro` | 旧版稳定模型，兼容已有设置；支持负向提示词 |
+
+`imageGen.baseUrl` 默认为 `https://dashscope.aliyuncs.com`；留空也会回落到这个地址，**不会沿用 `videoGen.baseUrl`**。如果使用百炼业务空间专属域名，可填 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`（新加坡为 `https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com`）。模型、endpoint 与 API Key 必须属于同一地域。
+
+常见报错 `HTTP 401 Invalid token` / `new_api_error`：请求被发到了 One API Lumi 等聚合平台，而填的是百炼 Key（或反过来）。把「AI 角色图生成」的接口地址改回百炼地址并填百炼 Key 即可；「AI 画面生成」使用聚合平台不会影响角色图。`qwen-image-2.1` 系列不支持 `negative_prompt`，程序会自动跳过该参数。
 
 ### 抖音个人号小程序投稿
 

@@ -13,6 +13,7 @@ import {
 } from "../config.js";
 import type { Logger } from "../logger.js";
 import type { AppConfig, VideoGenChannel } from "../types.js";
+import { IMAGE_GEN_MODEL_OPTIONS, type ImageGenModelOption } from "../imagegen/models.js";
 import { ensureDir } from "../util/fs.js";
 
 const EDITABLE_SECTIONS = [
@@ -67,6 +68,8 @@ export interface SettingsView {
   /** 可选渠道及其自动生成参数，前端据此切换并回填表单。 */
   videoGenChannels: readonly VideoGenChannelOption[];
   imageGen: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
+  /** 阿里百炼可切换的文生图模型；前端据此渲染下拉框并显示模型说明。 */
+  imageGenModels: readonly ImageGenModelOption[];
   lipsync: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
   douyin: Record<string, unknown> & {
     clientSecretSet: boolean;
@@ -103,6 +106,7 @@ export function serializeSettings(config: AppConfig, settingsPath: string, updat
     videoGen: sections.videoGen as SettingsView["videoGen"],
     videoGenChannels: VIDEO_GEN_CHANNEL_OPTIONS,
     imageGen: sections.imageGen as SettingsView["imageGen"],
+    imageGenModels: IMAGE_GEN_MODEL_OPTIONS,
     lipsync: sections.lipsync as SettingsView["lipsync"],
     douyin: {
       ...sections.douyin,

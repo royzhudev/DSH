@@ -380,7 +380,7 @@ export type ImageGenProviderName = "none" | "bailian";
 
 export interface ImageGenSettings {
   provider: ImageGenProviderName;
-  /** 留空时沿用 videoGen.baseUrl，再回退到 DashScope 默认地址。 */
+  /** 百炼接口地址；留空时使用 https://dashscope.aliyuncs.com，不沿用 videoGen.baseUrl。 */
   baseUrl: string;
   apiKey?: string;
   model: string;
