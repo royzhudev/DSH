@@ -346,6 +346,13 @@ export interface VideoGenSettings {
   resultPath: string;
   /** 生成失败时是否回退到素材库/渐变背景。 */
   fallbackToMaterials: boolean;
+  /**
+   * 可选的公网服务地址（如 https://video.example.com）。填写后，本机角色/道具图会
+   * 通过 /api/public/cast/{token}/{id} 提供给只接受公网 URL 的平台；留空则不上传。
+   */
+  publicBaseUrl: string;
+  /** 公网素材路由的随机访问令牌；网页保存公网地址时自动生成。 */
+  publicAssetToken: string;
 }
 
 /** 抖音开放平台应用配置；clientKey/clientSecret 需在开放平台申请。 */
@@ -459,6 +466,8 @@ export interface VideoGenReferenceImage {
   name: string;
   /** 本地参考图绝对路径。 */
   file: string;
+  /** 可公开访问的图片 URL；只给接受公网 URL 的平台使用。 */
+  url?: string;
 }
 
 export interface VideoGenRequest {
@@ -466,6 +475,8 @@ export interface VideoGenRequest {
   durationSec: number;
   /** 图生视频的首帧/主参考图（本地路径）；为空时按文生视频处理。 */
   image?: string;
+  /** 首帧的公网 URL；与 image 同时提供时优先使用。 */
+  imageUrl?: string;
   /** 角色/道具参考图，按出场顺序排列。 */
   references?: VideoGenReferenceImage[];
 }

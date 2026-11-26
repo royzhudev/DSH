@@ -129,6 +129,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     clipDurationSec: 5,
     resultPath: "",
     fallbackToMaterials: true,
+    publicBaseUrl: "",
+    publicAssetToken: "",
   },
   imageGen: {
     // 角色参考图默认接阿里百炼 Qwen-Image；只填 API Key 即可，地址留空沿用画面生成地址。
@@ -292,7 +294,7 @@ export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
     channel: "aggregator-seedance2",
     label: "One API Lumi · Seedance",
     description:
-      "One API Lumi（nexus.cytain.com）的 Seedance 2.5 / 2.0 / Fast / Mini；模型、地址、路径、轮询参数已预置，只需填 API Key 并选择模型。平台只接受公网参考图，本地角色图不会上传，含参考图的分镜按文字生成。",
+      "One API Lumi（nexus.cytain.com）的 Seedance 2.5 / 2.0 / Fast / Mini；模型、地址、路径、轮询参数已预置，只需填 API Key 并选择模型。平台只接受公网参考图；填写下方「公网素材地址」后可图生视频，留空则含参考图的分镜按文字生成。",
     apiKeyLabel: "One API Lumi API Key",
     apiKeyHint: "在 One API Lumi 创建，需有目标 Seedance 模型的调用权限。",
     editSupported: false,
@@ -490,6 +492,14 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     envNumber(env, "VIDEOGEN_CLIP_DURATION"),
   );
   config.videoGen.resultPath = set(config.videoGen.resultPath, envString(env, "VIDEOGEN_RESULT_PATH"));
+  config.videoGen.publicBaseUrl = set(
+    config.videoGen.publicBaseUrl,
+    envString(env, "VIDEOGEN_PUBLIC_BASE_URL"),
+  );
+  config.videoGen.publicAssetToken = set(
+    config.videoGen.publicAssetToken,
+    envString(env, "VIDEOGEN_PUBLIC_ASSET_TOKEN"),
+  );
   config.videoGen.fallbackToMaterials = set(
     config.videoGen.fallbackToMaterials,
     envBoolean(env, "VIDEOGEN_FALLBACK_MATERIALS"),
@@ -697,6 +707,13 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     config.videoGen.baseUrl = `https://${config.videoGen.baseUrl}`;
   }
   config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.trim().replace(/\/+$/, "");
+  config.videoGen.publicBaseUrl = config.videoGen.publicBaseUrl.trim().replace(/\/+$/, "");
+  config.videoGen.publicAssetToken = config.videoGen.publicAssetToken.trim();
+  if (config.videoGen.publicBaseUrl && !/^https?:\/\//i.test(config.videoGen.publicBaseUrl)) {
+    throw new AppError("AI 画面生成的公网素材地址必须以 http:// 或 https:// 开头", {
+      code: "CONFIG_INVALID",
+    });
+  }
   normalizeProviderTokens(config);
   normalizeVideoGenProtocol(config);
   config.videoGen.channel = explicitChannel ?? inferVideoGenChannel(config.videoGen);
@@ -740,6 +757,32 @@ function isOneApiLumiBaseUrl(baseUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** 旧版 PR 把 Seedance 指向词易 Token；升级后把这些设置迁到 One API Lumi。 */
+function migrateLegacySeedance(config: AppConfig): void {
+  try {
+    const host = new URL(config.videoGen.baseUrl).hostname.toLowerCase();
+    if (!/(^|\.)tokease\.cn$/.test(host)) return;
+  } catch {
+    return;
+  }
+  const oldModel = config.videoGen.model.trim();
+  if (!/seedance/i.test(oldModel)) return;
+  const model = /fast/i.test(oldModel)
+    ? SEEDANCE_MODEL_OPTIONS[2]!.id
+    : /mini/i.test(oldModel)
+      ? SEEDANCE_MODEL_OPTIONS[3]!.id
+      : /2[.-]5/i.test(oldModel)
+        ? SEEDANCE_MODEL_OPTIONS[0]!.id
+        : SEEDANCE_MODEL_OPTIONS[1]!.id;
+  config.videoGen.provider = "http";
+  config.videoGen.protocol = "seedance";
+  config.videoGen.baseUrl = ONEAPI_LUMI_VIDEO_BASE_URL;
+  config.videoGen.model = model;
+  config.videoGen.submitPath = ONEAPI_LUMI_TASKS_PATH;
+  config.videoGen.pollPath = ONEAPI_LUMI_TASK_PATH;
+  config.videoGen.resultPath = "content.video_url";
 }
 
 /**
@@ -786,6 +829,7 @@ function normalizeOneApiLumi(config: AppConfig): void {
  * 避免用户选错协议后只能看到一段平台报错。
  */
 function normalizeVideoGenProtocol(config: AppConfig): void {
+  migrateLegacySeedance(config);
   normalizeOneApiLumi(config);
   if (!isDashscopeBaseUrl(config.videoGen.baseUrl)) return;
   // 常见的手填错误：把完整接口地址（或 compatible-mode 地址）当成「服务地址」。

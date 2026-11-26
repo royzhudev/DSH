@@ -2886,7 +2886,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? (s.videoGen.apiKeySet ? "已启用" : "待填 API Key") : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；One API Lumi 走 <code>Seedance 2.5 / 2.0</code> 的 <code>/api/v3/contents/generations/tasks</code> 任务接口。<strong>One API Lumi 只接受公网参考图</strong>：本地角色/道具图不会上传，含参考图的分镜会按文字生成。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；One API Lumi 走 <code>Seedance 2.5 / 2.0</code> 的 <code>/api/v3/contents/generations/tasks</code> 任务接口。<strong>One API Lumi 只接受公网参考图</strong>：默认不上传本地角色/道具图；填写「公网素材地址」后会自动提供带令牌的只读链接，启用图生视频。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
           <div class="field-grid-2">
             <div class="field">
               <label for="videogen-channel">模型渠道</label>
@@ -2921,6 +2921,11 @@ async function renderSettings() {
             <div class="field"><label>轮询 / 超时（自动）</label><input class="input" id="videogen-auto-timing" readonly /></div>
           </div>
           <span class="hint" id="videogen-auto-result-hint"></span>
+          <div class="field" id="videogen-public-base-wrap" ${activeVideoChannel?.referenceImagesSupported === false ? "" : "hidden"}>
+            <label for="videogen-public-base-url">公网素材地址 <span class="optional">图生视频可选</span></label>
+            <input class="input" id="videogen-public-base-url" value="${attr(s.videoGen.publicBaseUrl ?? "")}" placeholder="https://video.example.com" />
+            <span class="hint">One API Lumi 只能读取公网图片。把本控制台部署到外网后填它的地址；本地角色/道具图会通过带随机令牌的只读链接提供给平台，填好后可图生视频。留空则含参考图的镜头按纯文字生成。</span>
+          </div>
           <div id="videogen-advanced" ${activeVideoChannel?.channel === "custom" ? "" : "hidden"}>
             <div class="field-grid-3">
               <div class="field">
@@ -3201,6 +3206,7 @@ async function renderSettings() {
   const videoModelSelectWrap = document.getElementById("videogen-model-select-wrap");
   const videoModelReadonlyWrap = document.getElementById("videogen-model-readonly-wrap");
   const videoModelHint = document.getElementById("videogen-model-hint");
+  const videoPublicBaseWrap = document.getElementById("videogen-public-base-wrap");
   const setVideoField = (id, value) => {
     const el = document.getElementById(id);
     if (el) el.value = value;
@@ -3219,6 +3225,7 @@ async function renderSettings() {
     if (videoKeyWrap) videoKeyWrap.hidden = channel === "none";
     if (videoAutoFields) videoAutoFields.hidden = !fields;
     if (videoAdvanced) videoAdvanced.hidden = channel !== "custom";
+    if (videoPublicBaseWrap) videoPublicBaseWrap.hidden = option?.referenceImagesSupported !== false;
     if (fields) {
       setVideoField("videogen-provider", fields.provider);
       setVideoField("videogen-protocol", fields.protocol);
@@ -3378,6 +3385,7 @@ function collectSettings() {
     timeoutMs: number("videogen-timeout"),
     clipDurationSec: number("videogen-clip-duration"),
     resultPath: value("videogen-result-path").trim(),
+    publicBaseUrl: value("videogen-public-base-url").trim(),
     fallbackToMaterials: checked("videogen-fallback"),
   };
   const videoGenKey = secret("videogen-api-key");

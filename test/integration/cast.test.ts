@@ -72,6 +72,25 @@ test(
     assert.equal(imageResponse.status, 200);
     assert.equal(imageResponse.headers.get("content-type"), "image/png");
 
+    // One API Lumi 需要无登录态的公网图片；令牌路由只暴露这一张图。
+    const publicSettingsResponse = await request(`${app.url}/api/settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ videoGen: { publicBaseUrl: app.url } }),
+    });
+    assert.equal(publicSettingsResponse.status, 200, await publicSettingsResponse.clone().text());
+    const publicSettings = (await publicSettingsResponse.json()) as {
+      settings: { videoGen: { publicAssetToken: string; publicBaseUrl: string } };
+    };
+    const publicToken = publicSettings.settings.videoGen.publicAssetToken;
+    assert.ok(publicToken.length >= 20);
+
+    const publicImage = await fetch(`${app.url}/api/public/cast/${publicToken}/${created.cast.id}`);
+    assert.equal(publicImage.status, 200);
+    assert.equal(publicImage.headers.get("content-type"), "image/png");
+    const wrongToken = await fetch(`${app.url}/api/public/cast/wrong-token/${created.cast.id}`);
+    assert.equal(wrongToken.status, 404);
+
     const duplicate = new FormData();
     duplicate.append("kind", "prop");
     duplicate.append("name", "林小满");

@@ -26,6 +26,7 @@ import { silentLogger } from "./logger.js";
 import { createScriptProvider } from "./script/index.js";
 import { createTtsProvider } from "./tts/index.js";
 import { createVideoGenProvider } from "./videogen/index.js";
+import { hasPublicAssetBase, publicCastImageUrl } from "./videogen/public-assets.js";
 import { MaterialLibrary } from "./materials/library.js";
 import { matchMaterial, materialTagPool } from "./materials/match.js";
 import { CastLibrary, castSummary, resolveCastNames, selectCastAssets } from "./cast/library.js";
@@ -699,12 +700,14 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       );
     }
     const videoChannel = videoGenChannelOption(config.videoGen.channel);
-    const referenceImagesSupported = videoChannel?.referenceImagesSupported !== false;
+    const needsPublicImages = videoChannel?.referenceImagesSupported === false;
+    const publicImagesReady = needsPublicImages && hasPublicAssetBase(config.videoGen);
+    const referenceImagesSupported = !needsPublicImages || publicImagesReady;
     const castCharacters = cast.filter((asset) => asset.kind === "character");
     const plansWithCast = plans.filter((plan) => plan.cast.some((asset) => asset.kind === "character"));
-    if (videoGen && !referenceImagesSupported && cast.some((asset) => asset.imageFile)) {
+    if (videoGen && needsPublicImages && !publicImagesReady && cast.some((asset) => asset.imageFile)) {
       warnings.push(
-        "当前 AI 画面渠道只接受公网参考图，本地角色/道具图不会上传；本次按纯文字生成画面，角色一致性可能下降。需要图生视频请改用支持本地上传的渠道或自定义网关。",
+        "当前 AI 画面渠道只接受公网参考图，本地角色/道具图不会上传；本次按纯文字生成画面，角色一致性可能下降。需要图生视频，请在设置页填写本服务的「公网素材地址」，平台会通过带令牌的只读链接读取本地角色图。",
       );
     }
     if (!videoGen && castCharacters.length > 0) {
@@ -730,11 +733,15 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         const references = referenceImagesSupported
           ? plan.cast
               .filter((asset) => asset.imageFile)
-              .map((asset) => ({
-                role: asset.kind,
-                name: asset.name,
-                file: path.join(config.castDir, asset.imageFile!),
-              }))
+              .map((asset) => {
+                const url = needsPublicImages ? publicCastImageUrl(config.videoGen, asset.id) : undefined;
+                return {
+                  role: asset.kind,
+                  name: asset.name,
+                  file: path.join(config.castDir, asset.imageFile!),
+                  ...(url ? { url } : {}),
+                };
+              })
           : [];
         const primary = references.find((reference) => reference.role === "character") ?? references[0];
         // 角色参考图是“人设定妆照”，不是每个分镜的首帧。所有镜头都拿同一张图做首帧，
@@ -774,6 +781,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
               // 不足时渲染阶段定格补帧，避免循环同一段画面。
               durationSec: Math.min(10, Math.max(config.videoGen.clipDurationSec, Math.ceil(plan.durationSec))),
               ...(firstFrame ? { image: firstFrame.file } : {}),
+              ...(firstFrame?.url ? { imageUrl: firstFrame.url } : {}),
               ...(references.length > 0 ? { references } : {}),
             },
             path.join(jobDir, "generated"),

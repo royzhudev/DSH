@@ -235,13 +235,15 @@ GET https://nexus.cytain.com/api/v3/contents/generations/tasks/{task_id}
 
 支持 `doubao-seedance-2-5-260628`（4–30 秒、最高 1080p）、`doubao-seedance-2-0-260128`（4–15 秒、最高 4k）、`doubao-seedance-2-0-fast-260128` 和 `doubao-seedance-2-0-mini-260615`（4–15 秒、最高 720p），设置页可切换。提交返回任务 `id`；轮询状态为 `queued` / `running` / `succeeded` / `failed` / `cancelled` / `expired`，成功后取 `content.video_url`。比例支持 `adaptive/21:9/16:9/4:3/1:1/3:4/9:16`，程序默认竖屏 `9:16`、`720p`。
 
-注意：One API 的 OpenAI 兼容前缀 `/v1` 不适用于 Seedance 任务接口（拼成 `/v1/api/v3/...` 会 404）；程序会自动把 `https://nexus.cytain.com/v1` 收回域名。该接口要求所有图片是**公网 HTTP(S) URL**，不接受 Base64 data URL 或 `asset://`。本程序的角色/道具图保存在本地，不会自动上传；选中该渠道时含参考图的分镜会按纯文字生成，并在任务告警里提示，需要图生视频请改用百炼或自定义网关。
+注意：One API 的 OpenAI 兼容前缀 `/v1` 不适用于 Seedance 任务接口（拼成 `/v1/api/v3/...` 会 404）；程序会自动把 `https://nexus.cytain.com/v1` 收回域名。该接口要求所有图片是**公网 HTTP(S) URL**，不接受 Base64 data URL 或 `asset://`。本程序的角色/道具图默认保存在本地、不会上传，含参考图的分镜会按纯文字生成并告警。
+
+需要 Seedance 图生视频时，把本控制台部署到外网，在设置页「AI 画面生成 → 公网素材地址」填写它的公网地址（例如 `https://video.example.com`）并保存。服务端会生成随机令牌，通过 `/api/public/cast/{token}/{id}` 提供**无需登录、只能读取单张图**的只读链接；平台拉取该 URL 后即可用本地角色/道具图做首帧或参考图。清除公网地址会同时清除令牌。百炼 Wan 仍直接读本地图，不受影响，也不需要使用这个地址。
 
 > **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
 >
 > 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`，走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。该功能**仅阿里百炼渠道可用**：选 One API Lumi Seedance 渠道时页面会隐藏「局部修改」按钮，接口也会返回 409 提示切换渠道。
 >
-> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0 或 One API Lumi · Seedance）→ 只填该渠道的 API Key（Seedance 再选模型）→ 保存设置 → 点「生成测试视频」。地址、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填。
+> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0 或 One API Lumi · Seedance）→ 只填该渠道的 API Key（Seedance 再选模型；要图生视频再填公网素材地址）→ 保存设置 → 点「生成测试视频」。地址、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填。
 >
 > 万相 3.0 的请求体是 `{model, input:{prompt, media[]}, parameters:{resolution, ratio, duration}}`：竖屏默认 `720P` + `9:16`，时长 2–30 秒；图生视频首帧放 `media:[{type:"first_frame", url:"data:image/png;base64,..."}]`。早期 Wan 模型仍用 `parameters.size` 与 `input.img_url`。
 >
@@ -283,7 +285,7 @@ GET {baseUrl}{pollPath}    # pollPath 中的 {id} 会替换为任务 ID
 
 状态与地址字段的兼容：除了 `status` / `state` 与 `video_url`，也识别嵌套结构（`data.status`、`data.task.status`、`data.output.video_url`、`output.url`、`videos[0].file_url` 等）与数组；封面、缩略图字段会被跳过。任务已完成但没解析到地址时，错误信息会带上响应结构摘要，提示用「视频地址字段」补一条点号路径（如 `data.output.video_url`），配置后没取到会自动回退识别。
 
-相关变量：`VIDEOGEN_CHANNEL`、`VIDEOGEN_PROVIDER`、`VIDEOGEN_PROTOCOL`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`。网页设置优先于这些变量；日常使用建议只在设置页选择渠道并填 Key，渠道会自动带出其余参数。
+相关变量：`VIDEOGEN_CHANNEL`、`VIDEOGEN_PROVIDER`、`VIDEOGEN_PROTOCOL`、`VIDEOGEN_BASE_URL`、`VIDEOGEN_MODEL`、`VIDEOGEN_API_KEY`、`VIDEOGEN_SUBMIT_PATH`、`VIDEOGEN_POLL_PATH`、`VIDEOGEN_RESULT_PATH`、`VIDEOGEN_PUBLIC_BASE_URL`、`VIDEOGEN_PUBLIC_ASSET_TOKEN`。网页设置优先于这些变量；日常使用建议只在设置页选择渠道并填 Key，渠道会自动带出其余参数。
 
 > 默认内置阿里百炼（DashScope）异步视频协议；通用 HTTP 契约适合自建网关和 One API Lumi 之外的聚合平台。使用 Runway、可灵、即梦等其它模型时，请通过网关把厂商 API 适配成通用格式。
 
