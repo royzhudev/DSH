@@ -132,7 +132,7 @@ export async function preflightVideoJob(input: PreflightInput): Promise<void> {
     pushIf(
       issues,
       !config.videoGen.apiKey,
-      "AI 画面生成还没有填写 API Key（默认接阿里百炼 Wan，可在设置页填写；不需要 AI 画面可把供应商改为「不使用」）",
+      "AI 画面生成还没有填写 API Key（可在设置页选择渠道并填写对应平台的 Key；不需要 AI 画面可把渠道改为「不使用」）",
     );
     pushIf(issues, !config.videoGen.model.trim(), "AI 画面生成的模型名称不能为空");
     pushIf(

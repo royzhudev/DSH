@@ -2782,6 +2782,9 @@ async function renderSettings() {
   const videoChannels = s.videoGenChannels ?? [];
   const activeVideoChannel =
     videoChannels.find((item) => item.channel === s.videoGen.channel) ?? videoChannels[0];
+  const videoModelOptions = activeVideoChannel?.models ?? [];
+  const activeVideoModel =
+    videoModelOptions.find((item) => item.id === s.videoGen.model) ?? videoModelOptions[0];
 
   view.innerHTML = `
     <section class="page-head">
@@ -2883,7 +2886,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? (s.videoGen.apiKeySet ? "已启用" : "待填 API Key") : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；第三方聚合平台（默认词易 Token）走 <code>Seedance 2.0</code> 的 <code>/v1/video/generations</code> 任务接口。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；One API Lumi 走 <code>Seedance 2.5 / 2.0</code> 的 <code>/api/v3/contents/generations/tasks</code> 任务接口。<strong>One API Lumi 只接受公网参考图</strong>：本地角色/道具图不会上传，含参考图的分镜会按文字生成。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
           <div class="field-grid-2">
             <div class="field">
               <label for="videogen-channel">模型渠道</label>
@@ -2901,7 +2904,16 @@ async function renderSettings() {
             ${secretField("videogen-api-key", "API Key（只需填这一项）", { set: s.videoGen.apiKeySet, hint: s.videoGen.apiKeyHint }, "只填所选渠道的 API Key；其余参数由渠道自动生成，切换渠道后请换填对应平台的 Key")}
           </div>
           <div class="field-grid-3" id="videogen-auto-fields" ${activeVideoChannel?.fields ? "" : "hidden"}>
-            <div class="field"><label>模型（自动）</label><input class="input" id="videogen-auto-model" readonly /></div>
+            <div class="field" id="videogen-model-select-wrap" ${videoModelOptions.length ? "" : "hidden"}>
+              <label for="videogen-channel-model">模型（可切换）</label>
+              <select class="select" id="videogen-channel-model">
+                ${videoModelOptions.map((item) => `<option value="${attr(item.id)}" ${item.id === activeVideoModel?.id ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
+              </select>
+              <span class="hint" id="videogen-model-hint">${esc(activeVideoModel?.hint ?? "")}</span>
+            </div>
+            <div class="field" id="videogen-model-readonly-wrap" ${videoModelOptions.length ? "hidden" : ""}>
+              <label>模型（自动）</label><input class="input" id="videogen-auto-model" readonly />
+            </div>
             <div class="field"><label>接口地址（自动）</label><input class="input" id="videogen-auto-base-url" readonly /></div>
             <div class="field"><label>接口协议（自动）</label><input class="input" id="videogen-auto-protocol" readonly /></div>
             <div class="field"><label>提交路径（自动）</label><input class="input" id="videogen-auto-submit-path" readonly /></div>
@@ -2946,11 +2958,11 @@ async function renderSettings() {
                   ${options([
                     ["auto", "自动（按服务地址）"],
                     ["dashscope", "阿里百炼 DashScope"],
-                    ["seedance", "Seedance 2.0 聚合协议"],
+                    ["seedance", "One API Lumi Seedance"],
                     ["generic", "通用 HTTP 契约"],
                   ], s.videoGen.protocol ?? "auto")}
                 </select>
-                <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送；Seedance 2.0 聚合协议使用 <code>prompt/duration/ratio/images</code> 提交。</div>
+                <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送；One API Lumi Seedance 会用 <code>content[]</code>（文字 + 公网图片）提交，并轮询 <code>content.video_url</code>。</div>
               </div>
             </div>
             <div class="field-grid-3">
@@ -3185,14 +3197,24 @@ async function renderSettings() {
   const videoKeyWrap = document.getElementById("videogen-key-wrap");
   const videoAutoFields = document.getElementById("videogen-auto-fields");
   const videoAdvanced = document.getElementById("videogen-advanced");
+  const videoModelSelect = document.getElementById("videogen-channel-model");
+  const videoModelSelectWrap = document.getElementById("videogen-model-select-wrap");
+  const videoModelReadonlyWrap = document.getElementById("videogen-model-readonly-wrap");
+  const videoModelHint = document.getElementById("videogen-model-hint");
   const setVideoField = (id, value) => {
     const el = document.getElementById(id);
     if (el) el.value = value;
   };
   const videoField = (id) => document.getElementById(id)?.value ?? "";
-  const syncVideoChannel = (channel) => {
+  const updateVideoModelHint = (models) => {
+    if (!videoModelHint) return;
+    const current = models.find((item) => item.id === videoField("videogen-model"));
+    videoModelHint.textContent = current?.hint ?? "";
+  };
+  const syncVideoChannel = (channel, resetModel = false) => {
     const option = videoChannels.find((item) => item.channel === channel);
     const fields = option?.fields;
+    const models = option?.models ?? [];
     if (videoChannelHint) videoChannelHint.textContent = option?.description ?? "";
     if (videoKeyWrap) videoKeyWrap.hidden = channel === "none";
     if (videoAutoFields) videoAutoFields.hidden = !fields;
@@ -3201,7 +3223,6 @@ async function renderSettings() {
       setVideoField("videogen-provider", fields.provider);
       setVideoField("videogen-protocol", fields.protocol);
       setVideoField("videogen-base-url", fields.baseUrl);
-      setVideoField("videogen-model", fields.model);
       setVideoField("videogen-edit-model", fields.editModel);
       setVideoField("videogen-submit-path", fields.submitPath);
       setVideoField("videogen-poll-path", fields.pollPath);
@@ -3213,6 +3234,26 @@ async function renderSettings() {
       setVideoField("videogen-provider", "none");
     } else if (videoField("videogen-provider") === "none") {
       setVideoField("videogen-provider", "http");
+    }
+    if (models.length > 0) {
+      const selectedId = resetModel
+        ? fields?.model
+        : models.find((item) => item.id === videoField("videogen-model"))?.id ?? fields?.model;
+      const selected = models.find((item) => item.id === selectedId) ?? models[0];
+      if (videoModelSelect) {
+        videoModelSelect.innerHTML = models
+          .map((item) => `<option value="${attr(item.id)}">${esc(item.label)}</option>`)
+          .join("");
+        videoModelSelect.value = selected.id;
+      }
+      setVideoField("videogen-model", selected.id);
+      if (videoModelSelectWrap) videoModelSelectWrap.hidden = false;
+      if (videoModelReadonlyWrap) videoModelReadonlyWrap.hidden = true;
+      updateVideoModelHint(models);
+    } else {
+      if (videoModelSelectWrap) videoModelSelectWrap.hidden = true;
+      if (videoModelReadonlyWrap) videoModelReadonlyWrap.hidden = false;
+      if (fields) setVideoField("videogen-model", fields.model);
     }
     const autoValues = {
       "videogen-auto-model": videoField("videogen-model"),
@@ -3232,7 +3273,11 @@ async function renderSettings() {
       resultHint.textContent = `视频地址字段（自动）：${resultPath || "自动识别"}`;
     }
   };
-  videoChannelSelect?.addEventListener("change", () => syncVideoChannel(videoChannelSelect.value));
+  videoChannelSelect?.addEventListener("change", () => syncVideoChannel(videoChannelSelect.value, true));
+  videoModelSelect?.addEventListener("change", () => {
+    setVideoField("videogen-model", videoModelSelect.value);
+    updateVideoModelHint(videoChannels.find((item) => item.channel === videoChannelSelect?.value)?.models ?? []);
+  });
   syncVideoChannel(s.videoGen.channel);
 
   document.getElementById("imagegen-preset")?.addEventListener("click", () => {

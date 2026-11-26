@@ -324,7 +324,7 @@ export interface VideoGenSettings {
   /**
    * 接口协议：auto 按服务地址判断（DashScope 用 dashscope，其他用 generic）。
    * dashscope = 阿里百炼异步视频接口（提交带 X-DashScope-Async，任务在 output.task_id）。
-   * seedance = 第三方聚合平台的 Seedance 2.0 视频接口（OpenAI 风格提交 + 任务轮询）。
+   * seedance = One API Lumi（Nexus）的 Seedance 视频接口（content 数组提交 + 任务轮询）。
    */
   protocol: "auto" | "dashscope" | "generic" | "seedance";
   apiKey?: string;

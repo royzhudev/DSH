@@ -115,37 +115,43 @@ test("SettingsStore 把大写供应商名保存成小写，创建任务不再报
   assert.equal(reloaded.tts.provider, "bailian");
 });
 
-test("SettingsStore 选中画面渠道后只填 API Key，其余参数自动生成并可重启恢复", async () => {
+test("SettingsStore 选中 One API Lumi 渠道后只填 API Key，模型可切换并可重启恢复", async () => {
   const dir = await makeTempDir();
   const { config, store } = await makeStore(dir);
   const saved = await store.update({
-    videoGen: { channel: "aggregator-seedance2", apiKey: "tk-seedance" },
+    videoGen: { channel: "aggregator-seedance2", apiKey: "sk-lumi" },
   });
   assert.equal(config.videoGen.channel, "aggregator-seedance2");
   assert.equal(config.videoGen.provider, "http");
   assert.equal(config.videoGen.protocol, "seedance");
-  assert.equal(config.videoGen.baseUrl, "https://tokease.cn");
-  assert.equal(config.videoGen.model, "Seedance 2.0");
-  assert.equal(config.videoGen.submitPath, "/v1/video/generations");
-  assert.equal(config.videoGen.pollPath, "/v1/video/generations/{id}");
-  assert.equal(config.videoGen.resultPath, "output.video_url");
-  assert.equal(config.videoGen.apiKey, "tk-seedance");
+  assert.equal(config.videoGen.baseUrl, "https://nexus.cytain.com");
+  assert.equal(config.videoGen.model, "doubao-seedance-2-5-260628");
+  assert.equal(config.videoGen.submitPath, "/api/v3/contents/generations/tasks");
+  assert.equal(config.videoGen.pollPath, "/api/v3/contents/generations/tasks/{id}");
+  assert.equal(config.videoGen.resultPath, "content.video_url");
+  assert.equal(config.videoGen.apiKey, "sk-lumi");
   assert.equal(saved.videoGen.apiKeySet, true);
-  assert.equal(saved.videoGen.model, "Seedance 2.0");
-  assert.equal(saved.videoGenChannels.find((item) => item.channel === "aggregator-seedance2")?.fields?.model, "Seedance 2.0");
+  assert.equal(saved.videoGen.model, "doubao-seedance-2-5-260628");
+  const lumi = saved.videoGenChannels.find((item) => item.channel === "aggregator-seedance2");
+  assert.equal(lumi?.fields?.model, "doubao-seedance-2-5-260628");
+  assert.equal(lumi?.models?.length, 4);
 
-  // 重启服务后重新读取设置，渠道与自动参数都要保留。
+  // 同一渠道下切换模型：只额外传 model，其余参数仍自动生成。
+  await store.update({
+    videoGen: { channel: "aggregator-seedance2", model: "doubao-seedance-2-0-260128" },
+  });
+  assert.equal(config.videoGen.model, "doubao-seedance-2-0-260128");
   const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
   assert.equal(reloaded.videoGen.channel, "aggregator-seedance2");
-  assert.equal(reloaded.videoGen.model, "Seedance 2.0");
+  assert.equal(reloaded.videoGen.model, "doubao-seedance-2-0-260128");
   assert.equal(reloaded.videoGen.protocol, "seedance");
+  assert.equal(reloaded.videoGen.baseUrl, "https://nexus.cytain.com");
 
   // 切回百炼同样只需要给渠道与 Key。
   await store.update({ videoGen: { channel: "bailian-wan3", apiKey: null } });
   assert.equal(config.videoGen.channel, "bailian-wan3");
   assert.equal(config.videoGen.protocol, "dashscope");
   assert.equal(config.videoGen.baseUrl, "https://dashscope.aliyuncs.com");
-  assert.equal(config.videoGen.model, "wan3.0-video");
   assert.equal(config.videoGen.model, "wan3.0-video");
   assert.equal(config.videoGen.apiKey, "");
 });

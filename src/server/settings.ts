@@ -6,6 +6,7 @@ import {
   VIDEO_GEN_CHANNEL_OPTIONS,
   loadConfig,
   videoGenChannelFields,
+  videoGenChannelOption,
   type DeepPartial,
   type VideoGenChannelOption,
 } from "../config.js";
@@ -162,7 +163,11 @@ function requestedVideoGenChannel(patch: Record<string, unknown>): VideoGenChann
 }
 
 /** 把渠道的预置参数写进保存对象；API Key 与其他用户可调开关不受影响。 */
-function applyVideoGenChannel(target: Record<string, unknown>, channel: VideoGenChannel): void {
+function applyVideoGenChannel(
+  target: Record<string, unknown>,
+  channel: VideoGenChannel,
+  requestedModel?: string,
+): void {
   target.channel = channel;
   if (channel === "none") {
     target.provider = "none";
@@ -170,6 +175,12 @@ function applyVideoGenChannel(target: Record<string, unknown>, channel: VideoGen
   }
   const fields = videoGenChannelFields(channel);
   if (fields) Object.assign(target, fields);
+  // 同一渠道可选多个模型时，保留用户在下拉框里选的那个；非法值回退渠道默认模型。
+  const models = videoGenChannelOption(channel)?.models;
+  if (models && typeof requestedModel === "string") {
+    const selected = models.find((model) => model.id === requestedModel.trim());
+    if (selected) target.model = selected.id;
+  }
 }
 
 function toConfigError(error: unknown): AppError {
@@ -254,8 +265,16 @@ export class SettingsStore {
     // 地址、模型、路径、轮询间隔都不会再依赖手填。
     const requestedChannel = requestedVideoGenChannel(patch);
     if (requestedChannel) {
-      applyVideoGenChannel(merged.videoGen!, requestedChannel);
-      applyVideoGenChannel(current.videoGen as Record<string, unknown>, requestedChannel);
+      const requestedModel =
+        isRecord(merged.videoGen) && typeof merged.videoGen.model === "string"
+          ? merged.videoGen.model
+          : undefined;
+      applyVideoGenChannel(merged.videoGen!, requestedChannel, requestedModel);
+      applyVideoGenChannel(
+        current.videoGen as Record<string, unknown>,
+        requestedChannel,
+        requestedModel,
+      );
     }
     let next: AppConfig;
     try {

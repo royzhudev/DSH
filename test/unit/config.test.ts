@@ -220,3 +220,35 @@ test("loadConfig 默认画面渠道是阿里百炼 wan3.0-video", async () => {
   assert.equal(config.videoGen.model, "wan3.0-video");
   assert.equal(config.videoGen.protocol, "auto");
 });
+
+test("loadConfig 把 One API Lumi 的 /v1 前缀收回域名并迁移旧 Seedance 路径", async () => {
+  const dir = await makeTempDir();
+  await fs.mkdir(path.join(dir, "data"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "data", "settings.json"),
+    JSON.stringify({
+      videoGen: {
+        channel: "aggregator-seedance2",
+        provider: "http",
+        protocol: "seedance",
+        baseUrl: "https://nexus.cytain.com/v1",
+        model: "doubao-seedance-2-5-260628",
+        submitPath: "/v1/video/generations",
+        pollPath: "/v1/video/generations/{id}",
+        resultPath: "output.video_url",
+        apiKey: "sk-lumi",
+        pollIntervalMs: 3000,
+        timeoutMs: 600000,
+        clipDurationSec: 5,
+      },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.channel, "aggregator-seedance2");
+  assert.equal(config.videoGen.baseUrl, "https://nexus.cytain.com");
+  assert.equal(config.videoGen.protocol, "seedance");
+  assert.equal(config.videoGen.submitPath, "/api/v3/contents/generations/tasks");
+  assert.equal(config.videoGen.pollPath, "/api/v3/contents/generations/tasks/{id}");
+  assert.equal(config.videoGen.resultPath, "content.video_url");
+});

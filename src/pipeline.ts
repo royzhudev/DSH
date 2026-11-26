@@ -30,7 +30,7 @@ import { MaterialLibrary } from "./materials/library.js";
 import { matchMaterial, materialTagPool } from "./materials/match.js";
 import { CastLibrary, castSummary, resolveCastNames, selectCastAssets } from "./cast/library.js";
 import { buildShotPrompt } from "./cast/prompt.js";
-import { isAiVideoEnabled } from "./config.js";
+import { isAiVideoEnabled, videoGenChannelOption } from "./config.js";
 import { preflightVideoJob } from "./preflight.js";
 import { burnSegmentSubtitles, renderSegment } from "./render/segment.js";
 import { concatSegments } from "./render/concat.js";
@@ -698,8 +698,15 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         "配音模块已关闭，但本次没有启用 AI 画面生成，成片将没有角色台词声音；请同时启用画面生成（需模型支持音频），或重新打开配音模块。",
       );
     }
+    const videoChannel = videoGenChannelOption(config.videoGen.channel);
+    const referenceImagesSupported = videoChannel?.referenceImagesSupported !== false;
     const castCharacters = cast.filter((asset) => asset.kind === "character");
     const plansWithCast = plans.filter((plan) => plan.cast.some((asset) => asset.kind === "character"));
+    if (videoGen && !referenceImagesSupported && cast.some((asset) => asset.imageFile)) {
+      warnings.push(
+        "当前 AI 画面渠道只接受公网参考图，本地角色/道具图不会上传；本次按纯文字生成画面，角色一致性可能下降。需要图生视频请改用支持本地上传的渠道或自定义网关。",
+      );
+    }
     if (!videoGen && castCharacters.length > 0) {
       warnings.push(
         `角色库里已有 ${castCharacters.length} 个角色，但没有启用 AI 画面生成，成片只会用素材/背景，不会出现角色形象；在设置里配置 AI 画面模型后才会用角色参考图。`,
@@ -720,17 +727,19 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
           percent: Math.round(50 + (index / plans.length) * 14),
           message: `AI 生成画面 ${index + 1}/${plans.length}${plan.cast.length > 0 ? `（${plan.cast.map((item) => item.name).join("、")}）` : ""}`,
         });
-        const references = plan.cast
-          .filter((asset) => asset.imageFile)
-          .map((asset) => ({
-            role: asset.kind,
-            name: asset.name,
-            file: path.join(config.castDir, asset.imageFile!),
-          }));
+        const references = referenceImagesSupported
+          ? plan.cast
+              .filter((asset) => asset.imageFile)
+              .map((asset) => ({
+                role: asset.kind,
+                name: asset.name,
+                file: path.join(config.castDir, asset.imageFile!),
+              }))
+          : [];
         const primary = references.find((reference) => reference.role === "character") ?? references[0];
         // 角色参考图是“人设定妆照”，不是每个分镜的首帧。所有镜头都拿同一张图做首帧，
         // 生成结果会像同一个镜头重复播放。只让第 1 镜定调，其余镜头按剧本文字生成不同画面。
-        const firstFrame = index === 0 ? primary : undefined;
+        const firstFrame = referenceImagesSupported && index === 0 ? primary : undefined;
         const previous = plans[index - 1];
         const sameScene = previous && previous.segment.scene === plan.segment.scene;
         const sameShot = previous && previous.segment.shot === plan.segment.shot;
