@@ -250,6 +250,12 @@ test(
     );
     const qwen21 = initial.settings.imageGenModels.find((item) => item.id === "qwen-image-2.1-pro");
     assert.equal(qwen21?.supportsNegativePrompt, false);
+    const airongceChannel = initial.settings.videoGenChannels.find(
+      (item) => item.channel === "airongce-seedance",
+    );
+    assert.equal(airongceChannel?.fields?.model, "seedance2.0-mini");
+    assert.equal(airongceChannel?.fields?.protocol, "airongce");
+    assert.equal(airongceChannel?.models?.length, 4);
 
     const putResponse = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { provider: "offline", model: "ui-model" },

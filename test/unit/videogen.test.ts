@@ -1323,3 +1323,98 @@ test("HTTP 视频：One API Lumi Seedance 拒绝本地 data URL 参考图", asyn
       error instanceof AppError && error.code === "VIDEOGEN_PUBLIC_MEDIA_REQUIRED",
   );
 });
+
+test("HTTP 视频：AIRONGCE Seedance 扁平协议、任务查询与带鉴权下载", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "airongce-clip.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  process.env.VIDEOGEN_TEST_CLIP = clip;
+
+  const submitted: Array<Record<string, unknown>> = [];
+  const downloadedAuth: string[] = [];
+  let polls = 0;
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const send = (value: unknown, status = 200) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (req.method === "POST" && url.pathname === "/v1/videos") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      submitted.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+      send({ id: "task-air", task_id: "task-air", status: "queued" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/task-air") {
+      polls += 1;
+      send({ id: "task-air", status: polls > 1 ? "SUCCESS" : "IN_PROGRESS" });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/task-air/content") {
+      downloadedAuth.push(String(req.headers.authorization ?? ""));
+      res.writeHead(200, { "content-type": "video/mp4" });
+      res.end(await fs.readFile(clip));
+      return;
+    }
+    send({ error: { message: "not found" } }, 404);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  try {
+    const settings = {
+      ...makeTestConfig(dir).videoGen,
+      channel: "airongce-seedance" as const,
+      provider: "http" as const,
+      protocol: "airongce" as const,
+      baseUrl,
+      apiKey: "air-token",
+      model: "seedance2.5",
+      submitPath: "/v1/videos",
+      pollPath: "/v1/videos/{id}",
+      pollIntervalMs: 50,
+      timeoutMs: 5_000,
+      clipDurationSec: 5,
+      resultPath: "",
+    };
+    const provider = new HttpVideoGenProvider(settings, silentLogger);
+    const generated = await provider.generate(
+      {
+        prompt: "把视频中的天空调整为黄昏",
+        durationSec: 40,
+        imageUrl: "https://cdn.example.com/first.png",
+        references: [
+          { role: "character", name: "林小满", file: "https://cdn.example.com/ref.png" },
+        ],
+      },
+      path.join(dir, "gen"),
+    );
+    assert.equal(generated.provider, "http");
+    assert.equal(generated.durationSec > 0.5, true);
+    assert.equal(submitted.length, 1);
+    const body = submitted[0]!;
+    assert.equal(body.model, "seedance2.5");
+    assert.equal(body.duration, 30, "2.5 最长 30 秒，超长请求要收敛到上限");
+    assert.equal(body.resolution, "720p");
+    assert.deepEqual(body.images, ["https://cdn.example.com/ref.png"]);
+    assert.equal("first_frame_url" in body, false, "有参考图时不应再传首帧");
+    assert.equal(downloadedAuth.length, 1);
+    assert.equal(downloadedAuth[0], "Bearer air-token");
+    assert.equal(await fs.stat(generated.file).then((stat) => stat.size > 0), true);
+    await assert.rejects(
+      provider.generate(
+        { prompt: "http 图片", durationSec: 5, imageUrl: "http://cdn.example.com/first.png" },
+        path.join(dir, "gen-http"),
+      ),
+      (error: unknown) =>
+        error instanceof AppError && error.code === "VIDEOGEN_PUBLIC_MEDIA_REQUIRED",
+    );
+  } finally {
+    delete process.env.VIDEOGEN_TEST_CLIP;
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});
