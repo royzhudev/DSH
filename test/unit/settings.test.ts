@@ -5,7 +5,11 @@ import test from "node:test";
 import { loadConfig } from "../../src/config.js";
 import { AppError } from "../../src/errors.js";
 import { silentLogger } from "../../src/logger.js";
-import { effectiveRedirectUri, SettingsStore } from "../../src/server/settings.js";
+import {
+  PlatformSettingsStore,
+  effectiveRedirectUri,
+  SettingsStore,
+} from "../../src/server/settings.js";
 import { makeTempDir, makeTestConfig } from "../helpers.js";
 
 async function makeStore(dir: string) {
@@ -178,26 +182,85 @@ test("SettingsStore 保存公网素材地址时生成随机令牌，清除地址
   assert.equal(cleared.videoGen.publicAssetToken, "");
 });
 
-test("SettingsStore：抖音个人号小程序投稿模式可以保存并在重启后恢复", async () => {
+test("PlatformSettingsStore：邮件通道、注册与抖音凭证保存后重启可恢复，密钥不回显", async () => {
   const dir = await makeTempDir();
-  const { config, store } = await makeStore(dir);
+  const config = makeTestConfig(dir);
+  const store = new PlatformSettingsStore(config, {
+    settingsPath: config.settingsFile,
+    cwd: dir,
+    env: {},
+    logger: silentLogger,
+  });
   try {
-    await store.update({
+    const view = await store.update({
+      server: { publicBaseUrl: "https://video.example.com/" },
+      mail: {
+        enabled: true,
+        host: "smtp.example.com",
+        port: 587,
+        secure: false,
+        starttls: true,
+        user: "noreply@example.com",
+        from: "noreply@example.com",
+        password: "smtp-secret",
+      },
+      registration: { enabled: true, allowedEmailDomains: ["Example.com", "@company.cn"] },
       douyin: { mode: "miniapp", clientKey: "miniapp-client-key", clientSecret: "miniapp-client-secret" },
     });
     assert.equal(config.douyin.mode, "miniapp");
-    assert.equal(config.douyin.clientKey, "miniapp-client-key");
-    assert.equal(config.douyin.clientSecret, "miniapp-client-secret");
+    assert.equal(config.mail.host, "smtp.example.com");
+    assert.equal(config.mail.starttls, true);
+    assert.equal(config.server.publicBaseUrl, "https://video.example.com");
+    assert.deepEqual(config.registration.allowedEmailDomains, ["example.com", "company.cn"]);
+    assert.equal(view.mail.passwordSet, true);
+    assert.equal((view.mail as Record<string, unknown>).password, undefined);
+    assert.equal(view.douyin.clientSecretSet, true);
+    assert.equal((view.douyin as Record<string, unknown>).clientSecret, undefined);
 
     const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
     assert.equal(reloaded.douyin.mode, "miniapp");
-    assert.equal(reloaded.douyin.clientKey, "miniapp-client-key");
+    assert.equal(reloaded.mail.user, "noreply@example.com");
+    assert.equal(reloaded.registration.enabled, true);
 
-    await assert.rejects(
-      () => store.update({ douyin: { mode: "unknown" } }),
-      /抖音接入方式/,
-    );
+    await assert.rejects(() => store.update({ mail: { port: -1 } }), AppError);
+    await assert.rejects(() => store.update({ douyin: { mode: "unknown" } }), AppError);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test("PlatformSettingsStore：旧版全局设置里的个人段不会污染平台默认配置", async () => {
+  const dir = await makeTempDir();
+  const config = makeTestConfig(dir);
+  await fs.mkdir(path.dirname(config.settingsFile), { recursive: true });
+  await fs.writeFile(
+    config.settingsFile,
+    JSON.stringify({
+      script: { apiKey: "legacy-admin-key" },
+      videoGen: { channel: "aggregator-seedance2", apiKey: "legacy-video-key" },
+      douyin: { mode: "miniapp" },
+    }),
+    "utf8",
+  );
+  // 启动时 loadConfig 会把旧文件整份合并进来，个人段需要迁移后清理。
+  const polluted = loadConfig({ cwd: dir, env: {} });
+  assert.equal(polluted.script.apiKey, "legacy-admin-key");
+
+  const store = new PlatformSettingsStore(polluted, {
+    settingsPath: polluted.settingsFile,
+    cwd: dir,
+    env: {},
+    logger: silentLogger,
+  });
+  await store.ensureLoaded();
+  await store.resetPersonalSections(["script", "videoGen"]);
+  assert.ok(!polluted.script.apiKey);
+  assert.ok(!polluted.videoGen.apiKey);
+  assert.equal(polluted.douyin.mode, "miniapp");
+
+  // 之后保存平台设置，也不能把文件里的旧个人设置再带回来。
+  await store.update({ registration: { enabled: false } });
+  assert.ok(!polluted.script.apiKey);
+  assert.equal(polluted.registration.enabled, false);
+  await fs.rm(dir, { recursive: true, force: true });
 });

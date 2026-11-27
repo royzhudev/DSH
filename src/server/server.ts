@@ -42,10 +42,20 @@ import { createTtsProvider } from "../tts/index.js";
 import { voicePitchFor, voiceRateFor, voiceStyleFor } from "../tts/voices.js";
 import { isStaleVoiceId, voiceCatalog } from "../tts/voice-catalog.js";
 import { HttpVideoGenProvider, VideoGenPendingError } from "../videogen/http.js";
-import { buildJobConfig, JobManager } from "./jobs.js";
+import { buildJobConfig, JobManager, type JobRecord } from "./jobs.js";
 import { PublicMediaHost, publicBaseUrlFromRequest, VIDEO_EXTENSIONS } from "./publicMedia.js";
 import QRCode from "qrcode";
-import { SettingsStore, effectiveRedirectUri } from "./settings.js";
+import {
+  PERSONAL_SECTIONS,
+  PlatformSettingsStore,
+  SettingsStore,
+  effectiveRedirectUri,
+  serializePlatformSettings,
+} from "./settings.js";
+import { EmailCodeStore } from "./emailCodes.js";
+import { MailSender, type MailTransportFactory } from "./mailer.js";
+import { migrateLegacyWorkspace } from "./migrate.js";
+import { WorkspaceManager, scopedConfigFor, type UserWorkspace } from "./workspaces.js";
 import {
   LoginThrottle,
   SESSION_COOKIE,
@@ -56,9 +66,11 @@ import {
   sessionCookie,
 } from "./auth.js";
 import {
+  EMAIL_PATTERN,
   MENU_PERMISSIONS,
   UserStore,
   effectivePermissions,
+  normalizeEmail,
   toUserView,
   type CreateUserInput,
   type MenuPermission,
@@ -102,6 +114,8 @@ export interface ServerDeps {
   webDir?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** 测试用：替换真实 SMTP 发送后端，避免测试发信。 */
+  mailTransportFactory?: MailTransportFactory;
 }
 
 export interface VideoServer {
@@ -111,9 +125,13 @@ export interface VideoServer {
   cast: CastLibrary;
   publicMedia: PublicMediaHost;
   publicVideo: PublicMediaHost;
-  settings: SettingsStore;
+  settings?: SettingsStore;
+  platformSettings: PlatformSettingsStore;
   users: UserStore;
   sessions: SessionStore;
+  workspaces: WorkspaceManager;
+  mailer: MailSender;
+  codes: EmailCodeStore;
   douyin: DouyinClient;
   tokens: DouyinTokenStore;
   publishes: PublishStore;
@@ -135,9 +153,14 @@ interface ServerContext {
   cast: CastLibrary;
   publicMedia: PublicMediaHost;
   publicVideo: PublicMediaHost;
-  settings: SettingsStore;
+  /** 当前登录用户的个人设置；未登录的基础上下文里为空。 */
+  settings?: SettingsStore;
+  platformSettings: PlatformSettingsStore;
   users: UserStore;
   sessions: SessionStore;
+  workspaces: WorkspaceManager;
+  mailer: MailSender;
+  codes: EmailCodeStore;
   loginThrottle: LoginThrottle;
   douyin: DouyinClient;
   tokens: DouyinTokenStore;
@@ -145,8 +168,41 @@ interface ServerContext {
   douyinH5: DouyinH5Client;
   h5Shares: H5ShareStore;
   webDir: string;
-  pendingStates: Map<string, number>;
+  /** 抖音 OAuth state → 发起授权的用户，回调时把令牌写进该用户的工作区。 */
+  pendingStates: Map<string, { userId: string; expiresAt: number }>;
+  /** 启动初始化（平台设置、历史数据迁移）完成前，请求先等它。 */
+  ready: Promise<void>;
+  currentUser?: UserRecord;
+  workspace?: UserWorkspace;
   fetchImpl?: typeof fetch;
+}
+
+function requireContext(ctx: ServerContext, label: string): { user: UserRecord; workspace: UserWorkspace; settings: SettingsStore } {
+  if (!ctx.currentUser || !ctx.workspace || !ctx.settings) {
+    throw new AppError(`请先登录后再${label}`, { code: "UNAUTHORIZED", status: 401 });
+  }
+  return { user: ctx.currentUser, workspace: ctx.workspace, settings: ctx.settings };
+}
+
+/**
+ * 把基础上下文换成当前用户的上下文：配置、设置、素材库、角色库、发布记录
+ * 全部指向该用户的私有目录，后续路由代码无需关心隔离细节。
+ */
+export async function scopeContext(ctx: ServerContext, actor: UserRecord): Promise<ServerContext> {
+  const workspace = await ctx.workspaces.for(actor);
+  const config = await workspace.ensureConfig();
+  return {
+    ...ctx,
+    config,
+    currentUser: actor,
+    workspace,
+    settings: workspace.settings,
+    library: workspace.library(),
+    cast: workspace.cast(),
+    tokens: workspace.tokens(),
+    publishes: workspace.publishes(),
+    h5Shares: workspace.h5Shares(),
+  };
 }
 
 function securityHeaders(): Record<string, string> {
@@ -658,8 +714,15 @@ function apiIndex(config: AppConfig): Record<string, unknown> {
       session: "GET /api/auth/session",
       setup: "POST /api/auth/setup {username, displayName?, password}",
       login: "POST /api/auth/login {username, password}",
+      signup: "POST /api/auth/signup {email, password, displayName?}",
+      verifyEmail: "POST /api/auth/verify-email {email, code}",
+      resendCode: "POST /api/auth/resend-code {email}",
+      forgotPassword: "POST /api/auth/forgot-password {email}",
+      resetPassword: "POST /api/auth/reset-password {email, code, password}",
       logout: "POST /api/auth/logout",
-      settings: "GET/PUT /api/settings",
+      settings: "GET/PUT /api/settings（个人模型与 API Key）",
+      platformSettings: "GET/PUT /api/settings/platform（管理员：邮件、注册、抖音、公网地址）",
+      mailTest: "POST /api/settings/mail/test {to}（管理员）",
       testSettings: "POST /api/settings/test {kind: script|tts|videogen|douyin}",
       users: "GET/POST /api/users（管理员）",
       updateUser: "PATCH /api/users/:id（管理员）",
@@ -732,6 +795,11 @@ async function authPayload(
   return {
     authenticated: Boolean(user),
     needsSetup: !(await ctx.users.hasUsers()),
+    registration: {
+      enabled: ctx.config.registration.enabled,
+      mailConfigured: ctx.mailer.configured(),
+      allowedEmailDomains: ctx.config.registration.allowedEmailDomains,
+    },
     user: user ? toUserView(user) : null,
     menus: user ? effectivePermissions(user) : [],
   };
@@ -744,6 +812,8 @@ function hasMenuPermission(user: UserRecord, permission: MenuPermission): boolea
 /** API 路径所需的菜单权限；admin 表示仅管理员可访问。 */
 function requiredPermission(method: string, pathname: string): MenuPermission | "admin" | null {
   if (pathname === "/api/users" || pathname.startsWith("/api/users/")) return "admin";
+  if (pathname === "/api/settings/platform" || pathname.startsWith("/api/settings/platform/")) return "admin";
+  if (pathname === "/api/settings/mail/test") return "admin";
   if (pathname === "/api/settings") return method === "GET" ? null : "settings";
   if (pathname.startsWith("/api/settings/")) return "settings";
   if (pathname === "/api/materials" || pathname.startsWith("/api/materials/")) return "materials";
@@ -799,6 +869,20 @@ async function handleSetup(
   });
   const token = ctx.sessions.create(user.id);
   await ctx.users.markLogin(user.id);
+  // 首次初始化管理员后，把多租户之前的数据迁进该管理员的工作区。
+  const migration = await migrateLegacyWorkspace({
+    dataDir: path.dirname(ctx.users.usersPath),
+    usersPath: ctx.users.usersPath,
+    config: ctx.config,
+    logger: ctx.logger,
+  }).catch((error: unknown) => {
+    ctx.logger.warn(`初始化后数据迁移失败：${toErrorMessage(error)}`);
+    return undefined;
+  });
+  if (migration?.status === "migrated") {
+    ctx.workspaces.invalidate();
+    ctx.jobs.reloadPersisted();
+  }
   const record = await ctx.users.findById(user.id);
   sendJson(
     res,
@@ -815,19 +899,27 @@ async function handleLogin(
 ): Promise<void> {
   assertSameOrigin(req);
   const body = await readJsonBody(req);
-  const username = optionalString(body.username)?.trim() ?? "";
+  // 登录标识既支持邮箱也支持历史管理员用户名。
+  const login = optionalString(body.username)?.trim() ?? "";
   const password = optionalString(body.password) ?? "";
-  const throttleKey = `${req.socket.remoteAddress ?? "unknown"}|${username.toLowerCase()}`;
+  const throttleKey = `${req.socket.remoteAddress ?? "unknown"}|${login.toLowerCase()}`;
   ctx.loginThrottle.check(throttleKey);
-  const user = await ctx.users.verify(username, password);
-  if (!user) {
+  const result = await ctx.users.authenticate(login, password);
+  if (result.status === "unverified") {
     ctx.loginThrottle.fail(throttleKey);
-    throw new AppError("用户名或密码错误", { code: "INVALID_CREDENTIALS", status: 401 });
+    throw new AppError("邮箱还没有完成验证，请查收验证码或重新发送", {
+      code: "EMAIL_NOT_VERIFIED",
+      status: 403,
+    });
+  }
+  if (result.status !== "ok") {
+    ctx.loginThrottle.fail(throttleKey);
+    throw new AppError("账号或密码错误", { code: "INVALID_CREDENTIALS", status: 401 });
   }
   ctx.loginThrottle.reset(throttleKey);
-  const token = ctx.sessions.create(user.id);
-  await ctx.users.markLogin(user.id);
-  sendJson(res, 200, await authPayload(ctx, user), { "set-cookie": sessionCookie(token) });
+  const token = ctx.sessions.create(result.user.id);
+  await ctx.users.markLogin(result.user.id);
+  sendJson(res, 200, await authPayload(ctx, result.user), { "set-cookie": sessionCookie(token) });
 }
 
 async function handleLogout(
@@ -893,6 +985,213 @@ async function handleDeleteUser(
   await ctx.users.remove(id, actor.id);
   ctx.sessions.destroyUser(id);
   sendJson(res, 200, { ok: true });
+}
+
+
+const EMAIL_CODE_INVALID_MESSAGE = "验证码无效或已过期，请重新获取";
+
+function clientIp(req: http.IncomingMessage): string {
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+function assertRegistrationOpen(ctx: ServerContext): void {
+  if (!ctx.config.registration.enabled) {
+    throw new AppError("本站暂未开放注册，请联系管理员开通账号", {
+      code: "REGISTRATION_DISABLED",
+      status: 403,
+    });
+  }
+  if (!ctx.mailer.configured()) {
+    throw new AppError("邮件通道尚未配置，暂时无法发送验证码", {
+      code: "MAIL_NOT_CONFIGURED",
+      status: 503,
+    });
+  }
+}
+
+function assertAllowedEmailDomain(config: AppConfig, email: string): void {
+  const domains = config.registration.allowedEmailDomains;
+  if (domains.length === 0) return;
+  const domain = email.split("@")[1] ?? "";
+  if (!domains.includes(domain)) {
+    throw new AppError("该邮箱域名暂不支持注册", {
+      code: "EMAIL_DOMAIN_NOT_ALLOWED",
+      status: 403,
+    });
+  }
+}
+
+/** 邮箱验证码注册：先落账号（未验证），再发送验证码；已注册的邮箱不泄露信息。 */
+async function handleSignup(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  assertRegistrationOpen(ctx);
+  const body = await readJsonBody(req);
+  const email = normalizeEmail(body.email);
+  assertAllowedEmailDomain(ctx.config, email);
+  const password = optionalString(body.password) ?? "";
+  const signup = await ctx.users.signup({
+    email,
+    password,
+    displayName: optionalString(body.displayName),
+  });
+  if (signup.alreadyVerified) {
+    // 邮箱已注册：不重复发验证码，也不向调用方确认账号是否存在。
+    await ctx.mailer
+      .sendNotice(
+        email,
+        "【视频创作智能体】邮箱已注册",
+        "这个邮箱已经注册过账号。如果忘记密码，请在登录页使用「忘记密码」重置。本邮件不是验证码。",
+      )
+      .catch(() => undefined);
+    sendJson(res, 202, {
+      ok: true,
+      email,
+      ttlMinutes: ctx.codes.ttlMinutes,
+      message: "如果该邮箱需要验证，验证码已发送",
+    });
+    return;
+  }
+  const { code, expiresAt } = await ctx.codes.issue(email, "signup", clientIp(req));
+  await ctx.mailer.sendVerificationCode(email, code, {
+    purpose: "signup",
+    ttlMinutes: ctx.codes.ttlMinutes,
+  });
+  sendJson(res, 202, {
+    ok: true,
+    email,
+    expiresAt: new Date(expiresAt).toISOString(),
+    ttlMinutes: ctx.codes.ttlMinutes,
+  });
+}
+
+async function handleVerifyEmail(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  // 与注册同开关：HTTPS/邮件未就绪时，验证码接口也不接受调用。
+  assertRegistrationOpen(ctx);
+  const body = await readJsonBody(req);
+  const email = normalizeEmail(body.email);
+  const code = (optionalString(body.code) ?? "").trim();
+  const status = await ctx.codes.verify(email, "signup", code);
+  if (status !== "ok") throw codeError(status);
+  const user = await ctx.users.markEmailVerified(email);
+  if (!user) throw new AppError(EMAIL_CODE_INVALID_MESSAGE, { code: "EMAIL_CODE_INVALID", status: 400 });
+  const token = ctx.sessions.create(user.id);
+  await ctx.users.markLogin(user.id);
+  sendJson(res, 200, await authPayload(ctx, user), { "set-cookie": sessionCookie(token) });
+}
+
+async function handleResendCode(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  assertRegistrationOpen(ctx);
+  const body = await readJsonBody(req);
+  const email = normalizeEmail(body.email);
+  assertAllowedEmailDomain(ctx.config, email);
+  const purpose = body.purpose === "reset" ? "reset" : "signup";
+  const user = await ctx.users.findByEmail(email);
+  const canSend =
+    purpose === "reset"
+      ? Boolean(user?.emailVerifiedAt) && !user?.disabled
+      : Boolean(user && !user.emailVerifiedAt && !user.disabled);
+  if (canSend) {
+    const { code } = await ctx.codes.issue(email, purpose, clientIp(req));
+    await ctx.mailer.sendVerificationCode(email, code, {
+      purpose,
+      ttlMinutes: ctx.codes.ttlMinutes,
+    });
+  }
+  // 无论邮箱是否存在都返回同样的结果，避免被用来枚举账号。
+  sendJson(res, 202, {
+    ok: true,
+    email,
+    ttlMinutes: ctx.codes.ttlMinutes,
+    message: "如果该邮箱可用，验证码已发送",
+  });
+}
+
+async function handleForgotPassword(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  if (!ctx.mailer.configured()) {
+    throw new AppError("邮件通道尚未配置，暂时无法重置密码", {
+      code: "MAIL_NOT_CONFIGURED",
+      status: 503,
+    });
+  }
+  const body = await readJsonBody(req);
+  const email = normalizeEmail(body.email);
+  const user = await ctx.users.findByEmail(email);
+  if (user?.emailVerifiedAt && !user.disabled) {
+    const { code } = await ctx.codes.issue(email, "reset", clientIp(req));
+    await ctx.mailer.sendVerificationCode(email, code, {
+      purpose: "reset",
+      ttlMinutes: ctx.codes.ttlMinutes,
+    });
+  }
+  sendJson(res, 202, {
+    ok: true,
+    email,
+    ttlMinutes: ctx.codes.ttlMinutes,
+    message: "如果该邮箱已注册，重置验证码已发送",
+  });
+}
+
+async function handleResetPassword(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ServerContext,
+): Promise<void> {
+  assertSameOrigin(req);
+  const body = await readJsonBody(req);
+  const email = normalizeEmail(body.email);
+  const code = (optionalString(body.code) ?? "").trim();
+  const password = optionalString(body.password) ?? "";
+  const status = await ctx.codes.verify(email, "reset", code);
+  if (status !== "ok") throw codeError(status);
+  const user = await ctx.users.resetPasswordByEmail(email, password);
+  if (!user) {
+    throw new AppError("账号不存在或邮箱未验证，无法重置密码", {
+      code: "PASSWORD_RESET_UNAVAILABLE",
+      status: 400,
+    });
+  }
+  // 密码变了，所有旧会话立即失效。
+  ctx.sessions.destroyUser(user.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/** 取当前用户的任务；历史上没有归属字段的记录按未声明处理。 */
+function requireOwnedJob(ctx: ServerContext, id: string): JobRecord {
+  const { user } = requireContext(ctx, "查看任务");
+  const record = ctx.jobs.get(id);
+  if (!record || (record.userId && record.userId !== user.id)) {
+    throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+  }
+  return record;
+}
+
+function codeError(status: "invalid" | "expired" | "too_many"): AppError {
+  if (status === "too_many") {
+    return new AppError("验证码错误次数过多，请重新获取", { code: "EMAIL_CODE_TOO_MANY", status: 429 });
+  }
+  if (status === "expired") {
+    return new AppError("验证码已过期，请重新获取", { code: "EMAIL_CODE_EXPIRED", status: 400 });
+  }
+  return new AppError(EMAIL_CODE_INVALID_MESSAGE, { code: "EMAIL_CODE_INVALID", status: 400 });
 }
 
 const SETTINGS_TEST_VIDEO_KEEP = 20;
@@ -1349,8 +1648,7 @@ async function handleJobMiniappShare(
       status: 400,
     });
   }
-  const record = ctx.jobs.get(jobId);
-  if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+  const record = requireOwnedJob(ctx, jobId);
   if (record.state !== "succeeded" || !record.result) {
     throw new AppError("成片尚未生成，无法发布", { code: "JOB_NOT_READY", status: 409 });
   }
@@ -1412,6 +1710,20 @@ async function deliverH5Callback(
   }
 }
 
+/** 抖音 Webhook 没有登录态：按 share_id 在所有用户里找到归属的投稿记录。 */
+async function findH5ShareAnyUser(
+  ctx: ServerContext,
+  shareId: string,
+): Promise<{ share: DouyinH5Share; store: H5ShareStore } | undefined> {
+  for (const view of await ctx.users.list()) {
+    const workspace = await ctx.workspaces.for({ id: view.id });
+    const store = workspace.h5Shares();
+    const share = await store.find(shareId);
+    if (share) return { share, store };
+  }
+  return undefined;
+}
+
 async function handleDouyinWebhook(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1455,11 +1767,12 @@ async function handleDouyinWebhook(
     sendJson(res, 200, { ok: true, ignored: true });
     return;
   }
-  const share = await ctx.h5Shares.find(shareId);
-  if (!share) {
+  const located = await findH5ShareAnyUser(ctx, shareId);
+  if (!located) {
     sendJson(res, 200, { ok: true, ignored: true });
     return;
   }
+  const share = located.share;
   if (share.state === "success") {
     sendJson(res, 200, { ok: true, duplicate: true });
     return;
@@ -1467,7 +1780,7 @@ async function handleDouyinWebhook(
   const itemId = typeof content.item_id === "string" ? content.item_id : undefined;
   const videoId = typeof content.video_id === "string" ? content.video_id : undefined;
   const openId = typeof body.from_user_id === "string" ? body.from_user_id : undefined;
-  const updated = await ctx.h5Shares.update(shareId, {
+  const updated = await located.store.update(shareId, {
     state: "success",
     ...(itemId ? { itemId } : {}),
     ...(videoId ? { videoId } : {}),
@@ -1492,8 +1805,7 @@ async function handlePublish(
       status: 400,
     });
   }
-  const record = ctx.jobs.get(jobId);
-  if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+  const record = requireOwnedJob(ctx, jobId);
   if (record.state !== "succeeded" || !record.result) {
     throw new AppError("成片尚未生成，无法发布", { code: "JOB_NOT_READY", status: 409 });
   }
@@ -1523,6 +1835,7 @@ async function handleRequest(
   res: http.ServerResponse,
   ctx: ServerContext,
 ): Promise<void> {
+  await ctx.ready;
   const method = req.method ?? "GET";
   const url = new URL(req.url ?? "/", "http://localhost");
   const pathname = decodeURIComponent(url.pathname);
@@ -1563,6 +1876,31 @@ async function handleRequest(
 
   if (pathname === "/api/auth/logout" && method === "POST") {
     await handleLogout(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/signup" && method === "POST") {
+    await handleSignup(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/verify-email" && method === "POST") {
+    await handleVerifyEmail(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/resend-code" && method === "POST") {
+    await handleResendCode(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/forgot-password" && method === "POST") {
+    await handleForgotPassword(req, res, ctx);
+    return;
+  }
+
+  if (pathname === "/api/auth/reset-password" && method === "POST") {
+    await handleResetPassword(req, res, ctx);
     return;
   }
 
@@ -1623,25 +1961,25 @@ async function handleRequest(
     }
   }
 
+  // 登录后所有存储都换成该用户自己的：设置、素材、角色、任务与发布记录。
+  if (actor) ctx = await scopeContext(ctx, actor);
+
   // 角色/道具图必须能被外部视频平台直接读取；用随机令牌代替登录 Cookie，
   // 且只暴露单张图，不暴露角色库列表。未配置公网地址时令牌为空，路由不可用。
   const publicCast = /^\/api\/public\/cast\/([A-Za-z0-9_-]+)\/([a-zA-Z0-9]+)$/.exec(pathname);
   if (publicCast && (method === "GET" || method === "HEAD")) {
-    const expectedToken = ctx.config.videoGen.publicAssetToken.trim();
-    const suppliedToken = publicCast[1]!;
-    const tokenMatches =
-      Boolean(expectedToken) &&
-      expectedToken.length === suppliedToken.length &&
-      timingSafeEqual(Buffer.from(expectedToken), Buffer.from(suppliedToken));
-    if (!tokenMatches) {
+    // 令牌是每个用户独立的随机值；先按令牌找到归属，再只读取该用户的角色库。
+    const workspace = await ctx.workspaces.findByPublicAssetToken(publicCast[1]!);
+    if (!workspace) {
       throw new AppError("角色/道具图不存在", { code: "CAST_IMAGE_NOT_FOUND", status: 404 });
     }
-    const asset = await ctx.cast.find(publicCast[2]!);
+    const castLibrary = workspace.cast();
+    const asset = await castLibrary.find(publicCast[2]!);
     if (!asset?.imageFile) {
       throw new AppError("角色/道具图不存在", { code: "CAST_IMAGE_NOT_FOUND", status: 404 });
     }
-    const file = path.join(ctx.cast.dir, asset.imageFile);
-    if (!isInside(ctx.cast.dir, file)) {
+    const file = path.join(castLibrary.dir, asset.imageFile);
+    if (!isInside(castLibrary.dir, file)) {
       throw new AppError("角色/道具图不存在", { code: "CAST_IMAGE_NOT_FOUND", status: 404 });
     }
     res.setHeader("cache-control", "public, max-age=300");
@@ -1670,13 +2008,40 @@ async function handleRequest(
   }
 
   if (pathname === "/api/settings" && method === "GET") {
-    sendJson(res, 200, { settings: await ctx.settings.view() });
+    const { settings } = requireContext(ctx, "读取设置");
+    sendJson(res, 200, { settings: await settings.view() });
     return;
   }
 
   if (pathname === "/api/settings" && method === "PUT") {
+    const { settings, user } = requireContext(ctx, "修改设置");
     const body = await readJsonBody(req);
-    sendJson(res, 200, { settings: await ctx.settings.update(body) });
+    const view = await settings.update(body);
+    // 令牌或公网地址可能变化，丢掉缓存让下一个请求重建用户上下文。
+    ctx.workspaces.invalidate(user.id);
+    sendJson(res, 200, { settings: view });
+    return;
+  }
+
+  if (pathname === "/api/settings/platform" && method === "GET") {
+    sendJson(res, 200, { settings: await ctx.platformSettings.view() });
+    return;
+  }
+
+  if (pathname === "/api/settings/platform" && method === "PUT") {
+    const body = await readJsonBody(req);
+    const view = await ctx.platformSettings.update(body);
+    // 平台地址/邮件变化会影响所有人的默认配置，清空工作区缓存。
+    ctx.workspaces.invalidate();
+    sendJson(res, 200, { settings: view });
+    return;
+  }
+
+  if (pathname === "/api/settings/mail/test" && method === "POST") {
+    const body = await readJsonBody(req);
+    const to = normalizeEmail(body.to);
+    const result = await ctx.mailer.sendTest(to);
+    sendJson(res, 200, { ok: true, messageId: result.messageId, accepted: result.accepted });
     return;
   }
 
@@ -1824,7 +2189,8 @@ async function handleRequest(
   }
 
   if (pathname === "/api/videos" && method === "GET") {
-    sendJson(res, 200, { jobs: ctx.jobs.list().map((job) => ctx.jobs.serialize(job)) });
+    const { user } = requireContext(ctx, "查看任务");
+    sendJson(res, 200, { jobs: ctx.jobs.list(user.id).map((job) => ctx.jobs.serialize(job)) });
     return;
   }
 
@@ -1846,7 +2212,8 @@ async function handleRequest(
       castAssets: selectedCast,
       logger: ctx.logger,
     });
-    const record = ctx.jobs.create(topic, options, publicBaseUrlFromRequest(req));
+    const { user } = requireContext(ctx, "创建任务");
+    const record = ctx.jobs.create(user.id, ctx.config, topic, options, publicBaseUrlFromRequest(req));
     res.writeHead(202, {
       ...securityHeaders(),
       "content-type": "application/json; charset=utf-8",
@@ -1895,8 +2262,7 @@ async function handleRequest(
   const jobMatch = /^\/api\/videos\/([a-zA-Z0-9-]+)(?:\/(video|poster|subtitles|script|result))?$/.exec(pathname);
   if (jobMatch) {
     const [, id, resource] = jobMatch;
-    const record = ctx.jobs.get(id!);
-    if (!record) throw new AppError("任务不存在", { code: "JOB_NOT_FOUND", status: 404 });
+    const record = requireOwnedJob(ctx, id!);
 
     if (!resource && method === "GET") {
       sendJson(res, 200, ctx.jobs.serialize(record, true));
@@ -1907,7 +2273,7 @@ async function handleRequest(
       if (record.state !== "succeeded" || !record.result) {
         throw new AppError("成片尚未生成", { code: "JOB_NOT_READY", status: 409 });
       }
-      const jobDir = path.join(ctx.config.outputDir, record.id);
+      const jobDir = path.join(record.config.outputDir, record.id);
       const files: Record<string, { file: string; type: string }> = {
         video: { file: record.result.videoPath, type: "video/mp4" },
         ...(record.result.posterPath
@@ -1971,12 +2337,13 @@ async function handleRequest(
         status: 400,
       });
     }
+    const { user } = requireContext(ctx, "发起抖音授权");
     const now = Date.now();
-    for (const [key, expiresAt] of ctx.pendingStates) {
-      if (expiresAt <= now) ctx.pendingStates.delete(key);
+    for (const [key, entry] of ctx.pendingStates) {
+      if (entry.expiresAt <= now) ctx.pendingStates.delete(key);
     }
     const state = randomBytes(16).toString("hex");
-    ctx.pendingStates.set(state, now + 10 * 60 * 1000);
+    ctx.pendingStates.set(state, { userId: user.id, expiresAt: now + 10 * 60 * 1000 });
     sendJson(res, 200, { url: ctx.douyin.authorizeUrl(state), redirectUri: ctx.douyin.redirectUri });
     return;
   }
@@ -1985,14 +2352,19 @@ async function handleRequest(
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     try {
-      const expiresAt = state ? ctx.pendingStates.get(state) : undefined;
-      if (!code || !state || !expiresAt || expiresAt <= Date.now()) {
+      const pending = state ? ctx.pendingStates.get(state) : undefined;
+      if (!code || !state || !pending || pending.expiresAt <= Date.now()) {
         throw new AppError("授权状态已失效，请重新发起授权", {
           code: "DOUYIN_INVALID_STATE",
           status: 400,
         });
       }
       ctx.pendingStates.delete(state);
+      const owner = await ctx.users.findById(pending.userId);
+      if (!owner || owner.disabled) {
+        throw new AppError("授权账号不存在", { code: "DOUYIN_INVALID_STATE", status: 400 });
+      }
+      const ownerWorkspace = await ctx.workspaces.for(owner);
       const token = await ctx.douyin.exchangeCode(code);
       try {
         const info = await ctx.douyin.fetchUserInfo(token);
@@ -2001,7 +2373,7 @@ async function handleRequest(
       } catch (error) {
         ctx.logger.warn(`抖音用户信息获取失败：${toErrorMessage(error)}`);
       }
-      await ctx.tokens.write(token);
+      await ownerWorkspace.tokens().write(token);
       res.writeHead(302, { ...securityHeaders(), location: "/?douyin=connected#/settings" });
       res.end();
     } catch (error) {
@@ -2037,10 +2409,13 @@ async function handleRequest(
 }
 
 export function createVideoServer(config: AppConfig, logger: Logger, deps: ServerDeps = {}): VideoServer {
-  const settings = new SettingsStore(config, {
+  const cwd = deps.cwd ?? process.cwd();
+  const env = deps.env ?? process.env;
+  const dataDir = path.dirname(config.settingsFile);
+  const platformSettings = new PlatformSettingsStore(config, {
     settingsPath: config.settingsFile,
-    cwd: deps.cwd ?? process.cwd(),
-    env: deps.env ?? process.env,
+    cwd,
+    env,
     logger,
   });
   const publicMedia = new PublicMediaHost(
@@ -2054,18 +2429,49 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     logger,
     { extensions: VIDEO_EXTENSIONS, publicPath: "/api/public/video/" },
   );
-  const jobs = new JobManager(config, logger, undefined, publicMedia);
+  const users = new UserStore(path.join(dataDir, "users.json"), logger);
+  const workspaces = new WorkspaceManager({
+    dataDir,
+    baseConfig: () => config,
+    cwd,
+    env,
+    logger,
+    listUsers: async () => (await users.list()).map((user) => ({ id: user.id })),
+  });
+  const jobs = new JobManager(config, logger, undefined, publicMedia, {
+    skipRestore: true,
+    configFor: (userId) => scopedConfigFor(config, userId),
+  });
+  const codes = new EmailCodeStore({ dataDir, logger });
+  const mailer = new MailSender(
+    () => platformSettings.currentConfig.mail,
+    logger,
+    deps.mailTransportFactory,
+  );
   const library = new MaterialLibrary(config.libraryDir, logger);
   const cast = new CastLibrary(config.castDir, logger);
-  const users = new UserStore(path.join(path.dirname(config.settingsFile), "users.json"), logger);
   const sessions = new SessionStore();
   const loginThrottle = new LoginThrottle();
   const douyin = new DouyinClient(config, logger, deps.fetchImpl ?? fetch);
   const douyinH5 = new DouyinH5Client(config, logger, deps.fetchImpl ?? fetch);
   const tokens = new DouyinTokenStore(path.join(config.cacheDir, "douyin-token.json"), logger);
-  const publishes = new PublishStore(path.join(path.dirname(config.settingsFile), "publishes.json"), logger);
-  const h5Shares = new H5ShareStore(path.join(path.dirname(config.settingsFile), "douyin-h5-shares.json"), logger);
+  const publishes = new PublishStore(path.join(dataDir, "publishes.json"), logger);
+  const h5Shares = new H5ShareStore(path.join(dataDir, "douyin-h5-shares.json"), logger);
   const webDir = deps.webDir ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web");
+
+  const ready = (async () => {
+    await platformSettings.ensureLoaded();
+    const legacyPersonal = await personalSectionsInSettingsFile(config.settingsFile);
+    await migrateLegacyWorkspace({ dataDir, usersPath: users.usersPath, config, logger }).catch(
+      (error: unknown) => {
+        logger.warn(`多租户数据迁移失败，服务继续启动：${toErrorMessage(error)}`);
+      },
+    );
+    // 旧版 data/settings.json 里的个人设置已经迁给管理员，不能再留在平台默认配置里。
+    await platformSettings.resetPersonalSections(legacyPersonal);
+    jobs.reloadPersisted();
+  })();
+
   const ctx: ServerContext = {
     config,
     logger,
@@ -2074,9 +2480,12 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     cast,
     publicMedia,
     publicVideo,
-    settings,
+    platformSettings,
     users,
     sessions,
+    workspaces,
+    mailer,
+    codes,
     loginThrottle,
     douyin,
     douyinH5,
@@ -2085,6 +2494,7 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     h5Shares,
     webDir,
     pendingStates: new Map(),
+    ready,
     fetchImpl: deps.fetchImpl,
   };
   const server = http.createServer((req, res) => {
@@ -2106,9 +2516,12 @@ export function createVideoServer(config: AppConfig, logger: Logger, deps: Serve
     cast,
     publicMedia,
     publicVideo,
-    settings,
+    platformSettings,
     users,
     sessions,
+    workspaces,
+    mailer,
+    codes,
     douyin,
     douyinH5,
     tokens,
@@ -2142,4 +2555,18 @@ export async function startServer(
     port,
     url: `http://${host}:${port}`,
   };
+}
+
+/** 读取旧版全局设置文件里出现过的个人设置段（用于迁移后清理平台默认配置）。 */
+async function personalSectionsInSettingsFile(
+  settingsFile: string,
+): Promise<Array<(typeof PERSONAL_SECTIONS)[number]>> {
+  try {
+    const raw = await fsp.readFile(settingsFile, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    return PERSONAL_SECTIONS.filter((section) => section in (parsed as Record<string, unknown>));
+  } catch {
+    return [];
+  }
 }

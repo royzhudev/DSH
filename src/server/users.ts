@@ -11,10 +11,22 @@ export type MenuPermission = (typeof MENU_PERMISSIONS)[number];
 export type UserRole = "admin" | "member";
 
 const USERNAME_PATTERN = /^[a-zA-Z0-9_.-]{3,32}$/;
+export const EMAIL_PATTERN = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+const EMAIL_MAX_LENGTH = 254;
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_MAX_LENGTH = 128;
 const DISPLAY_NAME_MAX_LENGTH = 40;
 const SCRYPT_KEY_LENGTH = 64;
+
+/** 自助注册用户的默认菜单：除用户管理外全部可用，以便配置自己的 API Key。 */
+export const DEFAULT_SIGNUP_PERMISSIONS: MenuPermission[] = [
+  "create",
+  "jobs",
+  "cast",
+  "materials",
+  "publish",
+  "settings",
+];
 
 export interface UserRecord {
   id: string;
@@ -27,10 +39,14 @@ export interface UserRecord {
   createdAt: string;
   updatedAt: string;
   lastLoginAt?: string;
+  /** 自助注册的邮箱；管理员创建的历史账号可以没有。 */
+  email?: string;
+  /** 邮箱验证通过时间；有 email 但该字段为空时不能登录。 */
+  emailVerifiedAt?: string;
 }
 
 interface UsersFile {
-  version: 1;
+  version: 1 | 2;
   users: UserRecord[];
 }
 
@@ -44,6 +60,8 @@ export interface UserView {
   createdAt: string;
   updatedAt: string;
   lastLoginAt?: string;
+  email?: string;
+  emailVerified: boolean;
 }
 
 export interface CreateUserInput {
@@ -52,6 +70,13 @@ export interface CreateUserInput {
   password: string;
   role?: UserRole;
   permissions?: MenuPermission[];
+  email?: string;
+}
+
+export interface SignupInput {
+  email: string;
+  password: string;
+  displayName?: string;
 }
 
 export interface UpdateUserInput {
@@ -108,6 +133,17 @@ function parseUsername(value: unknown): string {
     });
   }
   return username;
+}
+
+export function normalizeEmail(value: unknown): string {
+  const email = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!email) {
+    throw new AppError("请填写邮箱地址", { code: "EMAIL_INVALID", status: 400 });
+  }
+  if (email.length > EMAIL_MAX_LENGTH || !EMAIL_PATTERN.test(email)) {
+    throw new AppError("邮箱地址格式不正确", { code: "EMAIL_INVALID", status: 400 });
+  }
+  return email;
 }
 
 function parseDisplayName(value: unknown, fallback: string): string {
@@ -180,6 +216,8 @@ export function toUserView(user: UserRecord): UserView {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     ...(user.lastLoginAt ? { lastLoginAt: user.lastLoginAt } : {}),
+    ...(user.email ? { email: user.email } : {}),
+    emailVerified: Boolean(user.emailVerifiedAt),
   };
 }
 
@@ -208,6 +246,10 @@ function parseStoredUser(value: unknown): UserRecord {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     ...(typeof value.lastLoginAt === "string" ? { lastLoginAt: value.lastLoginAt } : {}),
+    ...(typeof value.email === "string" && value.email ? { email: value.email } : {}),
+    ...(typeof value.emailVerifiedAt === "string" && value.emailVerifiedAt
+      ? { emailVerifiedAt: value.emailVerifiedAt }
+      : {}),
   };
 }
 
@@ -292,6 +334,18 @@ export class UserStore {
     return this.users.find((user) => user.username.toLowerCase() === target);
   }
 
+  async findByEmail(email: string): Promise<UserRecord | undefined> {
+    await this.ensureLoaded();
+    const target = email.trim().toLowerCase();
+    return this.users.find((user) => (user.email ?? "").toLowerCase() === target);
+  }
+
+  /** 登录标识既可以是邮箱，也可以是历史账号的用户名。 */
+  async findByLogin(login: string): Promise<UserRecord | undefined> {
+    if (login.includes("@")) return this.findByEmail(login);
+    return this.findByUsername(login);
+  }
+
   async setup(input: SetupInput): Promise<UserView> {
     await this.ensureLoaded();
     if (this.users.length > 0) {
@@ -317,6 +371,77 @@ export class UserStore {
     const user = await this.createRecord({ ...input, role });
     this.logger.info(`已创建用户：${user.username}（${user.role}）`);
     return toUserView(user);
+  }
+
+  /**
+   * 自助注册：邮箱已注册且验证过时返回 alreadyVerified（不改密码）；
+   * 未验证的同邮箱账号则更新密码与显示名，等待重新验证。
+   */
+  async signup(
+    input: SignupInput,
+  ): Promise<{ user: UserRecord; created: boolean; alreadyVerified: boolean }> {
+    await this.ensureLoaded();
+    const email = normalizeEmail(input.email);
+    const password = parsePassword(input.password);
+    const existing = await this.findByEmail(email);
+    if (existing) {
+      if (existing.emailVerifiedAt) {
+        return { user: existing, created: false, alreadyVerified: true };
+      }
+      if (existing.disabled) {
+        throw new AppError("该账号已被禁用，请联系管理员", { code: "ACCOUNT_DISABLED", status: 403 });
+      }
+      existing.passwordHash = await hashPassword(password);
+      if (input.displayName !== undefined) {
+        existing.displayName = parseDisplayName(input.displayName, existing.displayName);
+      }
+      existing.updatedAt = new Date().toISOString();
+      await this.persist();
+      return { user: existing, created: false, alreadyVerified: false };
+    }
+    const now = new Date().toISOString();
+    const user: UserRecord = {
+      id: randomBytes(8).toString("hex"),
+      username: `u_${randomBytes(4).toString("hex")}`,
+      displayName: parseDisplayName(input.displayName, email.split("@")[0] || "新用户"),
+      role: "member",
+      permissions: [...DEFAULT_SIGNUP_PERMISSIONS],
+      passwordHash: await hashPassword(password),
+      disabled: false,
+      createdAt: now,
+      updatedAt: now,
+      email,
+    };
+    this.users.push(user);
+    await this.persist();
+    this.logger.info(`新用户注册（待验证邮箱）：${maskEmail(email)}`);
+    return { user, created: true, alreadyVerified: false };
+  }
+
+  /** 邮箱验证通过；返回更新后的用户。 */
+  async markEmailVerified(email: string): Promise<UserRecord | undefined> {
+    await this.ensureLoaded();
+    const user = await this.findByEmail(email);
+    if (!user || user.disabled) return undefined;
+    if (!user.emailVerifiedAt) {
+      user.emailVerifiedAt = new Date().toISOString();
+      user.updatedAt = user.emailVerifiedAt;
+      await this.persist();
+      this.logger.info(`邮箱验证通过：${maskEmail(user.email ?? "")}`);
+    }
+    return user;
+  }
+
+  /** 邮箱验证码重置密码；仅对已验证账号生效。 */
+  async resetPasswordByEmail(email: string, password: string): Promise<UserRecord | undefined> {
+    await this.ensureLoaded();
+    const user = await this.findByEmail(email);
+    if (!user || user.disabled || !user.emailVerifiedAt) return undefined;
+    user.passwordHash = await hashPassword(parsePassword(password));
+    user.updatedAt = new Date().toISOString();
+    await this.persist();
+    this.logger.info(`用户重置密码：${maskEmail(user.email ?? "")}`);
+    return user;
   }
 
   async update(id: string, patch: UpdateUserInput, actorId: string): Promise<UserView> {
@@ -375,17 +500,32 @@ export class UserStore {
     this.logger.info(`已删除用户：${user.username}`);
   }
 
-  /** 校验用户名和密码；禁用账号与密码错误返回相同结果，避免枚举账号。 */
-  async verify(username: string, password: string): Promise<UserRecord | null> {
+  /** 校验登录标识（邮箱或用户名）和密码；禁用账号与密码错误返回相同结果，避免枚举账号。 */
+  async authenticate(
+    login: string,
+    password: string,
+  ): Promise<
+    | { status: "ok"; user: UserRecord }
+    | { status: "invalid" }
+    | { status: "unverified"; user: UserRecord }
+  > {
     await this.ensureLoaded();
-    const user = await this.findByUsername(username);
+    const user = await this.findByLogin(login);
     if (!user) {
       await deriveKey(password, Buffer.alloc(16)).catch(() => undefined);
-      return null;
+      return { status: "invalid" };
     }
-    if (user.disabled) return null;
+    if (user.disabled) return { status: "invalid" };
     const valid = await verifyPassword(password, user.passwordHash);
-    return valid ? user : null;
+    if (!valid) return { status: "invalid" };
+    if (user.email && !user.emailVerifiedAt) return { status: "unverified", user };
+    return { status: "ok", user };
+  }
+
+  /** 兼容旧调用：返回验证通过的用户，否则 null。 */
+  async verify(login: string, password: string): Promise<UserRecord | null> {
+    const result = await this.authenticate(login, password);
+    return result.status === "ok" ? result.user : null;
   }
 
   async markLogin(id: string): Promise<void> {
@@ -414,6 +554,10 @@ export class UserStore {
       throw new AppError("用户名已存在", { code: "USERNAME_TAKEN", status: 409 });
     }
     const role = parseRole(input.role, "member");
+    const email = input.email ? normalizeEmail(input.email) : undefined;
+    if (email && this.users.some((user) => (user.email ?? "").toLowerCase() === email)) {
+      throw new AppError("邮箱已被注册", { code: "EMAIL_TAKEN", status: 409 });
+    }
     const now = new Date().toISOString();
     const user: UserRecord = {
       id: randomBytes(8).toString("hex"),
@@ -425,6 +569,7 @@ export class UserStore {
       disabled: false,
       createdAt: now,
       updatedAt: now,
+      ...(email ? { email, emailVerifiedAt: now } : {}),
     };
     this.users.push(user);
     await this.persist();
@@ -433,10 +578,18 @@ export class UserStore {
 
   private async persist(): Promise<void> {
     await ensureDir(path.dirname(this.filePath));
-    const payload: UsersFile = { version: 1, users: this.users };
+    const payload: UsersFile = { version: 2, users: this.users };
     const tmp = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
     await fsp.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
     await fsp.rename(tmp, this.filePath);
     await fsp.chmod(this.filePath, 0o600).catch(() => undefined);
   }
+}
+
+/** 日志里只保留域名与首字符，避免把完整邮箱写进日志。 */
+function maskEmail(email: string): string {
+  const [local, domain] = email.split("@");
+  if (!domain) return "***";
+  const head = (local ?? "").slice(0, 1);
+  return `${head}***@${domain}`;
 }

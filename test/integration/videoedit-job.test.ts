@@ -49,7 +49,7 @@ test("任务局部修改：替换指定分镜并自动重新拼接成片", { tim
     },
   }));
   try {
-    const record = jobs.create("局部修改测试", {
+    const record = jobs.create("test-user", config, "局部修改测试", {
       targetDurationSec: 10,
       maxSegments: 2,
       ttsProvider: "silent",

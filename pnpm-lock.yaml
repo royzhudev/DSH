@@ -20,6 +20,9 @@ importers:
       msedge-tts:
         specifier: ^2.1.1
         version: 2.1.1
+      nodemailer:
+        specifier: ^10.6.1
+        version: 10.6.1
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -487,6 +490,10 @@ packages:
   msedge-tts@2.1.1:
     resolution: {integrity: sha512-eJ8moPZYqLl5eEZpg5lU2gCG9Pjao/yMTl6TMgD0M7YoKDQcdSUxv6QgjUelkjYRHYWXlKzG1tKM5WnZwxwGFw==}
     engines: {node: '>=16.0.0'}
+
+  nodemailer@10.6.1:
+    resolution: {integrity: sha512-d7kfFfS/tR4Aca+SBvRaQ+MXKNv7d2JiRe5TxaRcFT/kYMh4GGPnW9aKksTIEvyEbA7d/7HYWE4YPDEHxzJj/g==}
+    engines: {node: '>=20.0.0'}
 
   p-limit@2.3.0:
     resolution: {integrity: sha512-//88mFWSJx8lxCzwdAABTJL2MyWB12+eIY7MDL2SqLmAkeKU9qxRvWuSyTjm3FUmpBEMuFfckAIqEaVGUDxb6w==}
@@ -1002,6 +1009,8 @@ snapshots:
       - debug
       - supports-color
       - utf-8-validate
+
+  nodemailer@10.6.1: {}
 
   p-limit@2.3.0:
     dependencies:

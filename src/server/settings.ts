@@ -16,7 +16,8 @@ import type { AppConfig, VideoGenChannel } from "../types.js";
 import { IMAGE_GEN_MODEL_OPTIONS, type ImageGenModelOption } from "../imagegen/models.js";
 import { ensureDir } from "../util/fs.js";
 
-const EDITABLE_SECTIONS = [
+/** 每用户可编辑的个人设置：模型 API Key、音色、画面渠道与个人偏好。 */
+export const PERSONAL_SECTIONS = [
   "script",
   "tts",
   "video",
@@ -25,13 +26,22 @@ const EDITABLE_SECTIONS = [
   "videoGen",
   "imageGen",
   "lipsync",
-  "douyin",
 ] as const;
 
-type EditableSection = (typeof EDITABLE_SECTIONS)[number];
-type Overlay = Partial<Record<EditableSection, Record<string, unknown>>> & { updatedAt?: string };
+/** 平台级设置：只有管理员能改，影响整个部署。 */
+export const PLATFORM_SECTIONS = ["douyin", "mail", "registration"] as const;
 
-const SECRET_KEYS = new Set(["apiKey", "clientSecret"]);
+type PersonalSection = (typeof PERSONAL_SECTIONS)[number];
+type PlatformSection = (typeof PLATFORM_SECTIONS)[number];
+type EditableSection = PersonalSection | PlatformSection;
+
+type Overlay = Partial<Record<EditableSection, Record<string, unknown>>> & {
+  updatedAt?: string;
+  /** 平台级部署地址；只有平台设置使用。 */
+  publicBaseUrl?: string;
+};
+
+const SECRET_KEYS = new Set(["apiKey", "clientSecret", "password"]);
 
 /** 取值是固定枚举的字段：保存时统一小写，避免 BAILIAN 这类写法存进配置后校验失败。 */
 const TOKEN_KEYS = new Set(["provider", "protocol", "fallback", "transition", "channel", "mode"]);
@@ -71,13 +81,25 @@ export interface SettingsView {
   /** 阿里百炼可切换的文生图模型；前端据此渲染下拉框并显示模型说明。 */
   imageGenModels: readonly ImageGenModelOption[];
   lipsync: Record<string, unknown> & { apiKeySet: boolean; apiKeyHint?: string };
+  server: { host: string; port: number; publicBaseUrl: string };
+  paths: { outputDir: string; libraryDir: string; castDir: string; settingsFile: string };
+  updatedAt?: string;
+}
+
+export interface PlatformSettingsView {
   douyin: Record<string, unknown> & {
     clientSecretSet: boolean;
     clientSecretHint?: string;
     effectiveRedirectUri: string;
   };
-  server: { host: string; port: number };
-  paths: { outputDir: string; libraryDir: string; castDir: string; settingsFile: string };
+  mail: Record<string, unknown> & {
+    passwordSet: boolean;
+    passwordHint?: string;
+    configured: boolean;
+  };
+  registration: { enabled: boolean; allowedEmailDomains: string[] };
+  server: { host: string; port: number; publicBaseUrl: string };
+  paths: { settingsFile: string };
   updatedAt?: string;
 }
 
@@ -88,15 +110,19 @@ export function effectiveRedirectUri(config: AppConfig): string {
   return `http://${displayHost}:${config.server.port}/api/douyin/callback`;
 }
 
-export function serializeSettings(config: AppConfig, settingsPath: string, updatedAt?: string): SettingsView {
-  const sections = {} as Record<EditableSection, Record<string, unknown>>;
-  for (const section of EDITABLE_SECTIONS) {
-    sections[section] = maskSecretFields(section, config[section] as unknown as Record<string, unknown>);
+function sectionView(config: AppConfig, section: EditableSection): Record<string, unknown> {
+  return maskSecretFields(section, config[section] as unknown as Record<string, unknown>);
+}
+
+export function serializeSettings(
+  config: AppConfig,
+  settingsPath: string,
+  updatedAt?: string,
+): SettingsView {
+  const sections = {} as Record<PersonalSection, Record<string, unknown>>;
+  for (const section of PERSONAL_SECTIONS) {
+    sections[section] = sectionView(config, section);
   }
-  for (const section of ["script", "tts", "videoGen", "imageGen", "lipsync"] as const) {
-    if (!("apiKeySet" in sections[section])) sections[section].apiKeySet = false;
-  }
-  if (!("clientSecretSet" in sections.douyin)) sections.douyin.clientSecretSet = false;
   return {
     script: sections.script as SettingsView["script"],
     tts: sections.tts as SettingsView["tts"],
@@ -108,17 +134,44 @@ export function serializeSettings(config: AppConfig, settingsPath: string, updat
     imageGen: sections.imageGen as SettingsView["imageGen"],
     imageGenModels: IMAGE_GEN_MODEL_OPTIONS,
     lipsync: sections.lipsync as SettingsView["lipsync"],
-    douyin: {
-      ...sections.douyin,
-      effectiveRedirectUri: effectiveRedirectUri(config),
-    } as SettingsView["douyin"],
-    server: { host: config.server.host, port: config.server.port },
+    server: {
+      host: config.server.host,
+      port: config.server.port,
+      publicBaseUrl: config.server.publicBaseUrl,
+    },
     paths: {
       outputDir: config.outputDir,
       libraryDir: config.libraryDir,
       castDir: config.castDir,
       settingsFile: settingsPath,
     },
+    updatedAt,
+  };
+}
+
+export function serializePlatformSettings(
+  config: AppConfig,
+  settingsPath: string,
+  updatedAt?: string,
+): PlatformSettingsView {
+  const douyin = sectionView(config, "douyin") as PlatformSettingsView["douyin"];
+  const mail = sectionView(config, "mail") as PlatformSettingsView["mail"];
+  return {
+    douyin: { ...douyin, effectiveRedirectUri: effectiveRedirectUri(config) },
+    mail: {
+      ...mail,
+      configured: Boolean(config.mail.enabled && config.mail.host && config.mail.from),
+    },
+    registration: {
+      enabled: config.registration.enabled,
+      allowedEmailDomains: [...config.registration.allowedEmailDomains],
+    },
+    server: {
+      host: config.server.host,
+      port: config.server.port,
+      publicBaseUrl: config.server.publicBaseUrl,
+    },
+    paths: { settingsFile: settingsPath },
     updatedAt,
   };
 }
@@ -138,6 +191,16 @@ function sanitizeSection(section: EditableSection, patch: unknown): Record<strin
       if (SECRET_KEYS.has(key)) result[key] = "";
       continue;
     }
+    if (Array.isArray(fallback)) {
+      if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+        throw new AppError(`设置项 ${section}.${key} 必须是字符串数组`, {
+          code: "SETTINGS_INVALID",
+          status: 400,
+        });
+      }
+      result[key] = value.map((item) => item.trim()).filter(Boolean);
+      continue;
+    }
     if (isRecord(fallback) && isRecord(value)) {
       result[key] = sanitizeSection(section, value);
       continue;
@@ -147,9 +210,9 @@ function sanitizeSection(section: EditableSection, patch: unknown): Record<strin
   return result;
 }
 
-function mergeOverlay(base: Overlay, patch: Record<string, unknown>): Overlay {
+function mergeOverlay(base: Overlay, patch: Record<string, unknown>, sections: readonly EditableSection[]): Overlay {
   const merged: Overlay = { ...base };
-  for (const section of EDITABLE_SECTIONS) {
+  for (const section of sections) {
     if (!(section in patch)) continue;
     const current = (base[section] ?? {}) as Record<string, unknown>;
     const next = sanitizeSection(section, patch[section]);
@@ -158,13 +221,23 @@ function mergeOverlay(base: Overlay, patch: Record<string, unknown>): Overlay {
   return merged;
 }
 
+function applyOverlaySections(
+  target: Record<string, unknown>,
+  overlay: Overlay,
+  sections: readonly EditableSection[],
+): void {
+  for (const section of sections) {
+    const value = overlay[section];
+    if (!value) continue;
+    target[section] = { ...(target[section] as Record<string, unknown>), ...value };
+  }
+}
+
 function requestedVideoGenChannel(patch: Record<string, unknown>): VideoGenChannel | undefined {
   const videoGen = patch.videoGen;
   if (!isRecord(videoGen) || typeof videoGen.channel !== "string") return undefined;
   const channel = videoGen.channel.trim().toLowerCase() as VideoGenChannel;
-  return VIDEO_GEN_CHANNEL_OPTIONS.some((option) => option.channel === channel)
-    ? channel
-    : undefined;
+  return VIDEO_GEN_CHANNEL_OPTIONS.some((option) => option.channel === channel) ? channel : undefined;
 }
 
 /** 把渠道的预置参数写进保存对象；API Key 与其他用户可调开关不受影响。 */
@@ -200,9 +273,19 @@ function toConfigError(error: unknown): AppError {
   });
 }
 
+interface PersonalStoreOptions {
+  settingsPath: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  logger: Logger;
+  /** 平台配置的公网地址；个人没填时作为默认值。 */
+  defaultPublicBaseUrl?: () => string;
+}
+
 /**
- * 网页设置存储：把用户可编辑的配置持久化到 data/settings.json，
- * 并原地更新运行中的配置对象（新任务生效，已排队任务使用创建时的快照）。
+ * 每用户设置存储：把个人可编辑的配置持久化到 data/users/<id>/settings.json，
+ * 并原地更新交给它的配置对象（该对象是平台配置的副本，改不到别人）。
+ * 新任务使用保存后的快照；已排队任务继续用创建时的配置。
  */
 export class SettingsStore {
   private overlay: Overlay = {};
@@ -212,12 +295,7 @@ export class SettingsStore {
 
   constructor(
     private readonly config: AppConfig,
-    private readonly options: {
-      settingsPath: string;
-      cwd: string;
-      env: NodeJS.ProcessEnv;
-      logger: Logger;
-    },
+    private readonly options: PersonalStoreOptions,
   ) {}
 
   get settingsPath(): string {
@@ -236,13 +314,25 @@ export class SettingsStore {
     try {
       const raw = await fsp.readFile(this.options.settingsPath, "utf8");
       const parsed = JSON.parse(raw) as unknown;
-      if (!isRecord(parsed)) return;
-      this.overlay = mergeOverlay({}, parsed);
-      if (typeof parsed.updatedAt === "string") this.updatedAt = parsed.updatedAt;
+      if (isRecord(parsed)) {
+        this.overlay = mergeOverlay({}, parsed, PERSONAL_SECTIONS);
+        if (typeof parsed.updatedAt === "string") this.updatedAt = parsed.updatedAt;
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        this.options.logger.warn(`网页设置读取失败，将使用环境配置：${String(error)}`);
+        this.options.logger.warn(`个人设置读取失败，将使用平台配置：${String(error)}`);
       }
+    }
+    // 个人设置文件不经过 loadConfig 读取，这里把覆盖应用到位。
+    await this.recompute(this.overlay);
+    // 首次生成或平台地址带来新令牌时立刻落盘，避免重启后旧链接失效。
+    const token = this.config.videoGen.publicAssetToken;
+    if (token && this.overlay.videoGen?.publicAssetToken !== token) {
+      this.overlay = {
+        ...this.overlay,
+        videoGen: { ...(this.overlay.videoGen ?? {}), publicAssetToken: token },
+      };
+      await this.persist(this.overlay);
     }
   }
 
@@ -256,51 +346,162 @@ export class SettingsStore {
     if (!isRecord(patch)) {
       throw new AppError("设置请求体必须是 JSON 对象", { code: "SETTINGS_INVALID", status: 400 });
     }
-    const merged = mergeOverlay(this.overlay, patch);
-    // 以运行中的配置为底，保留命令行/测试注入等显式覆盖，避免保存设置时被重置。
-    const current = structuredClone(this.config) as unknown as Record<string, unknown>;
-    for (const section of EDITABLE_SECTIONS) {
-      if (!(section in merged)) continue;
-      current[section] = {
-        ...(current[section] as Record<string, unknown>),
-        ...(merged[section] as Record<string, unknown>),
-      };
-    }
+    const merged = mergeOverlay(this.overlay, patch, PERSONAL_SECTIONS);
     // 选中渠道后由服务端写入预置参数：客户端可以只传 channel 与 apiKey，
     // 地址、模型、路径、轮询间隔都不会再依赖手填。
     const requestedChannel = requestedVideoGenChannel(patch);
     if (requestedChannel) {
-      const requestedModel =
-        isRecord(merged.videoGen) && typeof merged.videoGen.model === "string"
-          ? merged.videoGen.model
-          : undefined;
-      applyVideoGenChannel(merged.videoGen!, requestedChannel, requestedModel);
-      applyVideoGenChannel(
-        current.videoGen as Record<string, unknown>,
-        requestedChannel,
-        requestedModel,
-      );
+      const requestedModel = isRecord(merged.videoGen) && typeof merged.videoGen.model === "string"
+        ? merged.videoGen.model
+        : undefined;
+      merged.videoGen = { ...(merged.videoGen ?? {}) };
+      applyVideoGenChannel(merged.videoGen, requestedChannel, requestedModel);
     }
-    // 公网素材地址用于把本地角色图映射成平台可访问的只读 URL；令牌只生成一次，
-    // 清除地址时一并清除，避免旧的公开链接继续暴露角色图。
-    const mergedVideoGen = isRecord(merged.videoGen) ? merged.videoGen : undefined;
-    if (mergedVideoGen) {
-      const currentVideoGen = current.videoGen as Record<string, unknown>;
-      const publicBaseUrl =
-        typeof mergedVideoGen.publicBaseUrl === "string"
-          ? mergedVideoGen.publicBaseUrl.trim().replace(/\/+$/, "")
-          : String(currentVideoGen.publicBaseUrl ?? "").trim();
-      const existingToken =
-        typeof mergedVideoGen.publicAssetToken === "string"
-          ? mergedVideoGen.publicAssetToken.trim()
-          : String(currentVideoGen.publicAssetToken ?? "").trim();
-      const publicAssetToken = publicBaseUrl
-        ? existingToken || randomBytes(24).toString("base64url")
-        : "";
-      mergedVideoGen.publicBaseUrl = publicBaseUrl;
-      mergedVideoGen.publicAssetToken = publicAssetToken;
-      currentVideoGen.publicBaseUrl = publicBaseUrl;
-      currentVideoGen.publicAssetToken = publicAssetToken;
+    await this.recompute(merged);
+    const updatedAt = new Date().toISOString();
+    await this.persist({ ...merged, updatedAt });
+    this.overlay = merged;
+    this.updatedAt = updatedAt;
+    this.options.logger.info("个人设置已更新");
+    return serializeSettings(this.config, this.options.settingsPath, this.updatedAt);
+  }
+
+  /** 依次应用个人覆盖、部署默认公网地址与素材令牌，然后校验并写回 this.config。 */
+  private async recompute(merged: Overlay, persistToken = false): Promise<void> {
+    const current = structuredClone(this.config) as unknown as Record<string, unknown>;
+    applyOverlaySections(current, merged, PERSONAL_SECTIONS);
+    const videoGen = current.videoGen as Record<string, unknown>;
+    const explicitBase =
+      typeof videoGen.publicBaseUrl === "string" ? videoGen.publicBaseUrl.trim().replace(/\/+$/, "") : "";
+    const fallbackBase = (this.options.defaultPublicBaseUrl?.() ?? "").trim().replace(/\/+$/, "");
+    const publicBaseUrl = explicitBase || fallbackBase;
+    let token = typeof videoGen.publicAssetToken === "string" ? videoGen.publicAssetToken.trim() : "";
+    if (publicBaseUrl && !token) token = randomBytes(24).toString("base64url");
+    if (!publicBaseUrl) token = "";
+    videoGen.publicBaseUrl = publicBaseUrl;
+    videoGen.publicAssetToken = token;
+    // 令牌要落盘，否则重启后旧链接全部失效。
+    if (token && token !== this.overlay.videoGen?.publicAssetToken) {
+      merged.videoGen = { ...(merged.videoGen ?? {}), publicAssetToken: token };
+    }
+
+    let next: AppConfig;
+    try {
+      next = loadConfig({
+        cwd: this.options.cwd,
+        env: this.options.env,
+        settingsPath: this.options.settingsPath,
+        overrides: current as DeepPartial<AppConfig>,
+      });
+    } catch (error) {
+      throw toConfigError(error);
+    }
+    Object.assign(this.config, next);
+  }
+
+  private async persist(overlay: Overlay): Promise<void> {
+    await ensureDir(path.dirname(this.options.settingsPath));
+    const tmp = `${this.options.settingsPath}.tmp-${process.pid}-${Date.now()}`;
+    await fsp.writeFile(tmp, `${JSON.stringify(overlay, null, 2)}\n`, { mode: 0o600 });
+    await fsp.rename(tmp, this.options.settingsPath);
+    await fsp.chmod(this.options.settingsPath, 0o600).catch(() => undefined);
+  }
+}
+
+interface PlatformStoreOptions {
+  settingsPath: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  logger: Logger;
+}
+
+/**
+ * 平台设置存储：邮件通道、注册开关、抖音应用凭证与部署公网地址。
+ * 只有管理员能改；保存后影响到所有用户（个人覆盖仍然优先）。
+ */
+export class PlatformSettingsStore {
+  private overlay: Overlay = {};
+  private updatedAt: string | undefined;
+  private loaded = false;
+  private loadPromise?: Promise<void>;
+
+  constructor(
+    private readonly config: AppConfig,
+    private readonly options: PlatformStoreOptions,
+  ) {}
+
+  get settingsPath(): string {
+    return this.options.settingsPath;
+  }
+
+  get currentConfig(): AppConfig {
+    return this.config;
+  }
+
+  async ensureLoaded(): Promise<void> {
+    if (this.loaded) return;
+    this.loadPromise ??= this.load().finally(() => {
+      this.loaded = true;
+    });
+    await this.loadPromise;
+  }
+
+  async load(): Promise<void> {
+    try {
+      const raw = await fsp.readFile(this.options.settingsPath, "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (isRecord(parsed)) {
+        this.overlay = this.platformOverlayFrom(parsed);
+        if (typeof parsed.updatedAt === "string") this.updatedAt = parsed.updatedAt;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.options.logger.warn(`平台设置读取失败，将使用环境配置：${String(error)}`);
+      }
+    }
+    this.apply(this.overlay);
+  }
+
+  async view(): Promise<PlatformSettingsView> {
+    await this.ensureLoaded();
+    return serializePlatformSettings(this.config, this.options.settingsPath, this.updatedAt);
+  }
+
+  async update(patch: unknown): Promise<PlatformSettingsView> {
+    await this.ensureLoaded();
+    if (!isRecord(patch)) {
+      throw new AppError("设置请求体必须是 JSON 对象", { code: "SETTINGS_INVALID", status: 400 });
+    }
+    const merged = mergeOverlay(this.overlay, patch, PLATFORM_SECTIONS);
+    if (isRecord(patch.server) && typeof patch.server.publicBaseUrl === "string") {
+      merged.publicBaseUrl = patch.server.publicBaseUrl.trim().replace(/\/+$/, "");
+    }
+    this.apply(merged);
+    const updatedAt = new Date().toISOString();
+    await this.persist({ ...merged, updatedAt });
+    this.overlay = merged;
+    this.updatedAt = updatedAt;
+    this.options.logger.info("平台设置已更新");
+    return serializePlatformSettings(this.config, this.options.settingsPath, this.updatedAt);
+  }
+
+  private platformOverlayFrom(parsed: Record<string, unknown>): Overlay {
+    const overlay = mergeOverlay({}, parsed, PLATFORM_SECTIONS);
+    if (isRecord(parsed.server) && typeof parsed.server.publicBaseUrl === "string") {
+      overlay.publicBaseUrl = parsed.server.publicBaseUrl.trim().replace(/\/+$/, "");
+    }
+    return overlay;
+  }
+
+  private apply(overlay: Overlay): void {
+    const before = structuredClone(this.config);
+    const current = structuredClone(this.config) as unknown as Record<string, unknown>;
+    applyOverlaySections(current, overlay, PLATFORM_SECTIONS);
+    if (overlay.publicBaseUrl !== undefined) {
+      current.server = {
+        ...(current.server as Record<string, unknown>),
+        publicBaseUrl: overlay.publicBaseUrl,
+      };
     }
     let next: AppConfig;
     try {
@@ -313,22 +514,44 @@ export class SettingsStore {
     } catch (error) {
       throw toConfigError(error);
     }
-    // 旧设置文件里的 channel 可能早于本次选择；以本次请求为准（custom 也要保留）。
-    if (requestedChannel) next.videoGen.channel = requestedChannel;
-
-    const updatedAt = new Date().toISOString();
-    await this.persist({ ...merged, updatedAt });
-    this.overlay = merged;
-    this.updatedAt = updatedAt;
+    // 平台设置文件里可能残留旧版的个人设置，个人部分一律以内存基线为准，
+    // 避免把管理员或前一个用户的 API Key 带进其他人的有效配置。
+    for (const section of PERSONAL_SECTIONS) {
+      (next as unknown as Record<string, unknown>)[section] = before[section];
+    }
     Object.assign(this.config, next);
-    this.options.logger.info("设置已更新");
-    return serializeSettings(this.config, this.options.settingsPath, this.updatedAt);
+  }
+
+  /**
+   * 迁移完成后调用：把平台配置里残留的个人设置恢复为部署基线
+   * （默认值 + 配置文件 + 环境变量），不读取 data/settings.json。
+   */
+  async resetPersonalSections(sections: readonly PersonalSection[]): Promise<void> {
+    if (sections.length === 0) return;
+    const baseline = loadConfig({
+      cwd: this.options.cwd,
+      env: this.options.env,
+      settingsPath: this.options.settingsPath,
+      skipSettingsFile: true,
+      overrides: {},
+    });
+    for (const section of sections) {
+      (this.config as unknown as Record<string, unknown>)[section] = baseline[section];
+    }
   }
 
   private async persist(overlay: Overlay): Promise<void> {
     await ensureDir(path.dirname(this.options.settingsPath));
+    const payload: Record<string, unknown> = {
+      ...overlay,
+      ...(overlay.publicBaseUrl !== undefined
+        ? { server: { publicBaseUrl: overlay.publicBaseUrl } }
+        : {}),
+      updatedAt: overlay.updatedAt,
+    };
+    delete payload.publicBaseUrl;
     const tmp = `${this.options.settingsPath}.tmp-${process.pid}-${Date.now()}`;
-    await fsp.writeFile(tmp, `${JSON.stringify(overlay, null, 2)}\n`, { mode: 0o600 });
+    await fsp.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
     await fsp.rename(tmp, this.options.settingsPath);
     await fsp.chmod(this.options.settingsPath, 0o600).catch(() => undefined);
   }

@@ -164,10 +164,27 @@ export const DEFAULT_CONFIG: AppConfig = {
     scope: "user_info,video.create",
     apiBaseUrl: "https://open.douyin.com",
   },
+  mail: {
+    enabled: false,
+    host: "",
+    port: 465,
+    secure: true,
+    starttls: false,
+    user: "",
+    password: undefined,
+    from: "",
+    fromName: "视频创作智能体",
+  },
+  registration: {
+    // 方案要求：公开注册必须在 HTTPS 就绪后再开启，默认关闭。
+    enabled: false,
+    allowedEmailDomains: [],
+  },
   server: {
     host: "127.0.0.1",
     port: 8787,
     maxUploadBytes: 200 * 1024 * 1024,
+    publicBaseUrl: "",
   },
 };
 
@@ -180,6 +197,8 @@ export interface LoadConfigOptions {
   configPath?: string;
   /** 网页设置保存的覆盖文件，默认 <cwd>/data/settings.json。 */
   settingsPath?: string;
+  /** 忽略网页设置文件（用于平台级重算，避免误读里面的个人设置）。 */
+  skipSettingsFile?: boolean;
   env?: NodeJS.ProcessEnv;
   overrides?: DeepPartial<AppConfig>;
 }
@@ -526,6 +545,35 @@ function applyEnv(config: AppConfig, env: NodeJS.ProcessEnv): void {
     config.server.maxUploadBytes,
     envNumber(env, "MAX_UPLOAD_BYTES"),
   );
+  config.server.publicBaseUrl = set(
+    config.server.publicBaseUrl,
+    envString(env, "VIDEO_AGENT_PUBLIC_BASE_URL") ?? envString(env, "VIDEOGEN_PUBLIC_BASE_URL"),
+  );
+
+  config.mail.enabled = set(config.mail.enabled, envBoolean(env, "MAIL_ENABLED"));
+  config.mail.host = set(config.mail.host, envString(env, "MAIL_HOST"));
+  config.mail.port = set(config.mail.port, envNumber(env, "MAIL_PORT"));
+  config.mail.secure = set(config.mail.secure, envBoolean(env, "MAIL_SECURE"));
+  config.mail.starttls = set(config.mail.starttls, envBoolean(env, "MAIL_STARTTLS"));
+  config.mail.user = set(config.mail.user, envString(env, "MAIL_USER"));
+  config.mail.password = set(
+    config.mail.password,
+    envString(env, "MAIL_PASSWORD") ?? envString(env, "MAIL_PASS"),
+  );
+  config.mail.from = set(config.mail.from, envString(env, "MAIL_FROM"));
+  config.mail.fromName = set(config.mail.fromName, envString(env, "MAIL_FROM_NAME"));
+
+  config.registration.enabled = set(
+    config.registration.enabled,
+    envBoolean(env, "REGISTRATION_ENABLED"),
+  );
+  const allowedDomains = envString(env, "REGISTRATION_ALLOWED_EMAIL_DOMAINS");
+  if (allowedDomains !== undefined) {
+    config.registration.allowedEmailDomains = allowedDomains
+      .split(/[,;]/)
+      .map((domain) => domain.trim().toLowerCase())
+      .filter(Boolean);
+  }
 }
 
 function requireRange(name: string, value: number, min: number, max: number): void {
@@ -556,6 +604,15 @@ function validateConfig(config: AppConfig): void {
   requireRange("subtitles.marginV", config.subtitles.marginV, 0, 2000);
   requireRange("server.port", config.server.port, 0, 65535);
   requireRange("server.maxUploadBytes", config.server.maxUploadBytes, 1024, 2 * 1024 * 1024 * 1024);
+  requireRange("mail.port", config.mail.port, 1, 65535);
+  if (config.mail.enabled) {
+    if (!config.mail.host) {
+      throw new AppError("启用邮件通道时必须配置 SMTP 服务器地址", { code: "CONFIG_INVALID" });
+    }
+    if (!config.mail.from) {
+      throw new AppError("启用邮件通道时必须配置发件地址", { code: "CONFIG_INVALID" });
+    }
+  }
 
   if (!SCRIPT_PROVIDERS.includes(config.script.provider)) {
     throw new AppError(`不支持的脚本供应商：${config.script.provider}`, { code: "CONFIG_INVALID" });
@@ -683,7 +740,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     settingsPath: options.settingsPath,
     fallback: config.settingsFile,
   });
-  if (fs.existsSync(settingsPath)) {
+  if (!options.skipSettingsFile && fs.existsSync(settingsPath)) {
     let settingsConfig: unknown;
     try {
       settingsConfig = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
@@ -701,13 +758,23 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   }
 
   config = mergeKnown(config, options.overrides ?? {});
+  config.settingsFile = settingsPath;
+  // 调用方覆盖优先级最高（每用户设置就靠它把个人渠道应用到平台配置之上）。
+  const overrideChannel = readExplicitVideoGenChannel(options.overrides);
+  config.videoGen.channel = overrideChannel ?? explicitChannel ?? inferVideoGenChannel(config.videoGen);
+  return finalizeConfig(config, cwd);
+}
 
+/**
+ * 路径归一化与配置校验。loadConfig 在合并完环境变量、配置文件、网页设置与调用方覆盖后调用；
+ * 每用户设置也会在平台配置之上套用后调用，保证两份设置走同一套校验。
+ */
+export function finalizeConfig(config: AppConfig, cwd: string): AppConfig {
   config.outputDir = path.resolve(cwd, config.outputDir);
   config.workDir = path.resolve(cwd, config.workDir);
   config.libraryDir = path.resolve(cwd, config.libraryDir);
   config.castDir = path.resolve(cwd, config.castDir);
   config.cacheDir = path.resolve(cwd, config.cacheDir);
-  config.settingsFile = settingsPath;
   config.script.baseUrl = config.script.baseUrl.trim().replace(/\/+$/, "");
   config.tts.baseUrl = config.tts.baseUrl.trim().replace(/\/+$/, "");
   config.videoGen.baseUrl = config.videoGen.baseUrl.trim().replace(/\/+$/, "");
@@ -717,6 +784,22 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   }
   config.douyin.apiBaseUrl = config.douyin.apiBaseUrl.trim().replace(/\/+$/, "");
   config.videoGen.publicBaseUrl = config.videoGen.publicBaseUrl.trim().replace(/\/+$/, "");
+  config.server.publicBaseUrl = config.server.publicBaseUrl.trim().replace(/\/+$/, "");
+  if (config.server.publicBaseUrl && !/^https?:\/\//i.test(config.server.publicBaseUrl)) {
+    throw new AppError("平台公网地址必须以 http:// 或 https:// 开头", { code: "CONFIG_INVALID" });
+  }
+  config.mail.host = config.mail.host.trim();
+  config.mail.user = config.mail.user.trim();
+  config.mail.from = (config.mail.from || config.mail.user).trim();
+  config.mail.fromName = config.mail.fromName.trim() || "视频创作智能体";
+  config.mail.port = Math.round(config.mail.port);
+  config.registration.allowedEmailDomains = [
+    ...new Set(
+      config.registration.allowedEmailDomains
+        .map((domain) => domain.trim().toLowerCase().replace(/^@/, ""))
+        .filter(Boolean),
+    ),
+  ];
   config.imageGen.baseUrl = config.imageGen.baseUrl.trim().replace(/\/+$/, "");
   // 留空表示使用百炼默认地址；绝不能回退到 videoGen.baseUrl，百炼 Key 不能用于聚合平台。
   if (!config.imageGen.baseUrl) config.imageGen.baseUrl = DASHSCOPE_IMAGE_BASE_URL;
@@ -731,7 +814,6 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   }
   normalizeProviderTokens(config);
   normalizeVideoGenProtocol(config);
-  config.videoGen.channel = explicitChannel ?? inferVideoGenChannel(config.videoGen);
 
   validateConfig(config);
   return config;

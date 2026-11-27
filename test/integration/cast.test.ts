@@ -204,10 +204,11 @@ test(
     assert.ok(current.warnings?.some((warning) => warning.includes("离线")), "缺少离线脚本提示");
 
     // 参考图在磁盘上丢失时，角色库会清理该设定，任务在调用模型前被拦下。
-    const castFiles = await fs.readdir(config.castDir);
-    const imageFile = castFiles.find((name) => name !== ".cast.json");
+    const adminCastDir = path.join(config.castDir, "users", session.user.id);
+    const castFiles = await fs.readdir(adminCastDir);
+    const imageFile = castFiles.find((name) => name !== ".cast.json" && !name.startsWith("."));
     assert.ok(imageFile);
-    await fs.rm(path.join(config.castDir, imageFile));
+    await fs.rm(path.join(adminCastDir, imageFile));
     const missingImage = await request(`${app.url}/api/videos`, {
       method: "POST",
       headers: { "content-type": "application/json" },

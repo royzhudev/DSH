@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { silentLogger } from "../../src/logger.js";
 import { JobManager } from "../../src/server/jobs.js";
+import { scopedConfigFor } from "../../src/server/workspaces.js";
 import type { PipelineResult } from "../../src/types.js";
 import { makeTempDir, makeTestConfig } from "../helpers.js";
 
@@ -30,12 +31,14 @@ test("历史任务：重启后从 result.json 恢复成片记录并重定位路�
   const dir = await makeTempDir();
   const config = makeTestConfig(dir);
   const id = "20261110-100000-abcd1234";
-  const jobDir = path.join(config.outputDir, id);
+  const jobDir = path.join(config.outputDir, "users", "u1", id);
   await fs.mkdir(jobDir, { recursive: true });
   await fs.writeFile(path.join(jobDir, "result.json"), JSON.stringify(sampleResult(id, jobDir)), "utf8");
 
-  const jobs = new JobManager(config, silentLogger);
-  assert.equal(jobs.list().length, 1);
+  const jobs = new JobManager(config, silentLogger, undefined, undefined, {
+    configFor: (userId) => scopedConfigFor(config, userId),
+  });
+  assert.equal(jobs.list("u1").length, 1);
   const restored = jobs.get(id);
   assert.ok(restored);
   assert.equal(restored.state, "succeeded");
@@ -52,7 +55,7 @@ test("历史任务：重启时把未完成的运行中任务标记为中断", as
   const dir = await makeTempDir();
   const config = makeTestConfig(dir);
   const id = "20261110-110000-deadbeef";
-  const jobDir = path.join(config.outputDir, id);
+  const jobDir = path.join(config.outputDir, "users", "u1", id);
   await fs.mkdir(jobDir, { recursive: true });
   await fs.writeFile(
     path.join(jobDir, "job.json"),
@@ -69,7 +72,9 @@ test("历史任务：重启时把未完成的运行中任务标记为中断", as
   );
   await fs.writeFile(path.join(jobDir, "job.json.bak"), "ignore", "utf8");
 
-  const jobs = new JobManager(config, silentLogger);
+  const jobs = new JobManager(config, silentLogger, undefined, undefined, {
+    configFor: (userId) => scopedConfigFor(config, userId),
+  });
   const restored = jobs.get(id);
   assert.ok(restored);
   assert.equal(restored.state, "failed");
@@ -82,5 +87,5 @@ test("历史任务：忽略输出目录里的非任务目录", async () => {
   const config = makeTestConfig(dir);
   await fs.mkdir(path.join(config.outputDir, "cache"), { recursive: true });
   const jobs = new JobManager(config, silentLogger);
-  assert.equal(jobs.list().length, 0);
+  assert.equal(jobs.list("u1").length, 0);
 });
