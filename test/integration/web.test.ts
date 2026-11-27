@@ -241,6 +241,13 @@ test(
     assert.equal(seedanceChannel?.fields?.model, "doubao-seedance-2-5-260628");
     assert.equal(seedanceChannel?.fields?.protocol, "seedance");
     assert.equal(seedanceChannel?.models?.length, 4);
+    const airongceChannel = initial.settings.videoGenChannels.find(
+      (item) => item.channel === "airongce-seedance",
+    );
+    assert.equal(airongceChannel?.fields?.model, "seedance2.0-fast");
+    assert.equal(airongceChannel?.fields?.protocol, "airongce");
+    assert.equal(airongceChannel?.models?.length, 4);
+    assert.ok(airongceChannel?.models?.some((item) => item.id === "seedance2.5"));
     assert.equal(initial.settings.imageGen.baseUrl, "https://dashscope.aliyuncs.com");
     assert.ok(
       initial.settings.imageGenModels.some((item) => item.id === "qwen-image-3.0-pro"),
@@ -322,6 +329,23 @@ test(
     assert.equal(channelSettings.settings.videoGen.model, "doubao-seedance-2-5-260628");
     assert.equal(channelSettings.settings.videoGen.protocol, "seedance");
     assert.equal(channelSettings.settings.videoGen.submitPath, "/api/v3/contents/generations/tasks");
+
+    // AIRONGCE 同样只传渠道与 Key，模型/地址/路径由服务端预置。
+    const airongcePut = await jsonRequest(request, `${app.url}/api/settings`, {
+      videoGen: { channel: "airongce-seedance", apiKey: "sk-airongce" },
+    }, "PUT");
+    assert.equal(airongcePut.status, 200, await airongcePut.clone().text());
+    const airongceSettings = (await airongcePut.json()) as {
+      settings: {
+        videoGen: { channel: string; baseUrl: string; model: string; protocol: string; submitPath: string; pollPath: string };
+      };
+    };
+    assert.equal(airongceSettings.settings.videoGen.channel, "airongce-seedance");
+    assert.equal(airongceSettings.settings.videoGen.baseUrl, "http://175.6.32.68:8081");
+    assert.equal(airongceSettings.settings.videoGen.model, "seedance2.0-fast");
+    assert.equal(airongceSettings.settings.videoGen.protocol, "airongce");
+    assert.equal(airongceSettings.settings.videoGen.submitPath, "/v1/videos");
+    assert.equal(airongceSettings.settings.videoGen.pollPath, "/v1/videos/{id}");
 
     const videoGenPut = await jsonRequest(request, `${app.url}/api/settings`, {
       videoGen: {

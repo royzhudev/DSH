@@ -1,6 +1,10 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { SEEDANCE_MODEL_OPTIONS } from "../config.js";
+import {
+  AIRONGCE_SEEDANCE_MODEL_OPTIONS,
+  AIRONGCE_VIDEO_CONTENT_PATH,
+  SEEDANCE_MODEL_OPTIONS,
+} from "../config.js";
 import type { GeneratedClip, VideoGenProvider, VideoGenRequest, VideoGenSettings } from "../types.js";
 import type { Logger } from "../logger.js";
 import { AppError, toErrorMessage } from "../errors.js";
@@ -349,9 +353,13 @@ export class HttpVideoGenProvider implements VideoGenProvider {
   }
 
   /** 接口协议：显式配置优先，auto 时按模型/服务地址判断（DashScope 用异步任务接口）。 */
-  private protocol(): "dashscope" | "seedance" | "generic" {
+  private protocol(): "dashscope" | "seedance" | "airongce" | "generic" {
     const configured = this.settings.protocol;
+    if (configured === "airongce") return "airongce";
     if (configured === "seedance") return "seedance";
+    if (configured === "auto" && /175\.6\.32\.68/.test(this.settings.baseUrl)) {
+      return "airongce";
+    }
     if (configured === "auto" && /seedance/i.test(this.settings.model)) {
       // 渠道未显式配置时，模型名已经写明 Seedance，按 One API Lumi 的 content 数组协议发送。
       return "seedance";
@@ -418,6 +426,30 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         // Seedance 2.5 用首帧时必须 adaptive；2.0 系列继续用竖屏比例。
         ratio: is25 && image && referenceImages.length === 0 ? "adaptive" : this.DASHSCOPE_RATIO,
       };
+    }
+    if (this.protocol() === "airongce") {
+      // AIRONGCE 的 /v1/videos 是扁平字段：参考图走 images[]，首帧走 first_frame_url，
+      // 两者不能混用；首帧时比例用 adaptive（与文档示例一致）。
+      const limits = AIRONGCE_SEEDANCE_MODEL_OPTIONS.find(
+        (item) => item.id === this.settings.model.trim(),
+      );
+      const minDuration = limits?.minDurationSec ?? 4;
+      const maxDuration = limits?.maxDurationSec ?? 15;
+      const duration = Math.min(
+        maxDuration,
+        Math.max(minDuration, Math.round(request.durationSec)),
+      );
+      const references = referenceImages.map((reference) => reference.image);
+      const body: Record<string, unknown> = {
+        model: this.settings.model,
+        prompt: request.prompt,
+        duration,
+        resolution: "720p",
+        ratio: references.length === 0 && image ? "adaptive" : this.DASHSCOPE_RATIO,
+      };
+      if (references.length > 0) body.images = references;
+      else if (image) body.first_frame_url = image;
+      return body;
     }
     if (this.protocol() === "dashscope") {
       const duration = Math.max(1, Math.round(request.durationSec));
@@ -546,6 +578,8 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         });
       }
       if (SUCCESS_STATES.has(status)) {
+        // AIRONGCE 的查询响应只给状态，成片要通过带鉴权的 /content 接口下载。
+        if (this.protocol() === "airongce") return this.airongceContentUrl(taskId);
         // 平台说完成了却没有可识别的地址：把返回结构记下来，便于针对性补字段。
         this.logger.warn(`画面生成任务 ${taskId} 已完成但未解析到视频地址：${describeJson(json)}`);
         throw new AppError(
@@ -564,11 +598,43 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     });
   }
 
+  private airongceContentUrl(taskId: string): string {
+    return `${this.baseUrl}${AIRONGCE_VIDEO_CONTENT_PATH.replace(
+      "{id}",
+      encodeURIComponent(taskId),
+    )}`;
+  }
+
+  /** AIRONGCE 的成片下载接口需要 Bearer；外部 CDN 地址不能带本服务的 Key。 */
+  private isAirongceContentUrl(url: string): boolean {
+    if (this.protocol() !== "airongce") return false;
+    try {
+      const target = new URL(url);
+      const base = new URL(this.baseUrl);
+      return (
+        target.origin === base.origin &&
+        /^\/v1\/videos\/[^/]+\/content$/.test(target.pathname)
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private async download(url: string, outputDir: string, signal: AbortSignal): Promise<string> {
-    const absolute = /^https?:\/\//i.test(url) ? url : new URL(url, `${this.baseUrl}/`).toString();
+    const absolute = /^https?:\/\//i.test(url)
+      ? url
+      : new URL(url, `${this.baseUrl}/`).toString();
     let response: Response;
     try {
-      response = await this.fetchImpl(absolute, { signal });
+      const headers = this.isAirongceContentUrl(absolute)
+        ? {
+            ...(this.settings.apiKey
+              ? { authorization: `Bearer ${this.settings.apiKey}` }
+              : {}),
+            accept: "video/mp4",
+          }
+        : undefined;
+      response = await this.fetchImpl(absolute, { signal, headers });
     } catch (error) {
       if (signal.aborted) throw abortReason(signal);
       throw new AppError(`下载生成视频失败：${toErrorMessage(error)}`, {
@@ -692,7 +758,7 @@ export class HttpVideoGenProvider implements VideoGenProvider {
     const requestedImageUrl = request.imageUrl?.trim();
     // One API Lumi 只接受公网 HTTP(S) 媒体，本地图片转成 data URL 会被平台拒绝。
     // 正常任务在 pipeline 里已经按渠道能力过滤/映射；这里再兜底，避免调用方绕过。
-    if (this.protocol() === "seedance") {
+    if (this.protocol() === "seedance" || this.protocol() === "airongce") {
       const localInputs = [
         ...(requestedImageUrl || !request.image || isHttpUrl(request.image) ? [] : [request.image]),
         ...references
@@ -701,7 +767,9 @@ export class HttpVideoGenProvider implements VideoGenProvider {
       ];
       if (localInputs.length > 0) {
         throw new AppError(
-          "One API Lumi Seedance 只接受公网 HTTP(S) 参考图；本地角色/首帧图（data URL）无法直接使用。请配置公网素材地址，或改用支持本地上传的渠道。",
+          this.protocol() === "airongce"
+            ? "AIRONGCE Seedance 只接受公网图片 URL（文档要求 HTTPS）；本地角色/首帧图（data URL）无法直接使用。请配置公网素材地址，或改用支持本地上传的渠道。"
+            : "One API Lumi Seedance 只接受公网 HTTP(S) 参考图；本地角色/首帧图（data URL）无法直接使用。请配置公网素材地址，或改用支持本地上传的渠道。",
           { code: "VIDEOGEN_PUBLIC_MEDIA_REQUIRED", status: 400 },
         );
       }
@@ -726,6 +794,18 @@ export class HttpVideoGenProvider implements VideoGenProvider {
             })),
           )
         : [];
+    // AIRONGCE 文档明确要求参考图/首帧是公网 HTTPS；提前拦住 http://，避免提交后才失败。
+    if (this.protocol() === "airongce") {
+      const insecure = [image, ...referenceImages.map((reference) => reference.image)].filter(
+        (value): value is string => Boolean(value) && /^http:\/\//i.test(value!),
+      );
+      if (insecure.length > 0) {
+        throw new AppError(
+          "AIRONGCE Seedance 只接受公网 HTTPS 参考图；当前素材地址是 http://。请配置 HTTPS 公网地址，或改用支持 HTTP/本地图的渠道。",
+          { code: "VIDEOGEN_PUBLIC_MEDIA_REQUIRED", status: 400 },
+        );
+      }
+    }
     this.logger.info(
       `AI 画面生成${image ? "（图生视频）" : ""}：${this.model}，${request.durationSec.toFixed(1)}s${
         referenceImages.length > 0 ? `，${referenceImages.length} 张参考图` : ""
@@ -737,7 +817,9 @@ export class HttpVideoGenProvider implements VideoGenProvider {
         ? "DashScope 异步协议"
         : this.protocol() === "seedance"
           ? "One API Lumi Seedance 协议"
-          : "通用 HTTP 契约";
+          : this.protocol() === "airongce"
+            ? "AIRONGCE Seedance 协议"
+            : "通用 HTTP 契约";
     this.logger.info(
       `提交画面生成任务：POST ${submitUrl}（${protocolLabel}，模型 ${this.settings.model}）`,
     );

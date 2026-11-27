@@ -279,6 +279,59 @@ test("loadConfig 把 One API Lumi 的 /v1 前缀收回域名并迁移旧 Seedanc
   assert.equal(config.videoGen.resultPath, "content.video_url");
 });
 
+test("loadConfig 把 AIRONGCE 接口识别为 airongce 渠道并使用文档默认路径", async () => {
+  const dir = await makeTempDir();
+  await fs.mkdir(path.join(dir, "data"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "data", "settings.json"),
+    JSON.stringify({
+      videoGen: {
+        channel: "airongce-seedance",
+        provider: "http",
+        protocol: "airongce",
+        baseUrl: "http://175.6.32.68:8081",
+        model: "seedance2.5",
+        submitPath: "/v1/videos",
+        pollPath: "/v1/videos/{id}",
+        pollIntervalMs: 10000,
+        apiKey: "sk-airongce",
+      },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.channel, "airongce-seedance");
+  assert.equal(config.videoGen.protocol, "airongce");
+  assert.equal(config.videoGen.baseUrl, "http://175.6.32.68:8081");
+  assert.equal(config.videoGen.submitPath, "/v1/videos");
+  assert.equal(config.videoGen.pollPath, "/v1/videos/{id}");
+  assert.equal(config.videoGen.pollIntervalMs, 10_000);
+  assert.equal(config.videoGen.model, "seedance2.5");
+});
+
+test("loadConfig 自动把 AIRONGCE 地址的 auto 协议纠正为 airongce", async () => {
+  const dir = await makeTempDir();
+  await fs.mkdir(path.join(dir, "data"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "data", "settings.json"),
+    JSON.stringify({
+      videoGen: {
+        provider: "http",
+        protocol: "auto",
+        baseUrl: "http://175.6.32.68:8081",
+        model: "seedance2.0-mini",
+        submitPath: "/v1/videos",
+        pollPath: "/v1/videos/{id}",
+        apiKey: "sk-airongce",
+      },
+    }),
+    "utf8",
+  );
+  const config = loadConfig({ cwd: dir, env: {} });
+  assert.equal(config.videoGen.channel, "airongce-seedance");
+  assert.equal(config.videoGen.protocol, "airongce");
+});
+
 test("loadConfig 把旧版词易 Token 的 Seedance 设置迁到 One API Lumi", async () => {
   const dir = await makeTempDir();
   await fs.mkdir(path.join(dir, "data"), { recursive: true });

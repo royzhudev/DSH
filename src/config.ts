@@ -19,6 +19,12 @@ export const ONEAPI_LUMI_VIDEO_BASE_URL = "https://nexus.cytain.com";
 export const ONEAPI_LUMI_TASKS_PATH = "/api/v3/contents/generations/tasks";
 export const ONEAPI_LUMI_TASK_PATH = "/api/v3/contents/generations/tasks/{id}";
 
+/** AIRONGCE 聚合平台的 Seedance 视频接口（文档给的 Base URL 是 HTTP + 非标准端口）。 */
+export const AIRONGCE_VIDEO_BASE_URL = "http://175.6.32.68:8081";
+export const AIRONGCE_VIDEO_SUBMIT_PATH = "/v1/videos";
+export const AIRONGCE_VIDEO_POLL_PATH = "/v1/videos/{id}";
+export const AIRONGCE_VIDEO_CONTENT_PATH = "/v1/videos/{id}/content";
+
 export interface VideoGenModelOption {
   id: string;
   label: string;
@@ -56,6 +62,38 @@ export const SEEDANCE_MODEL_OPTIONS: readonly VideoGenModelOption[] = [
     hint: "轻量模型，时长 4–15 秒，分辨率最高 720p。",
     minDurationSec: 4,
     maxDurationSec: 15,
+  },
+] as const;
+
+/** AIRONGCE 文档里的 Seedance 模型名；与 One API Lumi 的模型 id 不同，不能混用。 */
+export const AIRONGCE_SEEDANCE_MODEL_OPTIONS: readonly VideoGenModelOption[] = [
+  {
+    id: "Seedance 2.0",
+    label: "Seedance 2.0（4–15 秒，480p/720p/1080p）",
+    hint: "标准画质，支持 1080p；参考图用 images，首帧用 first_frame_url。",
+    minDurationSec: 4,
+    maxDurationSec: 15,
+  },
+  {
+    id: "seedance2.0-fast",
+    label: "Seedance 2.0 Fast（4–15 秒，480p/720p）",
+    hint: "速度和价格平衡，最高 720p。",
+    minDurationSec: 4,
+    maxDurationSec: 15,
+  },
+  {
+    id: "seedance2.0-mini",
+    label: "Seedance 2.0 Mini（4–15 秒，480p/720p）",
+    hint: "最便宜的测试/批量模型，最高 720p。",
+    minDurationSec: 4,
+    maxDurationSec: 15,
+  },
+  {
+    id: "seedance2.5",
+    label: "Seedance 2.5（4–30 秒，480p/720p/1080p）",
+    hint: "支持更长时长和更强的编辑/续写，4K 与 Draft 暂不开放。",
+    minDurationSec: 4,
+    maxDurationSec: 30,
   },
 ] as const;
 
@@ -202,11 +240,12 @@ export function isImageGenEnabled(imageGen: AppConfig["imageGen"]): boolean {
   return imageGen.provider === "bailian" && Boolean(imageGen.apiKey);
 }
 
-const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic", "seedance"] as const;
+const VIDEO_GEN_PROTOCOLS = ["auto", "dashscope", "generic", "seedance", "airongce"] as const;
 const VIDEO_GEN_CHANNELS: VideoGenChannel[] = [
   "none",
   "bailian-wan3",
   "aggregator-seedance2",
+  "airongce-seedance",
   "custom",
 ];
 
@@ -253,6 +292,21 @@ const BAILIAN_WAN3_FIELDS: VideoGenChannelFields = {
   submitPath: DASHSCOPE_VIDEO_SUBMIT_PATH,
   pollPath: DASHSCOPE_VIDEO_POLL_PATH,
   pollIntervalMs: 3000,
+  timeoutMs: 600_000,
+  clipDurationSec: 5,
+  resultPath: "",
+};
+
+const AIRONGCE_SEEDANCE_FIELDS: VideoGenChannelFields = {
+  channel: "airongce-seedance",
+  provider: "http",
+  protocol: "airongce",
+  baseUrl: AIRONGCE_VIDEO_BASE_URL,
+  model: AIRONGCE_SEEDANCE_MODEL_OPTIONS[1]!.id,
+  editModel: "wan2.7-videoedit",
+  submitPath: AIRONGCE_VIDEO_SUBMIT_PATH,
+  pollPath: AIRONGCE_VIDEO_POLL_PATH,
+  pollIntervalMs: 10_000,
   timeoutMs: 600_000,
   clipDurationSec: 5,
   resultPath: "",
@@ -306,6 +360,18 @@ export const VIDEO_GEN_CHANNEL_OPTIONS: readonly VideoGenChannelOption[] = [
     fields: ONEAPI_LUMI_SEEDANCE_FIELDS,
   },
   {
+    channel: "airongce-seedance",
+    label: "AIRONGCE · Seedance",
+    description:
+      "AIRONGCE 聚合平台（175.6.32.68:8081）的 Seedance 2.0 / Fast / Mini / 2.5；地址、提交/查询路径、轮询参数已预置，只需填 API Key 并选择模型。参考图需公网 HTTPS；通过公网域名/IP 访问本控制台时会自动映射角色图。",
+    apiKeyLabel: "AIRONGCE API Key",
+    apiKeyHint: "在 AIRONGCE 控制台「令牌管理」创建，分组选 default，并确认账户余额充足。",
+    editSupported: false,
+    referenceImagesSupported: false,
+    models: AIRONGCE_SEEDANCE_MODEL_OPTIONS,
+    fields: AIRONGCE_SEEDANCE_FIELDS,
+  },
+  {
     channel: "custom",
     label: "自定义 HTTP 接口",
     description: "其他聚合平台或自建网关：手动填写接口协议、地址、模型与路径。",
@@ -331,6 +397,9 @@ export function videoGenChannelFields(
 export function inferVideoGenChannel(videoGen: VideoGenSettings): VideoGenChannel {
   if (videoGen.provider === "none") return "none";
   const model = videoGen.model.trim().toLowerCase();
+  if (videoGen.protocol === "airongce" || /175\.6\.32\.68/.test(videoGen.baseUrl)) {
+    return "airongce-seedance";
+  }
   if (videoGen.protocol === "seedance" || model.includes("seedance")) {
     return "aggregator-seedance2";
   }
@@ -582,7 +651,7 @@ function validateConfig(config: AppConfig): void {
     );
   }
   if (!VIDEO_GEN_PROTOCOLS.includes(config.videoGen.protocol)) {
-    throw new AppError("AI 画面生成的协议只能是 auto、dashscope、generic 或 seedance", {
+    throw new AppError("AI 画面生成的协议只能是 auto、dashscope、generic、seedance 或 airongce", {
       code: "CONFIG_INVALID",
     });
   }
@@ -847,6 +916,18 @@ function normalizeOneApiLumi(config: AppConfig): void {
 function normalizeVideoGenProtocol(config: AppConfig): void {
   migrateLegacySeedance(config);
   normalizeOneApiLumi(config);
+  // AIRONGCE 的文档地址是固定 IP；协议留 auto/generic 时按它的扁平 videos 协议发送。
+  if (/175\.6\.32\.68/.test(config.videoGen.baseUrl)) {
+    if (config.videoGen.protocol === "auto" || config.videoGen.protocol === "generic") {
+      config.videoGen.protocol = "airongce";
+    }
+    if (config.videoGen.submitPath === "/v1/videos/generations") {
+      config.videoGen.submitPath = AIRONGCE_VIDEO_SUBMIT_PATH;
+    }
+    if (config.videoGen.pollPath === "/v1/videos/generations/{id}") {
+      config.videoGen.pollPath = AIRONGCE_VIDEO_POLL_PATH;
+    }
+  }
   if (!isDashscopeBaseUrl(config.videoGen.baseUrl)) return;
   // 常见的手填错误：把完整接口地址（或 compatible-mode 地址）当成「服务地址」。
   // 百炼的异步视频接口固定挂在域名根下，这里收回域名，避免路径重复。

@@ -156,6 +156,38 @@ test("SettingsStore 选中 One API Lumi 渠道后只填 API Key，模型可切�
   assert.equal(config.videoGen.apiKey, "");
 });
 
+test("SettingsStore 选中 AIRONGCE 渠道后只填 API Key，模型可切换并可重启恢复", async () => {
+  const dir = await makeTempDir();
+  const { config, store } = await makeStore(dir);
+  const saved = await store.update({
+    videoGen: { channel: "airongce-seedance", apiKey: "sk-airongce" },
+  });
+  assert.equal(config.videoGen.channel, "airongce-seedance");
+  assert.equal(config.videoGen.provider, "http");
+  assert.equal(config.videoGen.protocol, "airongce");
+  assert.equal(config.videoGen.baseUrl, "http://175.6.32.68:8081");
+  assert.equal(config.videoGen.model, "seedance2.0-fast");
+  assert.equal(config.videoGen.submitPath, "/v1/videos");
+  assert.equal(config.videoGen.pollPath, "/v1/videos/{id}");
+  assert.equal(config.videoGen.resultPath, "");
+  assert.equal(config.videoGen.pollIntervalMs, 10_000);
+  assert.equal(config.videoGen.apiKey, "sk-airongce");
+  assert.equal(saved.videoGen.model, "seedance2.0-fast");
+  const airongce = saved.videoGenChannels.find((item) => item.channel === "airongce-seedance");
+  assert.equal(airongce?.models?.length, 4);
+  assert.equal(airongce?.fields?.model, "seedance2.0-fast");
+
+  await store.update({
+    videoGen: { channel: "airongce-seedance", model: "seedance2.5" },
+  });
+  assert.equal(config.videoGen.model, "seedance2.5");
+  const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
+  assert.equal(reloaded.videoGen.channel, "airongce-seedance");
+  assert.equal(reloaded.videoGen.protocol, "airongce");
+  assert.equal(reloaded.videoGen.model, "seedance2.5");
+  assert.equal(reloaded.videoGen.baseUrl, "http://175.6.32.68:8081");
+});
+
 test("SettingsStore 保存公网素材地址时生成随机令牌，清除地址时一并清除", async () => {
   const dir = await makeTempDir();
   const { config, store } = await makeStore(dir);

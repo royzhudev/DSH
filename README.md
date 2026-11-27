@@ -198,11 +198,11 @@ cp video-agent.config.example.json video-agent.config.json
 
 ### AI 画面生成
 
-`videoGen.channel` 支持 `bailian-wan3`（默认，阿里百炼 Wan 3.0）、`aggregator-seedance2`（One API Lumi 的 Seedance 2.5 / 2.0 / Fast / Mini）、`custom`（自定义 HTTP 网关）和 `none`。在设置页选中渠道后，模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成，**用户只需要填写 API Key（One API Lumi 再选一个模型）**；只有选 `custom` 时才需要手填其余参数。切到新渠道后请换填对应平台的 Key。
+`videoGen.channel` 支持 `bailian-wan3`（默认，阿里百炼 Wan 3.0）、`aggregator-seedance2`（One API Lumi 的 Seedance 2.5 / 2.0 / Fast / Mini）、`airongce-seedance`（AIRONGCE 的 Seedance 2.0 / Fast / Mini / 2.5）、`custom`（自定义 HTTP 网关）和 `none`。在设置页选中渠道后，模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成，**用户只需要填写 API Key（Seedance 渠道再选一个模型）**；只有选 `custom` 时才需要手填其余参数。切到新渠道后请换填对应平台的 Key。
 
 `videoGen.provider` 默认为 `http`，并预置阿里百炼（DashScope）的 Wan 视频模型：服务地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。**API Key 需要自己填写**（设置页「AI 画面生成」的 API Key，或 `VIDEOGEN_API_KEY`）；没有 Key 时任务会在本地预检阶段直接报错，不会发起付费请求。不需要 AI 画面时把渠道改为「不使用」。
 
-`protocol` 决定请求格式：`auto`（默认）按服务地址与模型名判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`protocol=seedance` 或模型名包含 `Seedance` 时用 One API Lumi 协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance` 或 `generic`。
+`protocol` 决定请求格式：`auto`（默认）按服务地址与模型名判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`protocol=seedance` 或模型名包含 `Seedance` 时用 One API Lumi 协议，AIRONGCE 的 `175.6.32.68:8081` 用 `airongce` 协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance`、`airongce` 或 `generic`。
 
 服务地址填的是阿里百炼（`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com`）时会自动纠正成异步写法：协议若是「通用 HTTP 契约」会改回 `dashscope`，提交/查询路径还是通用默认值（`/v1/videos/generations`）也会换成上面的百炼路径；只填域名（少了 `https://`）或把完整接口地址粘进「服务地址」也会被纠正。这样就不会出现平台报 `AccessDenied: current user api does not support synchronous calls`（该接口只支持异步调用，需要 `X-DashScope-Async: enable`）。
 
@@ -237,13 +237,31 @@ GET https://nexus.cytain.com/api/v3/contents/generations/tasks/{task_id}
 
 注意：One API 的 OpenAI 兼容前缀 `/v1` 不适用于 Seedance 任务接口（拼成 `/v1/api/v3/...` 会 404）；程序会自动把 `https://nexus.cytain.com/v1` 收回域名。该接口要求所有图片是**公网 HTTP(S) URL**，不接受 Base64 data URL 或 `asset://`。本程序的角色/道具图保存在本地；通过公网域名或公网 IP 访问控制台时，程序会自动识别当前访问地址，把角色/道具图以带签名的临时链接（默认 24 小时过期，只对角色库图片生效）提供给平台，含参考图的分镜可直接图生视频，不需要手填地址。仅在 localhost/局域网访问且未配置公网地址时，才会按纯文字生成并在任务告警里说明。
 
+AIRONGCE · Seedance（`protocol=airongce`）：
+
+```http
+POST http://175.6.32.68:8081/v1/videos
+Authorization: Bearer <API_KEY>
+
+{"model": "seedance2.0-fast", "prompt": "...", "duration": 5, "resolution": "720p", "ratio": "9:16", "images": ["https://example.com/ref.png"]}
+
+GET http://175.6.32.68:8081/v1/videos/{task_id}
+→ {"id": "...", "status": "SUCCESS"}
+
+GET http://175.6.32.68:8081/v1/videos/{task_id}/content
+Authorization: Bearer <API_KEY>
+→ 视频文件（不是 JSON 地址）
+```
+
+支持 `Seedance 2.0`（4–15 秒、480p/720p/1080p）、`seedance2.0-fast`、`seedance2.0-mini`（4–15 秒、最高 720p）和 `seedance2.5`（4–30 秒、480p/720p/1080p）；设置页可切换，默认 `seedance2.0-fast`。轮询状态为 `queued` / `NOT_START` / `SUBMITTED` / `QUEUED` / `IN_PROGRESS` / `SUCCESS` / `FAILURE`；成功后程序带 Bearer 调用 `/content` 下载视频，不会把 Key 发给外部 CDN。AIRONGCE 的参考图文档要求**公网 HTTPS**：有参考图时用 `images`，只有首帧时用 `first_frame_url`（比例 `adaptive`），两者不能混用；本地图片同样需要先在设置页配置公网素材地址。
+
 也可以把本控制台部署到外网后，在设置页「AI 画面生成 → 公网素材地址」显式填写它的公网地址（例如 `https://video.example.com`）并保存；服务端会生成随机令牌，通过 `/api/public/cast/{token}/{id}` 提供**无需登录、只能读取单张图**的只读链接。显式配置优先于自动识别，清除地址会同时清除令牌。图生视频的图片链接由 `/api/public/...` 提供，**不需要登录**（平台侧不会带 Cookie），反向代理需要放行该路径且不要加 Basic Auth；HTTPS 在代理上终止时请转发 `X-Forwarded-Proto`，否则自动识别会按 `http://` 生成链接。百炼 Wan 仍直接读本地图，不受影响，也不需要使用这个地址。
 
 > **百炼的两个相反报错**：提交时缺 `X-DashScope-Async: enable` 会报 `current user api does not support synchronous calls`；任务查询接口是同步的，给查询请求加了这个头则报 `current user api does not support asynchronous calls`。现在只在**提交**请求加异步头，查询不带。
 >
-> 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`，走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。该功能**仅阿里百炼渠道可用**：选 One API Lumi Seedance 渠道时页面会隐藏「局部修改」按钮，接口也会返回 409 提示切换渠道。
+> 成片局部修改用的是百炼视频编辑模型 `wan2.7-videoedit`，走同一个 API Key 与异步任务接口；一次只处理一镜，输出 720P，编辑后会自动保留原分镜音轨。该功能**仅阿里百炼渠道可用**：选 One API Lumi / AIRONGCE 等 Seedance 渠道时页面会隐藏「局部修改」按钮，接口也会返回 409 提示切换渠道。
 >
-> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0 或 One API Lumi · Seedance）→ 只填该渠道的 API Key（Seedance 再选模型）→ 保存设置 → 点「生成测试视频」。地址、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填；图生视频通常也不需要填公网素材地址，通过公网域名/IP 访问控制台即可自动识别。
+> 接入步骤：设置 → AI 画面生成 → 选择渠道（阿里百炼 Wan 3.0、One API Lumi · Seedance 或 AIRONGCE · Seedance）→ 只填该渠道的 API Key（Seedance 再选模型）→ 保存设置 → 点「生成测试视频」。地址、提交/查询路径、轮询与超时参数由渠道自动生成，不需要手填；图生视频通常也不需要填公网素材地址，通过公网域名/IP 访问控制台即可自动识别。
 >
 > 万相 3.0 的请求体是 `{model, input:{prompt, media[]}, parameters:{resolution, ratio, duration}}`：竖屏默认 `720P` + `9:16`，时长 2–30 秒；图生视频首帧放 `media:[{type:"first_frame", url:"data:image/png;base64,..."}]`。早期 Wan 模型仍用 `parameters.size` 与 `input.img_url`。
 >

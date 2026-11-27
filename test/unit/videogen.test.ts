@@ -1323,3 +1323,137 @@ test("HTTP 视频：One API Lumi Seedance 拒绝本地 data URL 参考图", asyn
       error instanceof AppError && error.code === "VIDEOGEN_PUBLIC_MEDIA_REQUIRED",
   );
 });
+
+test("HTTP 视频：AIRONGCE 用 first_frame_url/images 提交并带鉴权下载", async () => {
+  const dir = await makeTempDir();
+  const clip = path.join(dir, "airongce.mp4");
+  await generateTestClip(clip, { durationSec: 1, size: "160x160" });
+  const submitBodies: Array<Record<string, unknown>> = [];
+  const authHeaders: string[] = [];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const body = Buffer.concat(chunks).toString("utf8");
+    if (req.method === "POST" && url.pathname === "/v1/videos") {
+      submitBodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "task-air", task_id: "task-air", status: "queued" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/task-air") {
+      authHeaders.push(String(req.headers.authorization ?? ""));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "task-air", status: "SUCCESS" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/videos/task-air/content") {
+      authHeaders.push(String(req.headers.authorization ?? ""));
+      const buffer = await fs.readFile(clip);
+      res.writeHead(200, { "content-type": "video/mp4", "content-length": buffer.length });
+      res.end(buffer);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const config = makeTestConfig(dir, {
+      videoGen: {
+        channel: "airongce-seedance",
+        provider: "http",
+        protocol: "airongce",
+        baseUrl: `http://127.0.0.1:${port}`,
+        model: "seedance2.5",
+        apiKey: "sk-airongce",
+        submitPath: "/v1/videos",
+        pollPath: "/v1/videos/{id}",
+        resultPath: "",
+        pollIntervalMs: 200,
+        timeoutMs: 10_000,
+        clipDurationSec: 5,
+        fallbackToMaterials: true,
+      },
+    });
+    const provider = new HttpVideoGenProvider(config.videoGen, silentLogger);
+
+    const first = await provider.generate(
+      {
+        prompt: "从首帧开始缓慢推进",
+        durationSec: 8,
+        imageUrl: "https://cdn.example.com/first.png",
+      },
+      path.join(dir, "gen"),
+    );
+    assert.equal(first.model, "seedance2.5");
+    assert.equal(submitBodies.length, 1);
+    assert.equal(submitBodies[0]!.model, "seedance2.5");
+    assert.equal(submitBodies[0]!.duration, 8);
+    assert.equal(submitBodies[0]!.resolution, "720p");
+    assert.equal(submitBodies[0]!.ratio, "adaptive");
+    assert.equal(submitBodies[0]!.first_frame_url, "https://cdn.example.com/first.png");
+    assert.equal(submitBodies[0]!.images, undefined);
+
+    await provider.generate(
+      {
+        prompt: "保持两个角色一致",
+        durationSec: 5,
+        references: [
+          {
+            role: "character",
+            name: "角色甲",
+            file: "https://cdn.example.com/a.png",
+            url: "https://cdn.example.com/a.png",
+          },
+          {
+            role: "prop",
+            name: "道具乙",
+            file: "https://cdn.example.com/b.png",
+            url: "https://cdn.example.com/b.png",
+          },
+        ],
+      },
+      path.join(dir, "gen"),
+    );
+    assert.equal(submitBodies.length, 2);
+    assert.deepEqual(submitBodies[1]!.images, [
+      "https://cdn.example.com/a.png",
+      "https://cdn.example.com/b.png",
+    ]);
+    assert.equal(submitBodies[1]!.first_frame_url, undefined);
+    assert.equal(submitBodies[1]!.ratio, "9:16");
+
+    assert.ok(authHeaders.length >= 3, "提交后的查询与下载都应带鉴权头");
+    assert.ok(authHeaders.every((value) => value === "Bearer sk-airongce"));
+
+    // 文档要求 HTTPS；http:// 参考图提前报错，不提交付费任务。
+    await assert.rejects(
+      provider.generate(
+        {
+          prompt: "本地/http 参考图",
+          durationSec: 5,
+          references: [
+            {
+              role: "character",
+              name: "角色甲",
+              file: "http://example.com/a.png",
+              url: "http://example.com/a.png",
+            },
+          ],
+        },
+        path.join(dir, "gen"),
+      ),
+      (error: unknown) =>
+        error instanceof AppError && error.code === "VIDEOGEN_PUBLIC_MEDIA_REQUIRED",
+    );
+    assert.equal(submitBodies.length, 2, "不安全的参考图不应再提交任务");
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+  }
+});
