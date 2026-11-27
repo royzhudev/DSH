@@ -96,7 +96,10 @@ const state = {
   permissions: [],
   users: [],
   booted: false,
+  registration: { enabled: false, mailConfigured: false, allowedEmailDomains: [] },
+  authEmail: "",
   settings: null,
+  platformSettings: null,
   jobs: [],
   job: null,
   materials: [],
@@ -280,10 +283,116 @@ function initialOf(name) {
   return text.slice(0, 1).toUpperCase();
 }
 
+function authRegistration() {
+  return state.registration ?? { enabled: false, mailConfigured: false, allowedEmailDomains: [] };
+}
+
+const AUTH_COPY = {
+  setup: {
+    eyebrow: "First run",
+    title: "创建管理员账号",
+    description: "首次使用需要初始化管理员。之后成员可以通过邮箱验证码自助注册。",
+    submit: "创建并进入",
+  },
+  login: {
+    eyebrow: "Welcome back",
+    title: "登录工作台",
+    description: "使用邮箱和密码登录；历史管理员也可以直接用用户名登录。",
+    submit: "登录",
+  },
+  signup: {
+    eyebrow: "Create account",
+    title: "注册账号",
+    description: "填写邮箱，我们会发送 6 位验证码；验证通过后即可开始创作。",
+    submit: "发送验证码",
+  },
+  verify: {
+    eyebrow: "Verify email",
+    title: "验证邮箱",
+    description: "验证码已发送到你的邮箱，10 分钟内有效，只能使用一次。",
+    submit: "验证并登录",
+  },
+  forgot: {
+    eyebrow: "Reset password",
+    title: "忘记密码",
+    description: "填写注册邮箱，我们会发送重置验证码。",
+    submit: "发送重置验证码",
+  },
+  reset: {
+    eyebrow: "New password",
+    title: "重置密码",
+    description: "输入邮箱收到的验证码，并设置新密码。",
+    submit: "重置密码",
+  },
+};
+
+function authField(label, id, options = {}) {
+  const type = options.type ?? "text";
+  const autocomplete = options.autocomplete ?? "off";
+  const placeholder = options.placeholder ?? "";
+  const maxlength = options.maxlength ? ` maxlength="${options.maxlength}"` : "";
+  const required = options.required === false ? "" : " required";
+  const value = options.value ? ` value="${attr(options.value)}"` : "";
+  return `<div class="field">
+    <label for="${id}">${esc(label)}</label>
+    <input class="input" ${type !== "text" ? `type="${type}"` : ""} id="${id}" name="${id}" autocomplete="${autocomplete}" placeholder="${attr(placeholder)}"${maxlength}${required}${value} />
+  </div>`;
+}
+
 function renderAuth(mode, message = "") {
+  const copy = AUTH_COPY[mode] ?? AUTH_COPY.login;
+  const reg = authRegistration();
   const setup = mode === "setup";
   const screen = document.getElementById("auth-screen");
   screen.hidden = false;
+  const emailValue = state.authEmail ?? "";
+  const fields = (() => {
+    if (setup) {
+      return `${authField("显示名称", "auth-display", { placeholder: "例如 管理员", maxlength: 40, required: false })}
+        ${authField("用户名", "auth-username", { autocomplete: "username", placeholder: "3-32 位字母、数字或 _.-" })}
+        ${authField("密码", "auth-password", { type: "password", autocomplete: "new-password", placeholder: "至少 8 位" })}
+        ${authField("确认密码", "auth-confirm", { type: "password", autocomplete: "new-password", placeholder: "再次输入密码" })}`;
+    }
+    if (mode === "login") {
+      return `${authField("邮箱或用户名", "auth-username", { autocomplete: "username", placeholder: "you@example.com" })}
+        ${authField("密码", "auth-password", { type: "password", autocomplete: "current-password", placeholder: "输入密码" })}`;
+    }
+    if (mode === "signup") {
+      return `${authField("邮箱", "auth-email", { type: "email", autocomplete: "email", placeholder: "you@example.com" })}
+        ${authField("显示名称（可选）", "auth-display", { placeholder: "例如 小王", maxlength: 40, required: false })}
+        ${authField("密码", "auth-password", { type: "password", autocomplete: "new-password", placeholder: "至少 8 位" })}
+        ${authField("确认密码", "auth-confirm", { type: "password", autocomplete: "new-password", placeholder: "再次输入密码" })}`;
+    }
+    if (mode === "verify") {
+      return `${authField("邮箱", "auth-email", { type: "email", autocomplete: "email", placeholder: "you@example.com", value: emailValue })}
+        ${authField("6 位验证码", "auth-code", { inputmode: "numeric", autocomplete: "one-time-code", placeholder: "000000", maxlength: 6 })}`;
+    }
+    if (mode === "forgot") {
+      return authField("注册邮箱", "auth-email", { type: "email", autocomplete: "email", placeholder: "you@example.com", value: emailValue });
+    }
+    return `${authField("注册邮箱", "auth-email", { type: "email", autocomplete: "email", placeholder: "you@example.com", value: emailValue })}
+      ${authField("6 位验证码", "auth-code", { inputmode: "numeric", autocomplete: "one-time-code", placeholder: "000000", maxlength: 6 })}
+      ${authField("新密码", "auth-password", { type: "password", autocomplete: "new-password", placeholder: "至少 8 位" })}
+      ${authField("确认新密码", "auth-confirm", { type: "password", autocomplete: "new-password", placeholder: "再次输入新密码" })}`;
+  })();
+  const links = (() => {
+    if (setup) return "";
+    const parts = [];
+    if (mode !== "login") parts.push(`<button class="btn-link" type="button" data-auth-mode="login">返回登录</button>`);
+    if (mode === "login") {
+      if (reg.enabled && reg.mailConfigured) {
+        parts.push(`<button class="btn-link" type="button" data-auth-mode="signup">注册新账号</button>`);
+      }
+      if (reg.mailConfigured) parts.push(`<button class="btn-link" type="button" data-auth-mode="forgot">忘记密码</button>`);
+    }
+    if (mode === "verify") parts.push(`<button class="btn-link" type="button" data-auth-action="resend">重新发送验证码</button>`);
+    if (mode === "forgot") parts.push(`<button class="btn-link" type="button" data-auth-mode="login">返回登录</button>`);
+    return parts.length ? `<div class="auth-links">${parts.join("<span>·</span>")}</div>` : "";
+  })();
+  const registrationHint =
+    !setup && mode === "login" && !(reg.enabled && reg.mailConfigured)
+      ? `<p class="auth-foot">注册功能暂未开放，请联系管理员开通账号。${reg.mailConfigured ? "" : "邮件通道未配置，无法发送验证码。"}</p>`
+      : `<p class="auth-foot">${setup ? "账号保存在本机 data/users.json，密码仅保存加盐哈希。" : "验证码邮件由平台统一发送；请勿把验证码告诉他人。"}</p>`;
   screen.innerHTML = `<div class="auth-card">
     <div class="auth-brand">
       <span class="brand-mark" aria-hidden="true">
@@ -294,89 +403,183 @@ function renderAuth(mode, message = "") {
       <span class="brand-text"><strong>视频创作智能体</strong><small>AI VIDEO STUDIO</small></span>
     </div>
     <div class="auth-head">
-      <p class="eyebrow">${setup ? "First run" : "Welcome back"}</p>
-      <h1>${setup ? "创建管理员账号" : "登录工作台"}</h1>
-      <p>${setup ? "首次使用需要初始化管理员。之后可在「设置 → 用户与权限」添加成员并分配菜单。" : "登录后按账号权限显示可用菜单。账号由管理员在设置中添加。"}</p>
+      <p class="eyebrow">${copy.eyebrow}</p>
+      <h1>${copy.title}</h1>
+      <p>${copy.description}</p>
     </div>
     <form class="auth-form" id="auth-form" data-mode="${mode}" novalidate>
-      ${
-        setup
-          ? `<div class="field">
-              <label for="auth-display">显示名称</label>
-              <input class="input" id="auth-display" name="displayName" autocomplete="name" placeholder="例如 管理员" maxlength="40" />
-            </div>`
-          : ""
-      }
-      <div class="field">
-        <label for="auth-username">用户名</label>
-        <input class="input" id="auth-username" name="username" autocomplete="username" placeholder="输入用户名" required autofocus />
-      </div>
-      <div class="field">
-        <label for="auth-password">密码</label>
-        <input class="input" type="password" id="auth-password" name="password" autocomplete="${setup ? "new-password" : "current-password"}" placeholder="${setup ? "至少 8 位" : "输入密码"}" required />
-      </div>
-      ${
-        setup
-          ? `<div class="field">
-              <label for="auth-confirm">确认密码</label>
-              <input class="input" type="password" id="auth-confirm" name="confirm" autocomplete="new-password" placeholder="再次输入密码" required />
-            </div>`
-          : ""
-      }
+      ${fields}
       <div class="auth-error" id="auth-error" ${message ? "" : "hidden"}>${esc(message)}</div>
-      <button class="btn btn-primary btn-block" type="submit">${setup ? "创建并进入" : "登录"}</button>
+      <button class="btn btn-primary btn-block" type="submit">${copy.submit}</button>
     </form>
-    <p class="auth-foot">${setup ? "账号保存在本机 data/users.json，密码仅保存加盐哈希。" : "忘记密码时，请联系管理员在设置中重置。"}</p>
+    ${links}
+    ${registrationHint}
   </div>`;
   hydrateIcons();
 }
 
 function bindAuthForm() {
   const form = document.getElementById("auth-form");
-  if (!form) return;
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void submitAuth(form);
-  });
-  form.addEventListener("input", () => {
-    const error = document.getElementById("auth-error");
-    if (error) error.hidden = true;
+  if (form) {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void submitAuth(form);
+    });
+    form.addEventListener("input", () => {
+      const error = document.getElementById("auth-error");
+      if (error) error.hidden = true;
+    });
+  }
+  for (const button of document.querySelectorAll("[data-auth-mode]")) {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.authMode;
+      formEmail();
+      showAuth(mode);
+    });
+  }
+  document.querySelector('[data-auth-action="resend"]')?.addEventListener("click", () => {
+    void resendAuthCode();
   });
 }
 
-async function submitAuth(form) {
-  const mode = form.dataset.mode === "setup" ? "setup" : "login";
-  const username = form.querySelector("#auth-username")?.value.trim() ?? "";
-  const password = form.querySelector("#auth-password")?.value ?? "";
-  const displayName = form.querySelector("#auth-display")?.value.trim() ?? "";
-  const confirm = form.querySelector("#auth-confirm")?.value ?? password;
+function formEmail() {
+  const email = document.getElementById("auth-email")?.value.trim();
+  if (email) state.authEmail = email;
+}
+
+function authFail(text) {
   const errorEl = document.getElementById("auth-error");
-  const button = form.querySelector('button[type="submit"]');
-  const fail = (text) => {
-    if (errorEl) {
-      errorEl.hidden = false;
-      errorEl.textContent = text;
-    }
-    if (button) {
-      button.disabled = false;
-      button.textContent = mode === "setup" ? "创建并进入" : "登录";
-    }
-  };
-  if (!username) return fail("请填写用户名");
-  if (password.length < 8) return fail("密码至少需要 8 位");
-  if (mode === "setup" && password !== confirm) return fail("两次输入的密码不一致");
+  if (errorEl) {
+    errorEl.hidden = false;
+    errorEl.textContent = text;
+  }
+  const button = document.querySelector('#auth-form button[type="submit"]');
+  if (button) button.disabled = false;
+  const mode = document.getElementById("auth-form")?.dataset.mode;
+  const copy = AUTH_COPY[mode] ?? AUTH_COPY.login;
+  if (button) button.textContent = copy.submit;
+}
+
+function authPending(text) {
+  const button = document.querySelector('#auth-form button[type="submit"]');
   if (button) {
     button.disabled = true;
-    button.innerHTML = `<span class="spinner"></span> ${mode === "setup" ? "正在创建…" : "登录中…"}`;
+    button.innerHTML = `<span class="spinner"></span> ${esc(text)}`;
   }
+}
+
+async function submitAuth(form) {
+  const mode = form.dataset.mode ?? "login";
+  const value = (id) => form.querySelector(`#${id}`)?.value ?? "";
+  const email = value("auth-email").trim().toLowerCase();
+  const password = value("auth-password");
+  const confirm = value("auth-confirm") || password;
+  const code = value("auth-code").trim();
+  if (mode === "login") {
+    const login = value("auth-username").trim();
+    if (!login) return authFail("请填写邮箱或用户名");
+    if (!password) return authFail("请填写密码");
+    authPending("登录中…");
+    try {
+      const data = await api("/api/auth/login", { method: "POST", body: { username: login, password } });
+      state.user = data.user;
+      state.permissions = data.menus ?? [];
+      await startApp();
+    } catch (error) {
+      authFail(error.message);
+    }
+    return;
+  }
+  if (mode === "setup") {
+    const username = value("auth-username").trim();
+    if (!username) return authFail("请填写用户名");
+    if (password.length < 8) return authFail("密码至少需要 8 位");
+    if (password !== confirm) return authFail("两次输入的密码不一致");
+    authPending("正在创建…");
+    try {
+      const data = await api("/api/auth/setup", {
+        method: "POST",
+        body: { username, displayName: value("auth-display").trim(), password },
+      });
+      state.user = data.user;
+      state.permissions = data.menus ?? [];
+      await startApp();
+    } catch (error) {
+      authFail(error.message);
+    }
+    return;
+  }
+  if (mode === "signup") {
+    if (!email) return authFail("请填写邮箱");
+    if (password.length < 8) return authFail("密码至少需要 8 位");
+    if (password !== confirm) return authFail("两次输入的密码不一致");
+    authPending("发送中…");
+    try {
+      await api("/api/auth/signup", {
+        method: "POST",
+        body: { email, password, displayName: value("auth-display").trim() },
+      });
+      state.authEmail = email;
+      showAuth("verify", "验证码已发送，请查收邮件");
+    } catch (error) {
+      authFail(error.message);
+    }
+    return;
+  }
+  if (mode === "verify") {
+    if (!email) return authFail("请填写邮箱");
+    if (!/^\d{6}$/.test(code)) return authFail("请输入 6 位数字验证码");
+    authPending("验证中…");
+    try {
+      const data = await api("/api/auth/verify-email", { method: "POST", body: { email, code } });
+      state.user = data.user;
+      state.permissions = data.menus ?? [];
+      await startApp();
+    } catch (error) {
+      authFail(error.message);
+    }
+    return;
+  }
+  if (mode === "forgot") {
+    if (!email) return authFail("请填写注册邮箱");
+    authPending("发送中…");
+    try {
+      await api("/api/auth/forgot-password", { method: "POST", body: { email } });
+      state.authEmail = email;
+      showAuth("reset", "如果该邮箱已注册，重置验证码已发送");
+    } catch (error) {
+      authFail(error.message);
+    }
+    return;
+  }
+  if (mode === "reset") {
+    if (!email) return authFail("请填写注册邮箱");
+    if (!/^\d{6}$/.test(code)) return authFail("请输入 6 位数字验证码");
+    if (password.length < 8) return authFail("新密码至少需要 8 位");
+    if (password !== confirm) return authFail("两次输入的新密码不一致");
+    authPending("重置中…");
+    try {
+      await api("/api/auth/reset-password", { method: "POST", body: { email, code, password } });
+      state.authEmail = email;
+      showAuth("login", "密码已重置，请用新密码登录");
+    } catch (error) {
+      authFail(error.message);
+    }
+  }
+}
+
+async function resendAuthCode() {
+  const email = (document.getElementById("auth-email")?.value ?? state.authEmail ?? "").trim().toLowerCase();
+  if (!email) return authFail("请填写邮箱");
+  const button = document.querySelector('[data-auth-action="resend"]');
+  if (button) button.disabled = true;
   try {
-    const body = mode === "setup" ? { username, displayName, password } : { username, password };
-    const data = await api(`/api/auth/${mode}`, { method: "POST", body });
-    state.user = data.user;
-    state.permissions = data.menus ?? [];
-    await startApp();
+    await api("/api/auth/resend-code", { method: "POST", body: { email } });
+    toast("验证码已重新发送", "success");
   } catch (error) {
-    fail(error.message);
+    toast(error.message, "error");
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
@@ -2526,7 +2729,7 @@ function secretField(id, label, secret = {}, hintText = "") {
     <label for="${id}">${label}</label>
     <input class="input" type="password" id="${id}" autocomplete="new-password" placeholder="${attr(placeholder)}" />
     <div class="row-between">
-      <span class="hint">${esc(hintText || "保存在本机 data/settings.json，不会回显")}</span>
+      <span class="hint">${esc(hintText || "只保存在你自己的账号设置里，不会回显")}</span>
       ${set ? `<label class="switch"><input type="checkbox" id="${id}-clear" /><span class="track"></span><span>清除</span></label>` : ""}
     </div>
   </div>`;
@@ -2566,9 +2769,9 @@ function userRowHtml(user) {
       <div class="user-name-line">
         <strong>${esc(user.displayName)}</strong>
         ${isSelf ? `<span class="pill pill-soft">我</span>` : ""}
-        ${user.disabled ? `<span class="pill pill-danger">已禁用</span>` : ""}
+        ${user.disabled ? `<span class="pill pill-danger">已禁用</span>` : user.email && !user.emailVerified ? `<span class="pill pill-warning">邮箱未验证</span>` : ""}
       </div>
-      <div class="user-meta">@${esc(user.username)} · ${user.role === "admin" ? "管理员" : "成员"} · 创建于 ${formatDate(user.createdAt)}${user.lastLoginAt ? ` · 最近登录 ${formatDate(user.lastLoginAt)}` : ""}</div>
+      <div class="user-meta">@${esc(user.username)}${user.email ? ` · ${esc(user.email)}${user.emailVerified ? "" : "（未验证）"}` : ""} · ${user.role === "admin" ? "管理员" : "成员"} · 创建于 ${formatDate(user.createdAt)}${user.lastLoginAt ? ` · 最近登录 ${formatDate(user.lastLoginAt)}` : ""}</div>
       <div class="user-perms">${permissionChips(user)}</div>
     </div>
     <div class="user-actions">
@@ -2644,12 +2847,11 @@ function userDialogHtml() {
 function usersCardHtml() {
   return `<section class="card settings-card users-card">
     <div class="card-head">
-      <div><div class="card-title">用户与权限</div><div class="card-sub">不同成员登录后只看到被勾选的菜单；服务端 API 同样按权限校验</div></div>
-      <button class="btn btn-primary btn-sm" id="add-user" type="button">${icon("plus", 15)} 添加用户</button>
+      <div><div class="card-title">用户与权限</div><div class="card-sub">成员通过邮箱验证码自助注册；管理员可调整权限、重置密码或禁用账号</div></div>
     </div>
     <div class="card-body">
       <div class="user-list" id="user-list">${state.users.map(userRowHtml).join("")}</div>
-      <div class="settings-note">${icon("shield", 16)}<span>管理员默认拥有全部菜单和用户管理权限。成员权限保存后立即生效；删除或禁用账号会立刻注销其登录会话。</span></div>
+      <div class="settings-note">${icon("shield", 16)}<span>用户注册的邮箱与验证状态见上方列表；由管理员创建的历史账号仍用用户名登录。成员权限保存后立即生效；删除或禁用账号会立刻注销其登录会话。</span></div>
     </div>
   </section>
   ${userDialogHtml()}`;
@@ -2831,23 +3033,249 @@ async function deleteUser(id) {
   }
 }
 
+function platformCardHtml(platform, douyin) {
+  if (!platform) return "";
+  const mail = platform.mail ?? {};
+  const registration = platform.registration ?? { enabled: false, allowedEmailDomains: [] };
+  const app = platform.douyin ?? {};
+  const redirectUri = app.effectiveRedirectUri ?? "";
+  const mailReady = Boolean(mail.enabled && mail.host && mail.from);
+  return `<section class="card settings-card" id="platform-settings-card">
+    <div class="card-head">
+      <div><div class="card-title">平台设置（仅管理员）</div><div class="card-sub">邮件通道、注册开关、部署公网地址与抖音应用凭证；影响所有用户</div></div>
+      <span class="pill ${mailReady ? "pill-success" : "pill-warning"}">${mailReady ? "邮件已配置" : "邮件未配置"}</span>
+    </div>
+    <div class="card-body">
+      <div class="settings-note">${icon("shield", 16)}<span>个人模型 API Key 由每个用户在「设置」里各自填写；这里只放平台级配置。SMTP 授权码只保存在本机 <span class="mono">data/settings.json</span>，不会回显、不会写日志。</span></div>
+      <div class="field">
+        <label for="platform-public-base-url">部署公网地址</label>
+        <input class="input" id="platform-public-base-url" value="${attr(platform.server?.publicBaseUrl ?? "")}" placeholder="https://video.example.com" />
+        <span class="hint">可选。填写后作为所有用户「公网素材地址」的默认值，用于把角色/道具图转成平台可访问的签名链接；个人仍可覆盖。</span>
+      </div>
+
+      <div class="settings-divider"></div>
+      <div class="card-title">邮件通道（SMTP）</div>
+      ${switchField("mail-enabled", "启用邮件通道", Boolean(mail.enabled), "注册验证码、找回密码都依赖它。没有可用通道时注册功能不可用。")}
+      <div class="field-grid-3">
+        <div class="field"><label for="mail-host">SMTP 服务器</label><input class="input" id="mail-host" value="${attr(mail.host ?? "")}" placeholder="smtp.example.com" /></div>
+        ${numberField("mail-port", "端口", mail.port ?? 465, { min: 1, max: 65535 })}
+        <div class="field"><label for="mail-encryption">加密方式</label>
+          <select class="select" id="mail-encryption">
+            <option value="ssl" ${mail.secure ? "selected" : ""}>SSL（465）</option>
+            <option value="starttls" ${!mail.secure ? "selected" : ""}>STARTTLS（587）</option>
+          </select>
+          <span class="hint">465 用 SSL；587 用 STARTTLS；25 端口多数服务器不开放。</span>
+        </div>
+      </div>
+      <div class="field-grid-2">
+        <div class="field"><label for="mail-user">账号</label><input class="input" id="mail-user" value="${attr(mail.user ?? "")}" placeholder="noreply@example.com" autocomplete="off" /></div>
+        <div class="field"><label for="mail-from">发件地址</label><input class="input" id="mail-from" value="${attr(mail.from ?? "")}" placeholder="留空使用账号地址" autocomplete="off" /></div>
+      </div>
+      ${secretField("mail-password", "SMTP 授权码 / 密码", { set: mail.passwordSet, hint: mail.passwordHint }, "授权码只保存在本机设置文件")}
+      <div class="field"><label for="mail-from-name">发件人名称</label><input class="input" id="mail-from-name" value="${attr(mail.fromName ?? "")}" maxlength="60" /></div>
+      <div class="test-row">
+        <input class="input" id="mail-test-to" placeholder="收件邮箱，用于测试" style="max-width:260px" />
+        <button class="btn btn-ghost btn-sm" type="button" id="mail-test-btn">发送测试邮件</button>
+        <span class="test-result" id="mail-test-result">先保存再测试</span>
+      </div>
+
+      <div class="settings-divider"></div>
+      <div class="card-title">注册</div>
+      ${switchField("registration-enabled", "开放邮箱验证码注册", Boolean(registration.enabled), "关闭后只能由管理员创建账号。控制台走 HTTPS 时再开放注册，避免验证码在明文网络里被截获。")}
+      <div class="field">
+        <label for="registration-domains">允许注册的邮箱域名 <span class="optional">留空不限制</span></label>
+        <input class="input" id="registration-domains" value="${attr((registration.allowedEmailDomains ?? []).join(", "))}" placeholder="example.com, company.cn" />
+      </div>
+
+      <div class="settings-divider"></div>
+      <div class="card-title">抖音发布</div>
+      <div class="field">
+        <label for="douyin-mode">接入方式</label>
+        <select class="select" id="douyin-mode">
+          <option value="miniapp" ${app.mode === "miniapp" ? "selected" : ""}>个人号小程序投稿（人工确认发布）</option>
+          <option value="open-platform" ${app.mode !== "miniapp" ? "selected" : ""}>开放平台应用（企业/网站应用，自动发布）</option>
+        </select>
+      </div>
+      <div class="settings-note" id="douyin-miniapp-note" ${app.mode === "miniapp" ? "" : "hidden"}>${icon("info", 16)}<span>个人号小程序投稿：在抖音开放平台创建个人主体小程序，申请「短视频自主挂载」并绑定有效粉丝超过 500 的普通抖音号。成片先下载到手机相册，再在小程序里选择视频、由抖音发布器确认发布；不需要 client_key / client_secret。</span></div>
+      <div id="douyin-credentials-fields" ${app.mode === "miniapp" ? "hidden" : ""}>
+        <div class="field-grid-2">
+          <div class="field"><label for="douyin-client-key">client_key</label><input class="input" id="douyin-client-key" value="${attr(app.clientKey ?? "")}" /></div>
+          <div class="field"><label for="douyin-scope">scope</label><input class="input" id="douyin-scope" value="${attr(app.scope ?? "")}" /></div>
+        </div>
+        ${secretField("douyin-client-secret", "client_secret", { set: app.clientSecretSet, hint: app.clientSecretHint })}
+      </div>
+      <div id="douyin-open-platform-fields" ${app.mode === "miniapp" ? "hidden" : ""}>
+        <div class="field-grid-2">
+          <div class="field"><label for="douyin-redirect-uri">回调地址 <span class="optional">留空使用默认</span></label><input class="input" id="douyin-redirect-uri" value="${attr(app.redirectUri ?? "")}" placeholder="${attr(redirectUri)}" /></div>
+          <div class="field"><label for="douyin-api-base">接口地址</label><input class="input" id="douyin-api-base" value="${attr(app.apiBaseUrl ?? "")}" /></div>
+        </div>
+        <div class="settings-note">${icon("shield", 16)}<span>当前生效回调地址：<span class="mono">${esc(redirectUri)}</span>。授权令牌按用户保存；管理员配置的应用凭证对所有用户生效。</span></div>
+      </div>
+      <div class="test-row">
+        <button class="btn btn-ghost btn-sm" type="button" data-test="douyin">测试发布配置</button>
+        <span class="test-result" id="test-douyin-result">测试使用已保存的配置</span>
+        ${app.mode !== "miniapp" && douyin?.configured ? `<button class="btn btn-ghost btn-sm" type="button" id="settings-connect-douyin">${icon("external", 15)} ${douyin.authorized ? "重新授权" : "授权抖音"}</button>` : ""}
+        ${app.mode !== "miniapp" && douyin?.authorized ? `<button class="btn btn-danger btn-sm" type="button" id="settings-disconnect-douyin">断开连接</button>` : ""}
+      </div>
+
+      <div class="save-bar platform-save-bar">
+        <span class="save-state" id="platform-save-state">平台设置保存后立即生效</span>
+        <button class="btn btn-primary" id="save-platform-settings" type="button">保存平台设置</button>
+      </div>
+    </div>
+  </section>`;
+}
+
+function platformReadonlyCardHtml() {
+  return `<section class="card settings-card">
+    <div class="card-head"><div><div class="card-title">平台设置</div><div class="card-sub">邮件通道、注册开关与抖音应用凭证由管理员统一配置</div></div></div>
+    <div class="card-body"><div class="settings-note">${icon("info", 16)}<span>如需开通邮箱注册或调整抖音发布配置，请联系管理员。</span></div></div>
+  </section>`;
+}
+
+function collectPlatformSettings() {
+  const value = (id) => document.getElementById(id)?.value ?? "";
+  const checked = (id) => Boolean(document.getElementById(id)?.checked);
+  const secret = (id) => {
+    const clear = document.getElementById(`${id}-clear`);
+    if (clear?.checked) return null;
+    const raw = value(id).trim();
+    return raw ? raw : undefined;
+  };
+  const encrypted = value("mail-encryption") === "ssl";
+  const mail = {
+    enabled: checked("mail-enabled"),
+    host: value("mail-host").trim(),
+    port: Number(value("mail-port")),
+    secure: encrypted,
+    starttls: !encrypted,
+    user: value("mail-user").trim(),
+    from: value("mail-from").trim(),
+    fromName: value("mail-from-name").trim(),
+  };
+  const password = secret("mail-password");
+  if (password !== undefined) mail.password = password;
+  const douyin = {
+    mode: value("douyin-mode") || "open-platform",
+    clientKey: value("douyin-client-key").trim(),
+    scope: value("douyin-scope").trim(),
+    redirectUri: value("douyin-redirect-uri").trim(),
+    apiBaseUrl: value("douyin-api-base").trim(),
+  };
+  const clientSecret = secret("douyin-client-secret");
+  if (clientSecret !== undefined) douyin.clientSecret = clientSecret;
+  return {
+    server: { publicBaseUrl: value("platform-public-base-url").trim() },
+    mail,
+    registration: {
+      enabled: checked("registration-enabled"),
+      allowedEmailDomains: value("registration-domains")
+        .split(/[,;\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    },
+    douyin,
+  };
+}
+
+async function savePlatformSettings() {
+  const button = document.getElementById("save-platform-settings");
+  if (!button) return;
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    const data = await api("/api/settings/platform", {
+      method: "PUT",
+      body: collectPlatformSettings(),
+    });
+    state.platformSettings = data.settings;
+    toast("平台设置已保存", "success");
+    const scrollY = window.scrollY;
+    await renderSettings();
+    window.scrollTo(0, scrollY);
+  } catch (error) {
+    toast(error.message, "error");
+    button.disabled = false;
+    button.textContent = "保存平台设置";
+  }
+}
+
+async function sendMailTest() {
+  const button = document.getElementById("mail-test-btn");
+  const result = document.getElementById("mail-test-result");
+  const to = (document.getElementById("mail-test-to")?.value ?? "").trim();
+  if (!button || !result) return;
+  if (!to) {
+    result.textContent = "请先填写收件邮箱";
+    result.className = "test-result fail";
+    return;
+  }
+  button.disabled = true;
+  result.textContent = "发送中…";
+  result.className = "test-result";
+  try {
+    await api("/api/settings/mail/test", { method: "POST", body: { to } });
+    result.textContent = "SMTP 已受理并返回成功，请检查收件箱";
+    result.className = "test-result ok";
+  } catch (error) {
+    result.textContent = `发送失败：${error.message}`;
+    result.className = "test-result fail";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function bindPlatformSettings() {
+  document.getElementById("save-platform-settings")?.addEventListener("click", () => {
+    void savePlatformSettings();
+  });
+  document.getElementById("mail-test-btn")?.addEventListener("click", () => {
+    void sendMailTest();
+  });
+  const modeSelect = document.getElementById("douyin-mode");
+  const syncDouyinMode = () => {
+    const miniapp = (modeSelect?.value ?? "open-platform") === "miniapp";
+    const note = document.getElementById("douyin-miniapp-note");
+    const credentials = document.getElementById("douyin-credentials-fields");
+    const openFields = document.getElementById("douyin-open-platform-fields");
+    if (note) note.hidden = !miniapp;
+    if (credentials) credentials.hidden = miniapp;
+    if (openFields) openFields.hidden = miniapp;
+    const connect = document.getElementById("settings-connect-douyin");
+    const disconnect = document.getElementById("settings-disconnect-douyin");
+    if (connect) connect.hidden = miniapp;
+    if (disconnect) disconnect.hidden = miniapp;
+  };
+  modeSelect?.addEventListener("change", syncDouyinMode);
+  syncDouyinMode();
+  document.getElementById("settings-connect-douyin")?.addEventListener("click", () => {
+    void connectDouyin();
+  });
+  document.getElementById("settings-disconnect-douyin")?.addEventListener("click", () => {
+    void disconnectDouyin();
+  });
+}
+
 async function renderSettings() {
   setPage("设置", "设置");
   view.innerHTML = loadingView("正在读取设置…");
   const isAdmin = state.user?.role === "admin";
-  const [settingsData, douyin, usersData] = await Promise.all([
+  const [settingsData, douyin, usersData, platformData] = await Promise.all([
     api("/api/settings"),
     api("/api/douyin/status").catch(() => null),
     isAdmin ? api("/api/users") : Promise.resolve({ users: [] }),
+    isAdmin ? api("/api/settings/platform").catch(() => null) : Promise.resolve(null),
   ]);
   if (state.route.name !== "settings") return;
   const s = settingsData.settings;
+  const platform = platformData?.settings ?? null;
   state.settings = s;
+  state.platformSettings = platform;
   state.douyin = douyin;
   state.users = usersData.users ?? [];
   updateModelPill();
   const voiceCatalog = await loadVoiceCatalog(false, s.tts.provider, s.tts.model);
-  const redirectUri = s.douyin.effectiveRedirectUri;
+  const redirectUri = platform?.douyin?.effectiveRedirectUri ?? "";
   const videoChannels = s.videoGenChannels ?? [];
   const activeVideoChannel =
     videoChannels.find((item) => item.channel === s.videoGen.channel) ?? videoChannels[0];
@@ -2863,7 +3291,7 @@ async function renderSettings() {
     <section class="page-head">
       <p class="eyebrow">Settings</p>
       <h2>设置</h2>
-      <p>配置脚本模型、配音、AI 画面与抖音开放平台。保存后对新任务生效，正在运行的任务使用创建时的配置。${isAdmin ? "管理员可在下方添加用户并分配菜单权限。" : ""}</p>
+      <p>配置你自己的脚本模型、配音、AI 画面与口型 API Key；保存后对新任务生效，正在运行的任务使用创建时的配置。${isAdmin ? "邮件通道、注册开关与抖音应用凭证在下方「平台设置」里统一配置。" : ""}</p>
     </section>
 
     <div class="settings-layout">
@@ -3199,55 +3627,7 @@ async function renderSettings() {
         </div>
       </section>
 
-      <section class="card settings-card">
-        <div class="card-head">
-          <div><div class="card-title">抖音发布</div><div class="card-sub">个人号小程序投稿，或开放平台应用自动发布</div></div>
-          <span class="pill ${douyin?.mode === "miniapp" ? (douyin?.publicBaseUrlSet ? "pill-warning" : "pill-soft") : douyin?.authorized ? "pill-success" : douyin?.configured ? "pill-warning" : "pill-soft"}">${douyin?.mode === "miniapp" ? (douyin?.publicBaseUrlSet ? "小程序待发布" : "待配公网地址") : douyin?.authorized ? "已授权" : douyin?.configured ? "待授权" : "未配置"}</span>
-        </div>
-        <div class="card-body">
-          <div class="field">
-            <label for="douyin-mode">接入方式</label>
-            <select class="select" id="douyin-mode">
-              <option value="miniapp" ${s.douyin.mode === "miniapp" ? "selected" : ""}>个人号小程序投稿（人工确认发布）</option>
-              <option value="open-platform" ${s.douyin.mode !== "miniapp" ? "selected" : ""}>开放平台应用（企业/网站应用，自动发布）</option>
-            </select>
-          </div>
-          <div class="settings-note" id="douyin-miniapp-note" ${s.douyin.mode === "miniapp" ? "" : "hidden"}>${icon("info", 16)}<span>个人号小程序投稿：在抖音开放平台创建个人主体小程序，申请「短视频自主挂载」并绑定有效粉丝超过 500 的普通抖音号。成片先下载到手机相册，再在小程序里选择视频、由抖音发布器确认发布；不需要 client_key / client_secret，也不是服务端静默发布。仓库 <span class="mono">miniapp/</span> 目录是配套小程序页面。</span></div>
-          <div id="douyin-credentials-fields" ${s.douyin.mode === "miniapp" ? "hidden" : ""}>
-            <div class="field-grid-2">
-              <div class="field">
-                <label for="douyin-client-key">client_key</label>
-                <input class="input" id="douyin-client-key" value="${attr(s.douyin.clientKey)}" placeholder="开放平台应用的 client_key" />
-              </div>
-              <div class="field" id="douyin-scope-field">
-                <label for="douyin-scope">scope</label>
-                <input class="input" id="douyin-scope" value="${attr(s.douyin.scope)}" placeholder="user_info,video.create" />
-              </div>
-            </div>
-            ${secretField("douyin-client-secret", "client_secret", { set: s.douyin.clientSecretSet, hint: s.douyin.clientSecretHint })}
-          </div>
-          <div id="douyin-open-platform-fields" ${s.douyin.mode === "miniapp" ? "hidden" : ""}>
-            <div class="field-grid-2">
-              <div class="field">
-                <label for="douyin-redirect-uri">回调地址 <span class="optional">留空使用默认</span></label>
-                <input class="input" id="douyin-redirect-uri" value="${attr(s.douyin.redirectUri)}" placeholder="${attr(redirectUri)}" />
-              </div>
-              <div class="field">
-                <label for="douyin-api-base">接口地址</label>
-                <input class="input" id="douyin-api-base" value="${attr(s.douyin.apiBaseUrl)}" />
-              </div>
-            </div>
-            <div class="settings-note">${icon("shield", 16)}<span>当前生效回调地址：<span class="mono">${esc(redirectUri)}</span> <button class="btn-link" type="button" data-copy="${attr(redirectUri)}">${icon("copy", 13)} 复制</button>。修改后请先保存，再发起授权。令牌只保存在本机 <span class="mono">.cache/douyin-token.json</span>。</span></div>
-          </div>
-          <div class="test-row">
-            <button class="btn btn-ghost btn-sm" type="button" data-test="douyin">测试发布配置</button>
-            <span class="test-result" id="test-douyin-result">测试使用已保存的配置</span>
-            ${s.douyin.mode !== "miniapp" && douyin?.configured ? `<button class="btn btn-ghost btn-sm" type="button" id="settings-connect-douyin">${icon("external", 15)} ${douyin.authorized ? "重新授权" : "授权抖音"}</button>` : ""}
-            ${s.douyin.mode !== "miniapp" && douyin?.authorized ? `<button class="btn btn-danger btn-sm" type="button" id="settings-disconnect-douyin">断开连接</button>` : ""}
-            <span class="hint">应用信息保存后生效</span>
-          </div>
-        </div>
-      </section>
+      ${isAdmin && platform ? platformCardHtml(platform, douyin) : platformReadonlyCardHtml()}
 
       ${isAdmin ? usersCardHtml() : ""}
 
@@ -3424,28 +3804,7 @@ async function renderSettings() {
       void testProvider(button.dataset.resume, button, { resumeTaskId: taskId });
     });
   }
-  const douyinModeSelect = document.getElementById("douyin-mode");
-  const syncDouyinMode = () => {
-    const miniapp = (douyinModeSelect?.value ?? "open-platform") === "miniapp";
-    const note = document.getElementById("douyin-miniapp-note");
-    const credentials = document.getElementById("douyin-credentials-fields");
-    const openFields = document.getElementById("douyin-open-platform-fields");
-    if (note) note.hidden = !miniapp;
-    if (credentials) credentials.hidden = miniapp;
-    if (openFields) openFields.hidden = miniapp;
-    const connect = document.getElementById("settings-connect-douyin");
-    const disconnect = document.getElementById("settings-disconnect-douyin");
-    if (connect) connect.hidden = miniapp;
-    if (disconnect) disconnect.hidden = miniapp;
-  };
-  douyinModeSelect?.addEventListener("change", syncDouyinMode);
-  syncDouyinMode();
-  document.getElementById("settings-connect-douyin")?.addEventListener("click", () => {
-    void connectDouyin();
-  });
-  document.getElementById("settings-disconnect-douyin")?.addEventListener("click", () => {
-    void disconnectDouyin();
-  });
+  if (isAdmin) bindPlatformSettings();
   for (const button of view.querySelectorAll("[data-copy]")) {
     button.addEventListener("click", () => {
       void copyText(button.dataset.copy);
@@ -3535,16 +3894,6 @@ function collectSettings() {
   const lipsyncKey = secret("lipsync-api-key");
   if (lipsyncKey !== undefined) lipsync.apiKey = lipsyncKey;
 
-  const douyin = {
-    mode: value("douyin-mode") || "open-platform",
-    clientKey: value("douyin-client-key").trim(),
-    redirectUri: value("douyin-redirect-uri").trim(),
-    scope: value("douyin-scope").trim(),
-    apiBaseUrl: value("douyin-api-base").trim(),
-  };
-  const clientSecret = secret("douyin-client-secret");
-  if (clientSecret !== undefined) douyin.clientSecret = clientSecret;
-
   return {
     script,
     tts,
@@ -3568,7 +3917,6 @@ function collectSettings() {
     materials: {
       allowUnmatched: checked("materials-unmatched"),
     },
-    douyin,
   };
 }
 
@@ -3763,6 +4111,7 @@ async function init() {
     showAuth("login", `无法读取登录状态：${error.message}`);
     return;
   }
+  state.registration = session.registration ?? state.registration;
   if (!session.authenticated) {
     showAuth(session.needsSetup ? "setup" : "login");
     return;

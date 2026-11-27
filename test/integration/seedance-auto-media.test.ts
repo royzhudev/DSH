@@ -128,14 +128,14 @@ test(
 
     const image = path.join(dir, "hero.png");
     await generateTestImage(image);
-    const library = new CastLibrary(config.castDir, silentLogger);
+    const session = await setupTestAdmin(app.url);
+    const library = new CastLibrary(path.join(config.castDir, "users", session.user.id), silentLogger);
     const hero = await library.add({
       kind: "character",
       name: "猪猪侠",
       description: "戴红色头盔的卡通角色",
       imagePath: image,
     });
-    const session = await setupTestAdmin(app.url);
     const publicHost = "220.168.101.242:8088";
     const response = await postJsonWithHost(
       new URL(app.url),
@@ -203,7 +203,7 @@ test(
       "自动生成公网链接后不应再提示纯文字生成",
     );
     const meta = JSON.parse(
-      await fs.readFile(path.join(config.outputDir, created.id, "job.json"), "utf8"),
+      await fs.readFile(path.join(config.outputDir, "users", session.user.id, created.id, "job.json"), "utf8"),
     ) as { publicBaseUrl?: string };
     assert.equal(meta.publicBaseUrl, "http://220.168.101.242:8088");
   },

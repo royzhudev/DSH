@@ -280,7 +280,11 @@ test(
     assert.equal(updated.settings.imageGen.apiKeySet, true);
     assert.equal(updated.settings.lipsync.enabled, false);
     assert.equal(updated.settings.lipsync.provider, "dashscope");
-    assert.equal(config.script.model, "ui-model");
+    // 个人设置写入用户自己的工作区，不再改动平台级 config。
+    const savedUserSettings = JSON.parse(
+      await fs.readFile(path.join(dir, "data", "users", session.user.id, "settings.json"), "utf8"),
+    ) as { script?: { model?: string } };
+    assert.equal(savedUserSettings.script?.model, "ui-model");
 
     const secretPut = await jsonRequest(request, `${app.url}/api/settings`, {
       script: { apiKey: "sk-test-abcdef" },

@@ -1697,6 +1697,22 @@ svg {
   align-items: start;
 }
 
+.settings-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--line);
+}
+
+.settings-divider + .card-title {
+  margin-top: -6px;
+}
+
+.platform-save-bar {
+  margin-top: 6px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
 .settings-note {
   display: flex;
   gap: 10px;
@@ -2073,6 +2089,16 @@ body.auth-locked .app-shell {
   border-radius: 10px;
   background: var(--danger-soft);
   color: var(--danger);
+  font-size: 12px;
+}
+
+.auth-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--muted-2);
   font-size: 12px;
 }
 

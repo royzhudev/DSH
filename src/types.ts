@@ -369,10 +369,35 @@ export interface DouyinSettings {
   apiBaseUrl: string;
 }
 
+/** 邮箱验证码的发件通道；凭据只保存在本机设置文件，绝不写入日志。 */
+export interface MailSettings {
+  enabled: boolean;
+  host: string;
+  port: number;
+  /** true 用 465 隐式 TLS；false 用 587 STARTTLS 或 25 明文。 */
+  secure: boolean;
+  /** 587 等端口要求 STARTTLS。 */
+  starttls: boolean;
+  user: string;
+  password?: string;
+  /** 发件地址；留空时使用账号本身。 */
+  from: string;
+  fromName: string;
+}
+
+/** 外部邮箱注册开关；关闭后只有管理员能创建账号。 */
+export interface RegistrationSettings {
+  enabled: boolean;
+  /** 允许注册的邮箱域名，空数组表示不限制。 */
+  allowedEmailDomains: string[];
+}
+
 export interface ServerSettings {
   host: string;
   port: number;
   maxUploadBytes: number;
+  /** 部署的公网地址，作为个人公网素材地址的默认值，例如 https://video.example.com。 */
+  publicBaseUrl: string;
 }
 
 /** 角色/道具参考图的文生图供应商；独立于视频模型，可单独填 Key。 */
@@ -409,6 +434,8 @@ export interface AppConfig {
   imageGen: ImageGenSettings;
   lipsync: LipsyncSettings;
   douyin: DouyinSettings;
+  mail: MailSettings;
+  registration: RegistrationSettings;
   server: ServerSettings;
 }
 

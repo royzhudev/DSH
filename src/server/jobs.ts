@@ -32,6 +32,15 @@ export interface JobVideoEditProvider {
   edit(request: VideoEditRequest): Promise<VideoEditResult>;
 }
 
+const JOB_DIR_PATTERN = /^\d{8}-\d{6}-[0-9a-z]{8}$/;
+
+export interface JobManagerOptions {
+  /** 按用户解析任务配置（用于重启后恢复历史任务）；取不到时回退基础配置。 */
+  configFor?: (userId: string) => AppConfig | undefined;
+  /** 服务启动时先迁移旧数据再恢复任务，构造后由调用方触发 restorePersisted。 */
+  skipRestore?: boolean;
+}
+
 export type VideoEditProviderFactory = (
   settings: AppConfig["videoGen"],
   logger: Logger,
@@ -48,6 +57,8 @@ export interface VideoEditState {
 
 export interface JobRecord {
   id: string;
+  /** 任务所属用户；列表、成片与素材访问都按它隔离。 */
+  userId: string;
   topic: string;
   options: JobOptions;
   state: JobState;
@@ -71,6 +82,7 @@ export interface JobRecord {
 interface PersistedJob {
   version: 1;
   id: string;
+  userId?: string;
   topic: string;
   options: JobOptions;
   state: JobState;
@@ -203,18 +215,30 @@ export class JobManager {
     private readonly videoEditFactory: VideoEditProviderFactory = (settings, logger) =>
       new DashScopeVideoEditProvider(settings, logger),
     private readonly publicMedia?: PublicMediaHost,
+    private readonly options: JobManagerOptions = {},
   ) {
+    if (!options.skipRestore) this.restorePersisted();
+  }
+
+  /** 幂等恢复历史任务；服务端在迁移完成后调用。 */
+  restorePersisted(): void {
     this.loadPersisted();
   }
 
-  create(topic: string, options: JobOptions = {}, publicBaseUrl?: string): JobRecord {
-    validateOptions(options, this.config);
-    const jobConfig = buildJobConfig(this.config, options);
+  /** 初始化后期才创建管理员（首次 setup）时，再扫一遍数据目录。 */
+  reloadPersisted(): void {
+    this.loadPersisted();
+  }
+
+  create(userId: string, config: AppConfig, topic: string, jobOptions: JobOptions = {}, publicBaseUrl?: string): JobRecord {
+    validateOptions(jobOptions, config);
+    const jobConfig = buildJobConfig(config, jobOptions);
     const id = createJobId();
     const record: JobRecord = {
       id,
+      userId,
       topic,
-      options,
+      options: jobOptions,
       state: "queued",
       progress: { stage: "queued", percent: 0, message: "等待执行" },
       createdAt: new Date().toISOString(),
@@ -235,8 +259,11 @@ export class JobManager {
     return this.jobs.get(id);
   }
 
-  list(): JobRecord[] {
-    return [...this.jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  /** 只返回该用户自己的任务；管理员也一样，避免越权查看他人素材。 */
+  list(userId: string): JobRecord[] {
+    return [...this.jobs.values()]
+      .filter((record) => record.userId === userId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   serialize(record: JobRecord, detail = false): SerializedJob {
@@ -391,14 +418,15 @@ export class JobManager {
     }
   }
 
-  private jobDir(id: string): string {
-    return path.join(this.config.outputDir, id);
+  private jobDir(record: JobRecord): string {
+    return path.join(record.config.outputDir, record.id);
   }
 
   private persistedMeta(record: JobRecord): PersistedJob {
     return {
       version: 1,
       id: record.id,
+      userId: record.userId,
       topic: record.topic,
       options: record.options,
       state: record.state,
@@ -415,7 +443,7 @@ export class JobManager {
 
   /** 原子写入 job.json，避免进程在写入中途退出留下半个文件。 */
   private async persist(record: JobRecord): Promise<void> {
-    const dir = this.jobDir(record.id);
+    const dir = this.jobDir(record);
     await fsp.mkdir(dir, { recursive: true });
     const target = path.join(dir, "job.json");
     const temp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
@@ -443,9 +471,10 @@ export class JobManager {
    * 运行中/排队中的任务在进程重启后不可能继续，标记为中断，避免页面一直转圈。
    */
   private loadPersisted(): void {
+    const root = this.config.outputDir;
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(this.config.outputDir, { withFileTypes: true });
+      entries = fs.readdirSync(root, { withFileTypes: true });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") this.logger.warn(`读取历史任务目录失败：${toErrorMessage(error)}`);
@@ -453,16 +482,61 @@ export class JobManager {
     }
     let restored = 0;
     for (const entry of entries) {
-      if (!entry.isDirectory() || !/^\d{8}-\d{6}-[0-9a-z]{8}$/.test(entry.name)) continue;
-      const record = this.readPersisted(entry.name, path.join(this.config.outputDir, entry.name));
-      if (!record) continue;
-      this.jobs.set(record.id, record);
-      restored += 1;
+      if (!entry.isDirectory()) continue;
+      if (entry.name === "users") {
+        restored += this.loadPersistedUsers(path.join(root, entry.name));
+        continue;
+      }
+      if (JOB_DIR_PATTERN.test(entry.name)) {
+        // 旧布局（多租户迁移前）任务没有归属信息，迁移未完成时不猜测用户，保留文件不恢复。
+        this.logger.warn(`发现未归属的历史任务目录，已跳过：${entry.name}`);
+      }
     }
     if (restored > 0) this.logger.info(`已恢复 ${restored} 条历史任务记录`);
   }
 
-  private readPersisted(id: string, dir: string): JobRecord | undefined {
+  private loadPersistedUsers(usersRoot: string): number {
+    let userDirs: fs.Dirent[];
+    try {
+      userDirs = fs.readdirSync(usersRoot, { withFileTypes: true });
+    } catch (error) {
+      this.logger.warn(`读取用户任务目录失败：${toErrorMessage(error)}`);
+      return 0;
+    }
+    let restored = 0;
+    for (const userDir of userDirs) {
+      if (!userDir.isDirectory()) continue;
+      let config: AppConfig;
+      try {
+        config = this.options.configFor?.(userDir.name) ?? this.config;
+      } catch (error) {
+        this.logger.warn(`用户 ${userDir.name} 配置读取失败，历史任务不恢复：${toErrorMessage(error)}`);
+        continue;
+      }
+      let jobs: fs.Dirent[];
+      try {
+        jobs = fs.readdirSync(path.join(usersRoot, userDir.name), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const job of jobs) {
+        if (!job.isDirectory() || !JOB_DIR_PATTERN.test(job.name)) continue;
+        const dir = path.join(usersRoot, userDir.name, job.name);
+        const record = this.readPersisted(job.name, dir, userDir.name, config);
+        if (!record) continue;
+        this.jobs.set(record.id, record);
+        restored += 1;
+      }
+    }
+    return restored;
+  }
+
+  private readPersisted(
+    id: string,
+    dir: string,
+    userId: string,
+    config: AppConfig,
+  ): JobRecord | undefined {
     const resultPath = path.join(dir, "result.json");
     let result: PipelineResult | undefined;
     try {
@@ -538,6 +612,7 @@ export class JobManager {
 
     return {
       id,
+      userId: meta?.userId ?? userId,
       topic: meta?.topic ?? result?.topic ?? id,
       options: (meta?.options && typeof meta.options === "object" ? meta.options : {}) as JobOptions,
       state,
@@ -550,7 +625,7 @@ export class JobManager {
       ...(errorStage ? { errorStage } : {}),
       ...(edit ? { edit } : {}),
       ...(meta?.publicBaseUrl ? { publicBaseUrl: meta.publicBaseUrl } : {}),
-      config: this.config,
+      config,
     };
   }
 
