@@ -315,7 +315,12 @@ export interface LipsyncProvider {
  * 画面模型渠道：选中渠道后地址、模型、路径等参数由程序自动生成，
  * 用户只需要填写对应平台的 API Key。custom 保留给其他聚合平台/自建网关。
  */
-export type VideoGenChannel = "none" | "bailian-wan3" | "aggregator-seedance2" | "airongce-seedance" | "custom";
+export type VideoGenChannel =
+  | "none"
+  | "bailian-wan3"
+  | "aggregator-seedance2"
+  | "airongce-seedance"
+  | "custom";
 
 export interface VideoGenSettings {
   channel: VideoGenChannel;
@@ -325,7 +330,7 @@ export interface VideoGenSettings {
    * 接口协议：auto 按服务地址判断（DashScope 用 dashscope，其他用 generic）。
    * dashscope = 阿里百炼异步视频接口（提交带 X-DashScope-Async，任务在 output.task_id）。
    * seedance = One API Lumi（Nexus）的 Seedance 视频接口（content 数组提交 + 任务轮询）。
-   * airongce = AIRONGCE 的 /v1/videos 扁平接口（images / first_frame_url + 轮询后带鉴权下载）。
+   * airongce = AIRONGCE 的扁平 Seedance 接口（images/first_frame_url + /content 下载）。
    */
   protocol: "auto" | "dashscope" | "generic" | "seedance" | "airongce";
   apiKey?: string;

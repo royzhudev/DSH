@@ -198,11 +198,11 @@ cp video-agent.config.example.json video-agent.config.json
 
 ### AI 画面生成
 
-`videoGen.channel` 支持 `bailian-wan3`（默认，阿里百炼 Wan 3.0）、`aggregator-seedance2`（One API Lumi 的 Seedance 2.5 / 2.0 / Fast / Mini）、`airongce-seedance`（AIRONGCE 的 Seedance 2.0 / Fast / Mini / 2.5）、`custom`（自定义 HTTP 网关）和 `none`。在设置页选中渠道后，模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成，**用户只需要填写 API Key（Seedance 渠道再选一个模型）**；只有选 `custom` 时才需要手填其余参数。切到新渠道后请换填对应平台的 Key。
+`videoGen.channel` 支持 `bailian-wan3`（默认，阿里百炼 Wan 3.0）、`aggregator-seedance2`（One API Lumi 的 Seedance 2.5 / 2.0 / Fast / Mini）、`airongce-seedance`（AIRONGCE 的 Seedance 2.5 / 2.0 / Fast / Mini）、`custom`（自定义 HTTP 网关）和 `none`。在设置页选中渠道后，模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成，**用户只需要填写 API Key（Seedance 渠道再选一个模型）**；只有选 `custom` 时才需要手填其余参数。切到新渠道后请换填对应平台的 Key。
 
 `videoGen.provider` 默认为 `http`，并预置阿里百炼（DashScope）的 Wan 视频模型：服务地址 `https://dashscope.aliyuncs.com`、模型 `wan3.0-video`、提交路径 `/api/v1/services/aigc/video-generation/video-synthesis`、查询路径 `/api/v1/tasks/{id}`。**API Key 需要自己填写**（设置页「AI 画面生成」的 API Key，或 `VIDEOGEN_API_KEY`）；没有 Key 时任务会在本地预检阶段直接报错，不会发起付费请求。不需要 AI 画面时把渠道改为「不使用」。
 
-`protocol` 决定请求格式：`auto`（默认）按服务地址与模型名判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`protocol=seedance` 或模型名包含 `Seedance` 时用 One API Lumi 协议，AIRONGCE 的 `175.6.32.68:8081` 用 `airongce` 协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance`、`airongce` 或 `generic`。
+`protocol` 决定请求格式：`auto`（默认）按服务地址与模型名判断——`dashscope.aliyuncs.com` 用阿里百炼异步接口，`175.6.32.68:8081` 用 AIRONGCE 协议，`protocol=seedance` 或模型名包含 `Seedance` 时用 One API Lumi 协议，其他地址用下面的通用 HTTP 契约；也可以显式设为 `dashscope`、`seedance`、`airongce` 或 `generic`。
 
 服务地址填的是阿里百炼（`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com`）时会自动纠正成异步写法：协议若是「通用 HTTP 契约」会改回 `dashscope`，提交/查询路径还是通用默认值（`/v1/videos/generations`）也会换成上面的百炼路径；只填域名（少了 `https://`）或把完整接口地址粘进「服务地址」也会被纠正。这样就不会出现平台报 `AccessDenied: current user api does not support synchronous calls`（该接口只支持异步调用，需要 `X-DashScope-Async: enable`）。
 
@@ -234,6 +234,25 @@ GET https://nexus.cytain.com/api/v3/contents/generations/tasks/{task_id}
 ```
 
 支持 `doubao-seedance-2-5-260628`（4–30 秒、最高 1080p）、`doubao-seedance-2-0-260128`（4–15 秒、最高 4k）、`doubao-seedance-2-0-fast-260128` 和 `doubao-seedance-2-0-mini-260615`（4–15 秒、最高 720p），设置页可切换。提交返回任务 `id`；轮询状态为 `queued` / `running` / `succeeded` / `failed` / `cancelled` / `expired`，成功后取 `content.video_url`。比例支持 `adaptive/21:9/16:9/4:3/1:1/3:4/9:16`，程序默认竖屏 `9:16`、`720p`。
+
+AIRONGCE · Seedance（`protocol=airongce`）：
+
+```http
+POST http://175.6.32.68:8081/v1/videos
+Authorization: Bearer <API_TOKEN>
+
+{"model": "seedance2.5", "prompt": "...", "duration": 5, "resolution": "720p", "ratio": "9:16", "images": ["https://..."]}
+
+GET http://175.6.32.68:8081/v1/videos/{task_id}
+→ {"id": "task_xxx", "status": "SUCCESS"}
+
+GET http://175.6.32.68:8081/v1/videos/{task_id}/content
+Authorization: Bearer <API_TOKEN>
+```
+
+支持 `Seedance 2.0`（4–15 秒、480p/720p/1080p）、`seedance2.0-fast` / `seedance2.0-mini`（4–15 秒、480p/720p）和 `seedance2.5`（4–30 秒、480p/720p/1080p），设置页可切换。提交时 `images`（参考图）与 `first_frame_url`（首帧）互斥，程序有参考图时优先保证人物一致性；有首帧时比例用 `adaptive`，否则竖屏 `9:16`。查询状态为 `queued` / `NOT_START` / `SUBMITTED` / `IN_PROGRESS` / `SUCCESS` / `FAILURE`；成功后从 `/v1/videos/{id}/content` 下载，下载请求会带同一个 Bearer 令牌。按平台文档，`images`、首帧和参考视频都必须是**公网 HTTPS URL**，不接受 Base64，本地参考图会走与 One API Lumi 相同的签名公网链接，纯本机访问且未配置公网地址时按文字生成。
+
+> **安全提示**：AIRONGCE 文档目前只提供 `http://175.6.32.68:8081`，API 令牌会以明文经过网络传输，存在被窃听的风险。建议只在可信任网络中临时使用；若该平台后续提供 HTTPS 或你有自建 HTTPS 网关，可在 `custom` 渠道或高级设置里改地址。设置页选中该渠道时也会显示这条提示。
 
 注意：One API 的 OpenAI 兼容前缀 `/v1` 不适用于 Seedance 任务接口（拼成 `/v1/api/v3/...` 会 404）；程序会自动把 `https://nexus.cytain.com/v1` 收回域名。该接口要求所有图片是**公网 HTTP(S) URL**，不接受 Base64 data URL 或 `asset://`。本程序的角色/道具图保存在本地；通过公网域名或公网 IP 访问控制台时，程序会自动识别当前访问地址，把角色/道具图以带签名的临时链接（默认 24 小时过期，只对角色库图片生效）提供给平台，含参考图的分镜可直接图生视频，不需要手填地址。仅在 localhost/局域网访问且未配置公网地址时，才会按纯文字生成并在任务告警里说明。
 

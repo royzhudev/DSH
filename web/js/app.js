@@ -1252,7 +1252,8 @@ function scriptSectionHtml(job) {
   );
   const videoEditReady = videoChannel
     ? videoChannel.editSupported
-    : state.settings?.videoGen?.channel !== "aggregator-seedance2";
+    : state.settings?.videoGen?.channel !== "aggregator-seedance2" &&
+        state.settings?.videoGen?.channel !== "airongce-seedance";
   return `<section class="card mt-24">
     <div class="card-head">
       <div><div class="card-title">分镜脚本</div><div class="card-sub">${esc(job.script?.title ?? job.topic)}</div></div>
@@ -2959,7 +2960,7 @@ async function renderSettings() {
           <span class="pill ${s.videoGen.provider === "http" ? "pill-brand" : "pill-soft"}">${s.videoGen.provider === "http" ? (s.videoGen.apiKeySet ? "已启用" : "待填 API Key") : "未启用"}</span>
         </div>
         <div class="card-body">
-          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；One API Lumi 走 <code>Seedance 2.5 / 2.0</code> 的 <code>/api/v3/contents/generations/tasks</code> 任务接口；AIRONGCE 走 <code>Seedance 2.0 / 2.5</code> 的 <code>/v1/videos</code> 任务接口。<strong>One API Lumi / AIRONGCE 只接受公网参考图</strong>（AIRONGCE 要求 HTTPS）：通过公网域名/IP 访问本控制台时会自动识别地址，把本地角色/道具图转成带令牌的只读链接；也可在下方手动填写公网素材地址。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
+          <div class="settings-note">${icon("info", 16)}<span><strong>选择渠道后只需要填 API Key</strong>：模型、接口地址、提交/查询路径、轮询与超时参数会按渠道自动生成。阿里百炼走 <code>wan3.0-video</code> 异步视频接口；One API Lumi 走 <code>Seedance 2.5 / 2.0</code> 的 <code>/api/v3/contents/generations/tasks</code> 任务接口。<strong>One API Lumi / AIRONGCE 只接受公网参考图</strong>：通过公网域名/IP 访问本控制台时会自动识别地址，把本地角色/道具图转成带令牌的只读链接；也可在下方手动填写公网素材地址。没有 Key 时任务会在本地预检阶段报错，不会发起付费请求；切换渠道后请换填对应平台的 Key。</span></div>
           <div class="field-grid-2">
             <div class="field">
               <label for="videogen-channel">模型渠道</label>
@@ -2997,7 +2998,7 @@ async function renderSettings() {
           <div class="field" id="videogen-public-base-wrap" ${activeVideoChannel?.referenceImagesSupported === false ? "" : "hidden"}>
             <label for="videogen-public-base-url">公网素材地址 <span class="optional">通常不用填</span></label>
             <input class="input" id="videogen-public-base-url" value="${attr(s.videoGen.publicBaseUrl ?? "")}" placeholder="https://video.example.com" />
-            <span class="hint">One API Lumi 和 AIRONGCE 只能读取公网图片（AIRONGCE 要求 HTTPS）。通过公网域名/IP 访问本控制台时会自动使用当前地址，一般不用填；填了则优先使用这里配置的地址。仅本机访问且留空时，含参考图的镜头会按纯文字生成。</span>
+            <span class="hint">One API Lumi / AIRONGCE 只能读取公网图片（AIRONGCE 必须是 HTTPS）。通过公网域名/IP 访问本控制台时会自动使用当前地址，一般不用填；填了则优先使用这里配置的地址。仅本机访问且留空时，含参考图的镜头会按纯文字生成。</span>
           </div>
           <div id="videogen-advanced" ${activeVideoChannel?.channel === "custom" ? "" : "hidden"}>
             <div class="field-grid-3">
@@ -3037,10 +3038,11 @@ async function renderSettings() {
                     ["auto", "自动（按服务地址）"],
                     ["dashscope", "阿里百炼 DashScope"],
                     ["seedance", "One API Lumi Seedance"],
+                    ["airongce", "AIRONGCE Seedance"],
                     ["generic", "通用 HTTP 契约"],
                   ], s.videoGen.protocol ?? "auto")}
                 </select>
-                <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送；One API Lumi Seedance 会用 <code>content[]</code>（文字 + 公网图片）提交，并轮询 <code>content.video_url</code>。</div>
+                <div class="field-hint">服务地址或提交路径是阿里百炼时默认按异步接口发送；One API Lumi Seedance 会用 <code>content[]</code>（文字 + 公网图片）提交，并轮询 <code>content.video_url</code>；AIRONGCE 用扁平的 <code>images</code>/<code>first_frame_url</code> 提交，完成后从 <code>/v1/videos/{id}/content</code> 下载。</div>
               </div>
             </div>
             <div class="field-grid-3">

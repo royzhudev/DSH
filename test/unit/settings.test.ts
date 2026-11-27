@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig } from "../../src/config.js";
+import {
+  AIRONGCE_VIDEO_BASE_URL,
+  AIRONGCE_VIDEO_POLL_PATH,
+  AIRONGCE_VIDEO_SUBMIT_PATH,
+  loadConfig,
+} from "../../src/config.js";
 import { AppError } from "../../src/errors.js";
 import { silentLogger } from "../../src/logger.js";
 import { effectiveRedirectUri, SettingsStore } from "../../src/server/settings.js";
@@ -165,27 +170,26 @@ test("SettingsStore 选中 AIRONGCE 渠道后只填 API Key，模型可切换并
   assert.equal(config.videoGen.channel, "airongce-seedance");
   assert.equal(config.videoGen.provider, "http");
   assert.equal(config.videoGen.protocol, "airongce");
-  assert.equal(config.videoGen.baseUrl, "http://175.6.32.68:8081");
-  assert.equal(config.videoGen.model, "seedance2.0-fast");
-  assert.equal(config.videoGen.submitPath, "/v1/videos");
-  assert.equal(config.videoGen.pollPath, "/v1/videos/{id}");
+  assert.equal(config.videoGen.baseUrl, AIRONGCE_VIDEO_BASE_URL);
+  assert.equal(config.videoGen.model, "seedance2.0-mini");
+  assert.equal(config.videoGen.submitPath, AIRONGCE_VIDEO_SUBMIT_PATH);
+  assert.equal(config.videoGen.pollPath, AIRONGCE_VIDEO_POLL_PATH);
   assert.equal(config.videoGen.resultPath, "");
-  assert.equal(config.videoGen.pollIntervalMs, 10_000);
   assert.equal(config.videoGen.apiKey, "sk-airongce");
-  assert.equal(saved.videoGen.model, "seedance2.0-fast");
+  assert.equal(saved.videoGen.apiKeySet, true);
   const airongce = saved.videoGenChannels.find((item) => item.channel === "airongce-seedance");
+  assert.equal(airongce?.fields?.protocol, "airongce");
   assert.equal(airongce?.models?.length, 4);
-  assert.equal(airongce?.fields?.model, "seedance2.0-fast");
 
   await store.update({
-    videoGen: { channel: "airongce-seedance", model: "seedance2.5" },
+    videoGen: { channel: "airongce-seedance", model: "Seedance 2.0" },
   });
-  assert.equal(config.videoGen.model, "seedance2.5");
+  assert.equal(config.videoGen.model, "Seedance 2.0");
   const reloaded = loadConfig({ cwd: dir, env: {}, settingsPath: config.settingsFile });
   assert.equal(reloaded.videoGen.channel, "airongce-seedance");
+  assert.equal(reloaded.videoGen.model, "Seedance 2.0");
   assert.equal(reloaded.videoGen.protocol, "airongce");
-  assert.equal(reloaded.videoGen.model, "seedance2.5");
-  assert.equal(reloaded.videoGen.baseUrl, "http://175.6.32.68:8081");
+  assert.equal(reloaded.videoGen.baseUrl, AIRONGCE_VIDEO_BASE_URL);
 });
 
 test("SettingsStore 保存公网素材地址时生成随机令牌，清除地址时一并清除", async () => {
